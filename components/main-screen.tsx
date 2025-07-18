@@ -67,7 +67,7 @@ export function MainScreen() {
             <CardTitle>{t("home.sendMoney")}</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground">Send money to friends, family, or businesses instantly.</p>
+            <p className="text-sm text-muted-foreground">{t("home.sendMoneyDesc")}</p>
           </CardContent>
           <CardFooter>
             <Button className="w-full" onClick={() => setShowSendDialog(true)}>
@@ -81,7 +81,7 @@ export function MainScreen() {
             <CardTitle>{t("home.requestMoney")}</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground">Request money from friends, family, or customers.</p>
+            <p className="text-sm text-muted-foreground">{t("home.requestMoneyDesc")}</p>
           </CardContent>
           <CardFooter>
             <Button className="w-full" onClick={() => setShowRequestDialog(true)}>
@@ -95,7 +95,7 @@ export function MainScreen() {
             <CardTitle>{t("home.addFunds")}</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground">Add funds to your account from a bank or card.</p>
+            <p className="text-sm text-muted-foreground">{t("home.addFundsDesc")}</p>
           </CardContent>
           <CardFooter>
             <Button className="w-full" onClick={() => setShowAddFundsDialog(true)}>
@@ -109,7 +109,7 @@ export function MainScreen() {
             <CardTitle>{t("assets.tokenize")}</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground">Convert physical assets into digital tokens.</p>
+            <p className="text-sm text-muted-foreground">{t("home.tokenizeDesc")}</p>
           </CardContent>
           <CardFooter>
             <Button className="w-full" onClick={() => setShowTokenizeDialog(true)}>

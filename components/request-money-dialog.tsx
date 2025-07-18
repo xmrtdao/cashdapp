@@ -56,14 +56,14 @@ export function RequestMoneyDialog({ open, onOpenChange }: RequestMoneyDialogPro
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
           <DialogTitle>{t("home.requestMoney")}</DialogTitle>
-          <DialogDescription>Request money from your contacts.</DialogDescription>
+          <DialogDescription>{t("home.requestMoneyDesc")}</DialogDescription>
         </DialogHeader>
 
         {step === 1 && (
           <>
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
-                <Label htmlFor="from">From</Label>
+                <Label htmlFor="from">{t("dialog.from")}</Label>
                 <select
                   id="from"
                   className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
@@ -72,7 +72,7 @@ export function RequestMoneyDialog({ open, onOpenChange }: RequestMoneyDialogPro
                   required
                 >
                   <option value="" disabled>
-                    Select a contact
+                    {t("dialog.selectContact")}
                   </option>
                   {contacts.map((contact) => (
                     <option key={contact.id} value={contact.id}>
@@ -82,7 +82,7 @@ export function RequestMoneyDialog({ open, onOpenChange }: RequestMoneyDialogPro
                 </select>
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="amount">Amount ($)</Label>
+                <Label htmlFor="amount">{t("dialog.amount")}</Label>
                 <Input
                   id="amount"
                   type="number"
@@ -95,12 +95,12 @@ export function RequestMoneyDialog({ open, onOpenChange }: RequestMoneyDialogPro
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="description">Description (Optional)</Label>
+                <Label htmlFor="description">{t("dialog.description")}</Label>
                 <Input
                   id="description"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  placeholder="What's it for?"
+                  placeholder={t("dialog.whatFor")}
                 />
               </div>
             </div>
@@ -120,10 +120,14 @@ export function RequestMoneyDialog({ open, onOpenChange }: RequestMoneyDialogPro
             <div className="grid gap-4 py-4">
               <div className="text-center space-y-2">
                 <p className="text-lg font-medium">
-                  Request ${Number.parseFloat(amount).toFixed(2)} from{" "}
-                  {contacts.find((c) => c.id === selectedContact)?.name}
+                  {t("dialog.requestFrom")} {contacts.find((c) => c.id === selectedContact)?.name}
+                  {" "}{t("dialog.amount")} {Number.parseFloat(amount).toFixed(2)}
                 </p>
-                {description && <p className="text-sm text-muted-foreground">For: {description}</p>}
+                {description && (
+                  <p className="text-sm text-muted-foreground">
+                    {t("dialog.for")} {description}
+                  </p>
+                )}
               </div>
             </div>
             <DialogFooter>
@@ -134,7 +138,7 @@ export function RequestMoneyDialog({ open, onOpenChange }: RequestMoneyDialogPro
                 {isLoading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Requesting...
+                    {t("common.requesting")}
                   </>
                 ) : (
                   t("common.confirm")

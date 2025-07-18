@@ -55,14 +55,14 @@ export function AddFundsDialog({ open, onOpenChange }: AddFundsDialogProps) {
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
           <DialogTitle>{t("home.addFunds")}</DialogTitle>
-          <DialogDescription>Add funds to your account from a bank or card.</DialogDescription>
+          <DialogDescription>{t("home.addFundsDesc")}</DialogDescription>
         </DialogHeader>
 
         {step === 1 && (
           <>
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
-                <Label htmlFor="amount">Amount ($)</Label>
+                <Label htmlFor="amount">{t("dialog.amount")}</Label>
                 <Input
                   id="amount"
                   type="number"
@@ -75,15 +75,15 @@ export function AddFundsDialog({ open, onOpenChange }: AddFundsDialogProps) {
                 />
               </div>
               <div className="grid gap-2">
-                <Label>Source</Label>
+                <Label>{t("dialog.source")}</Label>
                 <RadioGroup value={source} onValueChange={setSource}>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="bank" id="bank" />
-                    <Label htmlFor="bank">Bank Account</Label>
+                    <Label htmlFor="bank">{t("dialog.bankAccount")}</Label>
                   </div>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="card" id="card" />
-                    <Label htmlFor="card">Credit Card</Label>
+                    <Label htmlFor="card">{t("dialog.creditCard")}</Label>
                   </div>
                 </RadioGroup>
               </div>
@@ -104,9 +104,13 @@ export function AddFundsDialog({ open, onOpenChange }: AddFundsDialogProps) {
             <div className="grid gap-4 py-4">
               <div className="text-center space-y-2">
                 <p className="text-lg font-medium">
-                  Add ${Number.parseFloat(amount).toFixed(2)} from {source === "bank" ? "Bank Account" : "Credit Card"}
+                  {t("dialog.addFrom")}
+                  {' '}
+                  {Number.parseFloat(amount).toFixed(2)}
+                  {' '}
+                  {t(source === "bank" ? "dialog.bankAccount" : "dialog.creditCard")}
                 </p>
-                <p className="text-sm text-muted-foreground">Funds will be available immediately in your account.</p>
+                <p className="text-sm text-muted-foreground">{t("dialog.fundsAvailable")}</p>
               </div>
             </div>
             <DialogFooter>
@@ -117,7 +121,7 @@ export function AddFundsDialog({ open, onOpenChange }: AddFundsDialogProps) {
                 {isLoading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Processing...
+                    {t("common.processing")}
                   </>
                 ) : (
                   t("common.confirm")

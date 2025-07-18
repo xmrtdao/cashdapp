@@ -25,12 +25,12 @@ export function TerminalScreen() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Payment Details</CardTitle>
-          <CardDescription>Enter the payment information</CardDescription>
+          <CardTitle>{t("terminal.paymentDetails")}</CardTitle>
+          <CardDescription>{t("terminal.enterPaymentInfo")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-2">
-            <Label htmlFor="amount">Amount ($)</Label>
+            <Label htmlFor="amount">{t("terminal.amount")}</Label>
             <Input
               id="amount"
               type="number"
@@ -42,12 +42,12 @@ export function TerminalScreen() {
             />
           </div>
           <div className="grid gap-2">
-            <Label htmlFor="description">Description (Optional)</Label>
+            <Label htmlFor="description">{t("terminal.description")}</Label>
             <Input
               id="description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="What's it for?"
+              placeholder={t("terminal.whatFor")}
             />
           </div>
         </CardContent>
@@ -55,10 +55,10 @@ export function TerminalScreen() {
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="grid grid-cols-4 mb-4">
-          <TabsTrigger value="qrcode">QR Code</TabsTrigger>
-          <TabsTrigger value="nfc">NFC</TabsTrigger>
-          <TabsTrigger value="bluetooth">Bluetooth</TabsTrigger>
-          <TabsTrigger value="stripe">Stripe</TabsTrigger>
+          <TabsTrigger value="qrcode">{t("terminal.qrCode")}</TabsTrigger>
+          <TabsTrigger value="nfc">{t("terminal.nfc")}</TabsTrigger>
+          <TabsTrigger value="bluetooth">{t("terminal.bluetooth")}</TabsTrigger>
+          <TabsTrigger value="stripe">{t("terminal.stripe")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="qrcode" className="space-y-4">

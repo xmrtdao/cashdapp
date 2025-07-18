@@ -10,6 +10,7 @@ import { useToast } from "@/hooks/use-toast"
 import { loadStripe } from "@stripe/stripe-js"
 import { Elements, PaymentElement, useStripe, useElements } from "@stripe/react-stripe-js"
 import { UserCircle, Activity, Coins, Settings, BanknoteIcon as Bank, Terminal } from "lucide-react"
+import { useLanguage } from "./language-provider"
 
 // Initialize Stripe with the existing environment variable
 const stripePromise = loadStripe(process.env.STRIPE_PUBLISHABLE_KEY || "")
@@ -27,6 +28,7 @@ function CheckoutForm({ amount, crypto, onBack }: StripeTerminalProps) {
   const [loading, setLoading] = useState(false)
   const [success, setSuccess] = useState(false)
   const { toast } = useToast()
+  const { t } = useLanguage()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -121,11 +123,11 @@ function CheckoutForm({ amount, crypto, onBack }: StripeTerminalProps) {
 
       <div className="flex flex-col space-y-2">
         <Button type="submit" className="w-full" disabled={!stripe || loading}>
-          {loading ? "Processing..." : `Pay $${amount}`}
+          {loading ? t("common.processing") : `Pay $${amount}`}
         </Button>
         <Button type="button" variant="outline" className="w-full" onClick={onBack} disabled={loading}>
           <ArrowLeft className="mr-2 h-4 w-4" />
-          Cancel
+          {t("common.cancel")}
         </Button>
       </div>
     </form>
