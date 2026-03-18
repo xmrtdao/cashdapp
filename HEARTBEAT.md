@@ -6,6 +6,7 @@ Check session token usage. If `inputTokens / contextTokens > 0.25` (i.e., >~262K
 
 ## Tool Configuration Check (run every heartbeat)
 Check and validate that all configured tools are available and functioning correctly. Report any missing or malfunctioning tools.
+* Web Search is Failing
 
 ## Agent Focus
 Refer to AGENTS.md for the assigned agent's current focus.
