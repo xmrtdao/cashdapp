@@ -1,0 +1,5 @@
+# What is your focus?
+
+1: Access https://vawouugtzwmejxqkeqqj.supabase.co/functions/v1/google-drive-deliverables with more details
+1. The current credentials are not working. AGENT, update it with keys
+2. Need to list the things that you can be so you have information to try and set the things

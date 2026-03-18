@@ -1,0 +1,23 @@
+Here is the updated command list
+- read
+- write
+- edit
+- exec
+- process
+- web_search
+- web_fetch
+- browser
+- canvas
+- nodes
+- message
+- agents_list
+- sessions_list
+- sessions_history
+- sessions_send
+- sessions_spawn
+- subagents
+- session_status
+- memory_get
+- memory_search
+- tts
+- eliza_relay

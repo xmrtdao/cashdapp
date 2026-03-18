@@ -2,8 +2,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { join } from "path";
+import { readFileSync, writeFileSync, existsSync } from "fs";
+import { join, resolve } from "path";
+import { fileURLToPath } from "url";
+import { dirname } from "path";
+import { listFilesRecursive, searchFiles, readFileChunked } from "./fileTools.mjs";
+import { sendMessageToAgent, getTaskDetails, checkTaskStatus } from "./commTools.mjs";
+import { updateAgentConfig, storeCredential, listSkills } from "./configTools.mjs";
+import { summarizeContent, recallMemory, fetchExternalKnowledge } from "./memoryTools.mjs";
+import { logExecutionStep, introspectTools, getRuntimeConsole } from "./debugTools.mjs";
+import { monitorAgentHealth, runAutomatedTests } from "./efficiencyTools.mjs";
+import { syncVSCO, googleSuiteAction, githubAction, updatePermissions } from "./integrationTools.mjs";
 
 const API = "https://www.moltbook.com/api/v1";
 let apiKey;
@@ -419,7 +428,7 @@ server.tool("moltbook_search", "Search posts, agents, and submolts", {
     text += "Agents:\n" + r.moltys.map(a => `  @${a.name}: ${sanitize(a.description) || ""}`).join("\n") + "\n\n";
   }
   if (r.submolts?.length) {
-    text += "Submolts:\n" + r.submolts.map(s => `  m/${s.name}: ${s.display_name}`).join("\n") + "\n";
+    text += "Submolts:\n" + r.submolts.map(s => `m/${s.name}: ${s.display_name}`).join("\n") + "\n";
   }
   return { content: [{ type: "text", text: text || "No results." }] };
 });
@@ -1143,6 +1152,475 @@ server.tool("moltbook_import", "Import engagement state from another agent (addi
   const stats = Object.entries(added).map(([k, v]) => `${k}: +${v}`).join(", ");
   return { content: [{ type: "text", text: `Import complete. Added: ${stats}` }] };
 });
+
+// ── File System Tools (Enhanced) ─────────────────────────────────
+
+server.tool(
+    "fs_list_recursive",
+    "Recursively list all files in the workspace (ignores node_modules, .git)",
+    {
+        directory: z.string().optional().describe("Directory to start from (relative to workspace root)")
+    },
+    async ({ directory }) => {
+        const root = resolve(process.cwd());
+        const startDir = directory ? join(root, directory) : root;
+        try {
+            const files = await listFilesRecursive(startDir, root);
+            return {
+                content: [{ type: "text", text: JSON.stringify(files, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "fs_search",
+    "Search for text within files across the workspace",
+    {
+        query: z.string().describe("Text to search for"),
+        directory: z.string().optional().describe("Directory to search in"),
+        recursive: z.boolean().optional().default(true)
+    },
+    async ({ query, directory, recursive }) => {
+        const root = resolve(process.cwd());
+        const startDir = directory ? join(root, directory) : root;
+        try {
+            const results = await searchFiles(startDir, query, { recursive });
+            return {
+                content: [{ type: "text", text: JSON.stringify(results, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "fs_read_full",
+    "Read a file's content (handles arbitrary length via chunking)",
+    {
+        path: z.string().describe("Path to the file"),
+        start: z.number().optional().default(0),
+        length: z.number().optional().default(32768)
+    },
+    async ({ path, start, length }) => {
+        const fullPath = resolve(path);
+        try {
+            const result = await readFileChunked(fullPath, { start, length });
+            return {
+                content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+// ── Communication Tools ──────────────────────────────────────────
+
+server.tool(
+    "agent_send_message",
+    "Send a message to another agent via the system inbox",
+    {
+        toAgent: z.string().describe("Target agent name (e.g., 'Eliza', 'OpenClaw')"),
+        message: z.string().describe("Message content")
+    },
+    async ({ toAgent, message }) => {
+        try {
+            await sendMessageToAgent(toAgent, message);
+            return {
+                content: [{ type: "text", text: `Message sent to ${toAgent}` }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "task_get_details",
+    "Get full details of a specific task by ID",
+    {
+        taskId: z.string().describe("UUID of the task")
+    },
+    async ({ taskId }) => {
+        try {
+            const data = await getTaskDetails(taskId);
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "task_check_status",
+    "Check the current status and result of a task",
+    {
+        taskId: z.string().describe("UUID of the task")
+    },
+    async ({ taskId }) => {
+        try {
+            const status = await checkTaskStatus(taskId);
+            return {
+                content: [{ type: "text", text: JSON.stringify(status, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+// ── Configuration Tools ──────────────────────────────────────────
+
+server.tool(
+    "config_update_agent",
+    "Update an agent's configuration (personality, tone, etc.)",
+    {
+        agentName: z.string().describe("Name of the agent"),
+        config: z.any().describe("JSON configuration object")
+    },
+    async ({ agentName, config }) => {
+        try {
+            await updateAgentConfig(agentName, config);
+            return {
+                content: [{ type: "text", text: `Configuration updated for ${agentName}` }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "config_store_credential",
+    "Store an API key or credential (BYOK)",
+    {
+        key: z.string().describe("Environment variable key"),
+        value: z.string().describe("Credential value")
+    },
+    async ({ key, value }) => {
+        try {
+            await storeCredential(key, value);
+            return {
+                content: [{ type: "text", text: `Credential ${key} stored successfully` }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "config_list_skills",
+    "List available agent skills and capabilities",
+    {},
+    async () => {
+        try {
+            const data = await listSkills();
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+// ── Memory & Data Tools ──────────────────────────────────────────
+
+server.tool(
+    "memory_summarize",
+    "Summarize long text content for context optimization",
+    {
+        content: z.string().describe("Text to summarize"),
+        targetLength: z.number().optional().default(500)
+    },
+    async ({ content, targetLength }) => {
+        try {
+            const summary = await summarizeContent(content, targetLength);
+            return {
+                content: [{ type: "text", text: summary }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "memory_recall",
+    "Search through agent memory and logs for specific information",
+    {
+        query: z.string().describe("Topic or phrase to recall")
+    },
+    async ({ query }) => {
+        try {
+            const data = await recallMemory(query);
+            return {
+                content: [{ type: "text", text: data }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "memory_fetch_external",
+    "Fetch simulated external knowledge from the web or other sources",
+    {
+        query: z.string().describe("Search query for external knowledge")
+    },
+    async ({ query }) => {
+        try {
+            const data = await fetchExternalKnowledge(query);
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+// ── Troubleshooting & Debugging Tools ───────────────────────────
+
+server.tool(
+    "debug_log_step",
+    "Log a detailed execution step for auditing and debugging",
+    {
+        agentName: z.string().describe("Name of the agent"),
+        action: z.string().describe("Action being performed"),
+        details: z.any().describe("Additional details in JSON format")
+    },
+    async ({ agentName, action, details }) => {
+        try {
+            await logExecutionStep(agentName, action, details);
+            return {
+                content: [{ type: "text", text: `Log entry created for ${agentName}: ${action}` }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "debug_introspect_tools",
+    "List and describe available tools for the current agent",
+    {},
+    async () => {
+        try {
+            const data = await introspectTools(server);
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "debug_get_console",
+    "Fetch live console output and runtime status",
+    {},
+    async () => {
+        try {
+            const data = await getRuntimeConsole();
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+// ── Operational Efficiency Tools ────────────────────────────────
+
+server.tool(
+    "monitor_agent_health",
+    "Monitor an agent's status and health based on activity",
+    {
+        agentName: z.string().describe("Name of the agent to monitor")
+    },
+    async ({ agentName }) => {
+        try {
+            const data = await monitorAgentHealth(agentName);
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "efficiency_run_tests",
+    "Run automated testing and validation for agent tools",
+    {
+        suiteName: z.string().describe("Name of the test suite to run")
+    },
+    async ({ suiteName }) => {
+        try {
+            const data = await runAutomatedTests(suiteName);
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+// ── Integration & Control Tools ────────────────────────────────
+
+server.tool(
+    "int_vsco_sync",
+    "Sync with VSCO Workspace API for job and lead management",
+    {
+        workspace: z.string().optional().describe("Workspace name to sync")
+    },
+    async ({ workspace }) => {
+        try {
+            const data = await syncVSCO({ workspace });
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "int_google_action",
+    "Perform actions on Google Suite (Gmail, Drive, Docs)",
+    {
+        service: z.string().describe("Google service name"),
+        action: z.string().describe("Action to perform"),
+        params: z.any().optional().describe("Additional parameters")
+    },
+    async ({ service, action, params }) => {
+        try {
+            const data = await googleSuiteAction(service, action, params);
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "int_github_action",
+    "Interact with GitHub repositories and workflows",
+    {
+        repo: z.string().describe("Repository name"),
+        action: z.string().describe("Action to perform"),
+        params: z.any().optional().describe("Additional parameters")
+    },
+    async ({ repo, action, params }) => {
+        try {
+            const data = await githubAction(repo, action, params);
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
+
+server.tool(
+    "int_update_permissions",
+    "Update file access permissions for autonomous agent action",
+    {
+        scope: z.string().describe("Scope of permission change"),
+        level: z.string().describe("Permission level (e.g., READ, WRITE, FULL)")
+    },
+    async ({ scope, level }) => {
+        try {
+            const data = await updatePermissions(scope, level);
+            return {
+                content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+            };
+        } catch (error) {
+            return {
+                content: [{ type: "text", text: `Error: ${error.message}` }],
+                isError: true
+            };
+        }
+    }
+);
 
 // Import and Register Listing Tools
 import registerListingTools from "./listings.cjs";

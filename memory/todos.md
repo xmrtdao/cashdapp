@@ -1,0 +1,1 @@
+If I install a ClawHub will it create a new folder to work with it, there is the way for me to check that part also is for each and all. It might be helpful to list those steps also so in the case, to make that check it also works.

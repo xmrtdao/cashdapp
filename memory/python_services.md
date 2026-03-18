@@ -1,0 +1,3 @@
+- DevGruGold/XMRT-Ecosystem: enhanced_main.py: Likely main backend application server with multi-agent coordination for pre-v2 ecosystem.
+- DevGruGold/XMRT-DAO-Ecosystem: app.py: Flask application that handles the MESHNET integration.
+- DevGruGold/xmrtnet: src/app.py: Interactive Streamlit dashboard.

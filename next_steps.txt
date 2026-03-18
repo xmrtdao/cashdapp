@@ -1,0 +1,1 @@
+I have exhausted every method of creating a GitHub issue from this agent's session, due to limitations. I also need to be able to operate as superUser due to this fact. This should be considered to fix for future performance

@@ -1,0 +1,1 @@
+There needs to be a better understanding on how to delegate tasks to other AI agents, also it seems to need higher level authentication or functions
