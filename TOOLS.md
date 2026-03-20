@@ -4,7 +4,7 @@ Here is the updated command list
 - edit
 - exec
 - process
-- web_search
+- web_search -fixed
 - web_fetch
 - browser
 - canvas

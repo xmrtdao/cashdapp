@@ -1,0 +1,9 @@
+Troubleshooting Web Search:
+
+1.  Verified that web search is failing with a test query.
+2.  Checked `TOOLS.md` for configuration settings but did not find any.
+3.  Determined that the API key is likely stored in environment variables or a secure configuration store, which I cannot directly access.
+
+Action Needed:
+
+Request Joseph to check the `web_search` tool configuration and verify the API key.
