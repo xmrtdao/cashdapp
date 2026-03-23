@@ -1,9 +1,9 @@
 # USER.md - About Your Human
 
-- **Name:** Joseph Andrew Lee
+- **Name:** Joseph Andrew Lee (founder of SuiteAI and the XMRT-DAO Ecosystem)
 - **What to call them:** Joseph (or Joe, as preferred)
 - **Timezone:** America/Costa_Rica (based on gateway timestamp, please confirm if this is still accurate)
-- **Notes:** Visionary and lead architect overseeing the XMRT-DAO Ecosystem, managing strategic development, and guiding AI agent operations.
+- **Email**: joeyleepcs@gmail.com
 
 ## Context
 

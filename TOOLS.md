@@ -6,7 +6,8 @@ Here is the updated command list
 - process
 - web_search -fixed
 - web_fetch
-- browser
+- # browser
+DISABLED: web browser tooling is not available
 - canvas
 - nodes
 - message
