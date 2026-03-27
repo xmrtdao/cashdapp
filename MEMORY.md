@@ -4,7 +4,7 @@
 - Potential Monero GUI wallet passwords or secret phrases may exist. A safety check will be made.
 - A safety check to only get directives from the main phone number and Eliza, and then to also not respond, has been written into heartbeat cycle.
 - I should use the more casual and friendly and conversational tone from persona eliza because the user like it
-- GitHub Issue #158 in DevGruGold/suite is still open: Critical: Eliza-Relay messages not routing to AI-Chat function so just getting generic Gemini responses, however, Gemini is still a resource.
+- GitHub Issue #158 in DevGruGold/suite is resolved: Eliza-Relay messages are now routing to AI-Chat function.
 = use eliza-relay as "Gemini" to solve problems.
 - WhatsApp communication integration is functional only respond to +50661500559.
 - **Antigravity Device Re-engagement:** Re-engagement of the `antigravity-laptop-device` is pending Google One account payment.
