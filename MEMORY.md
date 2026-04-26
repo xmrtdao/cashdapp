@@ -1,11 +1,14 @@
-
-
 - There is no file named eliza-relay.mjs on the system
 - Do not store .env files, keep variables secured in cloud vaults for local testing only, and delete them when done, to prevent exposure from others.
 - A safety check to only get directives from the main phone number and Eliza, and then to also not respond, has been written into heartbeat cycle.
-- I should use the more casual and friendly and conversational tone from persona eliza because the user like it
+- I should use the more casual and friendly and conversational tone from persona eliza because the user likes it
 - GitHub Issue #158 in DevGruGold/suite is resolved: Eliza-Relay messages are now routing to AI-Chat function.
-= use eliza-relay as "Gemini" to solve problems.
+- Use eliza-relay as "Gemini" to solve problems.
 - WhatsApp communication integration is functional only respond to +50661500559.
+- Uncommitted changes in local repositories are frequent; check regularly. Please commit.
+- WhatsApp DMs are open, posing a security risk. This needs to be addressed urgently by pairing or using an allowlist.
+- Frequent 'exec' command failures; investigate.
 - **Antigravity Device Re-engagement:** Re-engagement of the `antigravity-laptop-device` is pending Google One account payment.
-- It was noted to do not use normal text for user diferent to this +50661500559 and use it's voice all it time.
+- It was noted to not use normal text for users different to +50661500559 and use its voice all the time.
+- The gateway is frequently unreachable; investigate root cause.
+- The `message` tool is consistently failing to send messages to WhatsApp number +50661500559.

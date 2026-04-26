@@ -4,10 +4,8 @@ Here is the updated command list
 - edit
 - exec
 - process
-- web_search -fixed
+- web_search
 - web_fetch
-- # browser
-DISABLED: web browser tooling is not available
 - canvas
 - nodes
 - message
