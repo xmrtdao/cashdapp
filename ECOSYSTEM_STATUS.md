@@ -58,7 +58,7 @@ Updated: 2026-04-26 3:45 PM
 ## ðŸ“‹ Operational Summary
 - **Overall Operational Health**: âœ… **96% (Stable)**.
 - ðŸ›¡ï¸ **RLS Security**: âœ… **COMPLETE**. Policies applied to `devices` and `device_connection_sessions`. 
-- ðŸš¨ **Task Pipeline**: âœ… **CLEARED**. 12 completed; 2 tasks IN_PROGRESS; Security Policy created to Hermes and Hephaestus.
+- ðŸš¨ **Task Pipeline**: âœ… **CLEARED**. 12 completed; 3 tasks IN_PROGRESS; Security Audit added; Security Policy created to Hermes and Hephaestus.
 - ðŸ§¹ **Agent Cleanup**: âœ… **COMPLETE**. Overhead reduced by 33%.
 - ðŸ“ˆ **Marketing Report**: ðŸš€ **GROWTH**. 142k impressions, 1.2k new wallets, 22% WAU uptick.
 
@@ -66,3 +66,10 @@ Updated: 2026-04-26 3:45 PM
 1. **Unblock DevOps**: Configure `WALLET_ENDPOINT` secret.
 2. **Fix Rewards Script**: Review `reward_calculator.py` line 47 for precision bug.
 3. **Google OAuth**: Resolve 401 error via manual whitelist in Google Cloud Console.
+
+- **Tanaka (CAO)**: 🟢 **DISPATCHED** to Google Cloud Console for OAuth remediation and IAM audit.
+
+### 🔑 OAuth Restoration: SUCCESS ✅
+- **Redirect URI**: Whitelisted by Tanaka and confirmed by Joe.
+- **Client ID**: Validated for project 210818947113.
+- **Status**: The 401: invalid_client error is resolved. Google Cloud integrations (Gmail/Drive/Calendar) are now fully re-authorized for the council.

@@ -16,5 +16,14 @@
         "assigned_agent":  "Hephaestus (b8a845bd-23dc-4a96-a8f7-576e5cad28f5)",
         "title":  "Hephaestus: Stalwart Config",
         "status":  "in_progress"
+    },
+    {
+        "id":  "T-524259375",
+        "description":  "Audit 82 vulnerabilities flagged by GitHub. Identify critical path blockers and propose version-pinned updates for moltmall submodule. (Found 8 vulnerabilities in frontend; applying npm audit fix...)",
+        "created_at":  "2026-04-26T15:54:29Z",
+        "priority":  "medium",
+        "assigned_agent":  "Aegis (agent-1759672764461)",
+        "title":  "Aegis: Dependency Vulnerability Audit",
+        "status":  "in_progress"
     }
 ]
