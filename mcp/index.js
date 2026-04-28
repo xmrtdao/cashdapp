@@ -2,14 +2,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
 import { listFilesRecursive, searchFiles, readFileChunked } from "./fileTools.mjs";
 import { sendMessageToAgent, getTaskDetails, checkTaskStatus } from "./commTools.mjs";
 import { updateAgentConfig, storeCredential, listSkills } from "./configTools.mjs";
-import { summarizeContent, recallMemory, fetchExternalKnowledge } from "./memoryTools.mjs";
+import { summarizeContent, recallMemory, fetchExternalKnowledge, deepseekChat } from "./memoryTools.mjs";
 import { logExecutionStep, introspectTools, getRuntimeConsole } from "./debugTools.mjs";
 import { monitorAgentHealth, runAutomatedTests } from "./efficiencyTools.mjs";
 import { syncVSCO, googleSuiteAction, githubAction, updatePermissions } from "./integrationTools.mjs";
@@ -295,6 +295,32 @@ server.tool = function (name, ...args) {
   }
   return _origTool(name, ...args);
 };
+
+// --- DeepSeek LLM Tool ---
+server.tool(
+  "deepseek_chat",
+  "Send a message to DeepSeek LLM and get a response. Uses deepseek-v4-flash by default; set model to 'deepseek-v4-pro' for harder reasoning tasks.",
+  {
+    message: z.string().describe("User message to send to DeepSeek"),
+    system: z.string().optional().describe("Optional system prompt to set context or persona"),
+    model: z.enum(["deepseek-v4-flash", "deepseek-v4-pro"]).default("deepseek-v4-flash").describe("Which model to use"),
+    thinking: z.boolean().default(false).describe("Enable extended thinking / reasoning mode (deepseek-v4-pro only)"),
+  },
+  async ({ message, system, model, thinking }) => {
+    const messages = [];
+    if (system) messages.push({ role: "system", content: system });
+    messages.push({ role: "user", content: message });
+    try {
+      const extra = thinking && model === "deepseek-v4-pro"
+        ? { thinking: { type: "enabled" }, reasoning_effort: "high" }
+        : {};
+      const reply = await deepseekChat(messages, { model, extra });
+      return { content: [{ type: "text", text: reply }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `DeepSeek error: ${err.message}` }], isError: true };
+    }
+  }
+);
 
 // Read post with comments
 server.tool("moltbook_post", "Get a single post with its comments", {

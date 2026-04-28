@@ -7,15 +7,23 @@ import { writeFileSync, readFileSync } from 'fs';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: join(__dirname, '..', 'suite', '.env') });
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Lazy client — only created on first use so missing .env doesn't crash startup
+let _supabase = null;
+function getClient() {
+  if (!_supabase) {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set');
+    _supabase = createClient(url, key);
+  }
+  return _supabase;
+}
 
 /**
  * Update agent configuration (personality, tone, etc.) in the agents table.
  */
 export async function updateAgentConfig(agentName, config) {
-    const { data, error } = await supabase
+    const { data, error } = await getClient()
         .from('agents')
         .update({ config: config })
         .eq('name', agentName);

@@ -6,15 +6,23 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: join(__dirname, '..', 'suite', '.env') });
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Lazy client — only created on first use so missing .env doesn't crash startup
+let _supabase = null;
+function getClient() {
+  if (!_supabase) {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set');
+    _supabase = createClient(url, key);
+  }
+  return _supabase;
+}
 
 /**
  * Log a detailed execution step to the eliza_activity_log.
  */
 export async function logExecutionStep(agentName, action, details) {
-    const { data, error } = await supabase
+    const { data, error } = await getClient()
         .from('eliza_activity_log')
         .insert([{
             agent_name: agentName,

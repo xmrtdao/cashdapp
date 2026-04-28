@@ -6,15 +6,23 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: join(__dirname, '..', 'suite', '.env') });
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Lazy client — only created on first use so missing .env doesn't crash startup
+let _supabase = null;
+function getClient() {
+  if (!_supabase) {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set');
+    _supabase = createClient(url, key);
+  }
+  return _supabase;
+}
 
 /**
  * Perform a health check on an agent by checking its last heartbeats or activity.
  */
 export async function monitorAgentHealth(agentName) {
-    const { data, error } = await supabase
+    const { data, error } = await getClient()
         .from('agents')
         .select('last_seen, status')
         .eq('name', agentName)
