@@ -1,16 +1,14 @@
 {
   "lastChecks": {
-    "task_pipeline": 1745853780,
-    "github_issues": 1745853780,
-    "local_git": 1745853780,
-    "system_logs": 1745853780,
-    "memory_maintenance": 1745853780
+    "task_pipeline": 1745856000,
+    "github_issues": 1745856000,
+    "local_git": 1745856000,
+    "system_logs": 1745856000,
+    "memory_maintenance": 1745856000
   },
   "issues": {
-    "web_search": "FAILED (Invalid Token)",
-    "gateway": "PENDING (Status check timed out)",
-    "git": "Uncommitted changes and ahead of origin",
-    "memory_embeddings": "RESOLVED - Vector embeddings disabled (Google 403 blocked); FTS-only mode active",
-    "cron_tasks": "14 orphaned tasks (timed_out/lost) - scheduler bug; needs cron delete/recreate"
+    "memory_embeddings": "RESOLVED - FTS-only mode active (vector disabled via config)",
+    "cron_tasks": "RESOLVED - 3 crons deleted/recreated, new IDs healthy (idle state)",
+    "git": "COMMITTED - 15 files, newSkillTest branch"
   }
 }
