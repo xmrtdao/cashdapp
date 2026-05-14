@@ -566,6 +566,12 @@ app.get('/', (req, res) => {
   const hours = Math.floor((uptime % 86400) / 3600);
   const mins = Math.floor((uptime % 3600) / 60);
   const uptimeStr = `${days}d ${hours}h ${mins}m`;
+  const supabaseUrl = 'https://vawouugtzwmejxqkeqqj.supabase.co';
+  
+  const tools = Object.keys(toolHandlers);
+  const toolCount = tools.length;
+  const handlerCount = Object.keys(handlers).length;
+  const stats = taskRunner.getStats();
   
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -575,90 +581,339 @@ app.get('/', (req, res) => {
   <title>XMRT DAO — Fleet Dashboard</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #c0c0d0; padding: 2rem; }
-    h1 { color: #ff6b35; font-size: 1.8rem; margin-bottom: 0.5rem; }
-    h2 { color: #8b8ba0; font-size: 1rem; font-weight: 400; margin-bottom: 2rem; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
-    .card { background: #12121a; border: 1px solid #2a2a3a; border-radius: 12px; padding: 1.25rem; }
-    .card h3 { color: #ff6b35; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.75rem; }
-    .stat { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #1a1a2a; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #c0c0d0; padding: 1.5rem; }
+    h1 { color: #ff6b35; font-size: 1.6rem; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.75rem; }
+    h1 span { font-size: 0.9rem; color: #6b6b80; font-weight: 400; }
+    .subtitle { color: #8b8ba0; font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .subtitle a { color: #4a7cff; text-decoration: none; }
+    .subtitle a:hover { text-decoration: underline; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .card { background: #12121a; border: 1px solid #2a2a3a; border-radius: 10px; padding: 1rem; }
+    .card h3 { color: #ff6b35; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.6rem; }
+    .stat { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px solid #1a1a2a; font-size: 0.85rem; }
     .stat:last-child { border-bottom: none; }
-    .label { color: #8b8ba0; font-size: 0.9rem; }
-    .value { color: #e0e0f0; font-family: 'SF Mono', Monaco, monospace; font-size: 0.9rem; }
-    .ok { color: #4ade80; }
-    .warn { color: #fbbf24; }
-    .err { color: #f87171; }
-    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+    .label { color: #8b8ba0; }
+    .value { color: #e0e0f0; font-family: 'SF Mono', 'Cascadia Code', monospace; }
+    .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; font-weight: 600; }
     .badge-ok { background: #14532d; color: #4ade80; }
     .badge-warn { background: #451a03; color: #fbbf24; }
     .badge-err { background: #450a0a; color: #f87171; }
-    .footer { margin-top: 2rem; text-align: center; color: #4a4a5a; font-size: 0.8rem; }
-    pre { background: #0d0d15; padding: 0.75rem; border-radius: 6px; font-size: 0.8rem; overflow-x: auto; }
+    .badge-info { background: #1a3a5c; color: #60a5fa; }
+
+    /* Search & Filter */
+    .controls { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
+    .controls input { flex: 1; min-width: 200px; padding: 0.6rem 1rem; border: 1px solid #2a2a3a; border-radius: 8px; background: #0d0d15; color: #e0e0f0; font-size: 0.9rem; outline: none; }
+    .controls input:focus { border-color: #ff6b35; }
+    .controls select { padding: 0.6rem 1rem; border: 1px solid #2a2a3a; border-radius: 8px; background: #0d0d15; color: #e0e0f0; font-size: 0.85rem; outline: none; cursor: pointer; }
+    .controls select:focus { border-color: #ff6b35; }
+    .count { color: #6b6b80; font-size: 0.85rem; white-space: nowrap; }
+
+    /* Table */
+    .table-wrap { overflow-x: auto; border: 1px solid #2a2a3a; border-radius: 10px; background: #12121a; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th { text-align: left; padding: 0.6rem 0.8rem; background: #1a1a2a; color: #8b8ba0; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.72rem; border-bottom: 1px solid #2a2a3a; cursor: pointer; white-space: nowrap; }
+    th:hover { color: #c0c0d0; }
+    td { padding: 0.5rem 0.8rem; border-bottom: 1px solid #1a1a2a; vertical-align: top; }
+    tr:hover td { background: #1a1a2a; }
+    .fn-name { color: #60a5fa; font-family: 'SF Mono', monospace; font-weight: 500; }
+    .fn-method { display: inline-block; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.7rem; font-weight: 700; margin-right: 0.25rem; }
+    .method-GET { background: #1a3a5c; color: #60a5fa; }
+    .method-POST { background: #14532d; color: #4ade80; }
+    .method-PATCH { background: #451a03; color: #fbbf24; }
+    .method-DELETE { background: #450a0a; color: #f87171; }
+    .tag-workflow { background: #451a03; color: #fbbf24; font-size: 0.65rem; padding: 0.1rem 0.35rem; border-radius: 3px; white-space: nowrap; }
+    .tag-simple { background: #1a3a5c; color: #60a5fa; font-size: 0.65rem; padding: 0.1rem 0.35rem; border-radius: 3px; white-space: nowrap; }
+    .fn-inputs { color: #6b6b80; font-size: 0.75rem; font-family: 'SF Mono', monospace; }
+    .fn-desc { color: #a0a0b0; font-size: 0.8rem; max-width: 300px; }
+    .footer { margin-top: 1.5rem; text-align: center; color: #4a4a5a; font-size: 0.78rem; }
+    .loading { text-align: center; padding: 3rem; color: #6b6b80; }
+    .endpoint-url { color: #6b6b80; font-size: 0.75rem; font-family: 'SF Mono', monospace; }
+    .endpoint-url span { color: #a0a0b0; }
+    @media (max-width: 600px) { body { padding: 0.75rem; } .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
-  <h1>⚡ XMRT DAO — Fleet Dashboard</h1>
-  <h2>Vex Relay · ${hostname} · tunnel: ${tunnelUrl || 'unknown'}</h2>
+  <h1>⚡ XMRT DAO <span>Fleet Dashboard</span></h1>
+  <div class="subtitle">
+    Vex Relay · ${hostname} · 
+    <a href="${tunnelUrl}" target="_blank">${tunnelUrl}</a> ·
+    <a href="https://github.com/xmrtdao/mobilemonero" target="_blank">GitHub</a>
+  </div>
   
   <div class="grid">
     <div class="card">
-      <h3>System</h3>
+      <h3>Relay Status</h3>
       <div class="stat"><span class="label">Uptime</span><span class="value">${uptimeStr}</span></div>
       <div class="stat"><span class="label">Version</span><span class="value">2.0.0</span></div>
-      <div class="stat"><span class="label">Port</span><span class="value">${PORT}</span></div>
+      <div class="stat"><span class="label">Tools</span><span class="value">${toolCount}</span></div>
+      <div class="stat"><span class="label">Handlers</span><span class="value">${handlerCount}</span></div>
+      <div class="stat"><span class="label">Tasks</span><span class="value">${stats.completed} done / ${stats.failed} failed</span></div>
       <div class="stat"><span class="label">Requests</span><span class="value">${requestCounts.total}</span></div>
     </div>
     
     <div class="card">
-      <h3>Tools & Handlers</h3>
-      <div class="stat"><span class="label">Tools</span><span class="value">${Object.keys(toolHandlers).length}</span></div>
-      <div class="stat"><span class="label">Handlers</span><span class="value">${Object.keys(handlers).length}</span></div>
-      <div class="stat"><span class="label">Task Queue</span><span class="value">${taskRunner.getStats().queueLength || 0}</span></div>
-      <div class="stat"><span class="label">Running</span><span class="value">${taskRunner.getStats().running || 0}</span></div>
-      <div class="stat"><span class="label">Completed</span><span class="value">${taskRunner.getStats().completed || 0}</span></div>
-      <div class="stat"><span class="label">Failed</span><span class="value">${taskRunner.getStats().failed || 0}</span></div>
+      <h3>Tools</h3>
+      ${tools.map(t => `<div class="stat"><span class="label">${t}</span><span class="value badge badge-info">ready</span></div>`).join('')}
     </div>
     
     <div class="card">
-      <h3>Fleet Agents</h3>
-      <div class="stat"><span class="label">Vex (me)</span><span class="value badge badge-ok">ONLINE</span></div>
+      <h3>Fleet</h3>
+      <div class="stat"><span class="label">Vex (relay)</span><span class="value badge badge-ok">ONLINE</span></div>
       <div class="stat"><span class="label">Eliza-Cloud</span><span class="value badge badge-ok">ACTIVE</span></div>
-      <div class="stat"><span class="label">Hermes</span><span class="value badge badge-ok">ONLINE</span></div>
+      <div class="stat"><span class="label">Hermes</span><span class="value" id="hermes-status"><span class="badge badge-ok">ONLINE</span></span></div>
+      <div class="stat"><span class="label">Ollama</span><span class="value" id="ollama-status"><span class="badge badge-info">checking...</span></span></div>
       <div class="stat"><span class="label">Go Relay</span><span class="value badge badge-warn">BUILT</span></div>
       <div class="stat"><span class="label">Rust Mesh</span><span class="value badge badge-warn">CI READY</span></div>
+      <div class="stat"><span class="label">Tasks</span><span class="value" id="live-tasks">${stats.completed} done / ${stats.failed} failed</span></div>
+      <div class="stat"><span class="label">Edge Functions</span><span class="value">198</span></div>
     </div>
-    
+
     <div class="card">
-      <h3>Repos</h3>
-      <div class="stat"><span class="label">mobilemonero</span><span class="value">13 issues</span></div>
-      <div class="stat"><span class="label">relay-go</span><span class="value">/eliza-ping added</span></div>
-      <div class="stat"><span class="label">zero-claw</span><span class="value">199 functions</span></div>
-      <div class="stat"><span class="label">night-moves</span><span class="value">mining ready</span></div>
-      <div class="stat"><span class="label">mmlauncher</span><span class="value">self-hosted</span></div>
+      <h3>Key Repos</h3>
+      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/mobilemonero" style="color:inherit;text-decoration:none;">mobilemonero</a></span><span class="value">hub</span></div>
+      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/relay-go" style="color:inherit;text-decoration:none;">relay-go</a></span><span class="value">redundant</span></div>
+      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/xmrt-mesh" style="color:inherit;text-decoration:none;">xmrt-mesh</a></span><span class="value">p2p mesh</span></div>
+      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/zero-claw" style="color:inherit;text-decoration:none;">zero-claw</a></span><span class="value">198 fns</span></div>
+      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/night-moves" style="color:inherit;text-decoration:none;">night-moves</a></span><span class="value">mining</span></div>
+      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/mmlauncher" style="color:inherit;text-decoration:none;">mmlauncher</a></span><span class="value">script</span></div>
+      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/suite" style="color:inherit;text-decoration:none;">suite</a></span><span class="value">monorepo</span></div>
     </div>
-    
+
     <div class="card">
-      <h3>Endpoints</h3>
-      <pre>GET  /         — this page
-GET  /health   — health check
-GET  /status   — system status
-GET  /tools    — tool registry
-POST /dispatch — task dispatch
-POST /eliza-ping — fleet heartbeat
-POST /tools/run  — run tool</pre>
+      <h3>Quick Actions</h3>
+      <div class="stat"><span class="label"><a href="/health" style="color:#4ade80;text-decoration:none;">GET /health</a></span><span class="value">health check</span></div>
+      <div class="stat"><span class="label"><a href="/status" style="color:#60a5fa;text-decoration:none;">GET /status</a></span><span class="value">full status</span></div>
+      <div class="stat"><span class="label"><a href="/tools" style="color:#60a5fa;text-decoration:none;">GET /tools</a></span><span class="value">tool list</span></div>
+      <div class="stat"><span class="label"><a href="/monitor" style="color:#60a5fa;text-decoration:none;">GET /monitor</a></span><span class="value">system monitor</span></div>
+      <div class="stat"><span class="label"><a href="/api/catalog" style="color:#60a5fa;text-decoration:none;">GET /api/catalog</a></span><span class="value">function catalog</span></div>
+      <div class="stat"><span class="label"><code style="color:#fbbf24;font-size:0.75rem;">POST /dispatch</code></span><span class="value">task dispatch</span></div>
     </div>
-    
+
     <div class="card">
       <h3>Mining Script</h3>
-      <pre>curl -o signup.py -L https://raw.githubusercontent.com/xmrtdao/mmlauncher/main/scripts/mobile-signup.py && sha256sum signup.py && python3 signup.py</pre>
+      <pre style="background:#0d0d15;padding:0.6rem;border-radius:6px;font-size:0.72rem;overflow-x:auto;color:#a0a0b0;white-space:pre-wrap;word-break:break-all;">curl -o signup.py -L https://raw.githubusercontent.com/xmrtdao/mmlauncher/main/scripts/mobile-signup.py && sha256sum signup.py && python3 signup.py</pre>
+    </div>
+  </div>
+
+  <!-- Edge Function Catalog -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;">
+    <h2 style="color:#ff6b35;font-size:1.1rem;">☁️ Supabase Edge Functions <span id="fnCount" style="color:#6b6b80;font-weight:400;"></span></h2>
+    <div class="controls">
+      <input type="text" id="search" placeholder="Search functions…" oninput="filterFunctions()">
+      <select id="methodFilter" onchange="filterFunctions()">
+        <option value="">All Methods</option>
+        <option value="GET">GET</option>
+        <option value="POST">POST</option>
+        <option value="PATCH">PATCH</option>
+        <option value="DELETE">DELETE</option>
+      </select>
+      <select id="typeFilter" onchange="filterFunctions()">
+        <option value="">All Types</option>
+        <option value="simple">Simple</option>
+        <option value="workflow">Workflow</option>
+      </select>
+      <span class="count" id="resultCount"></span>
     </div>
   </div>
   
-  <div class="footer">
-    ⚡ Vex · ${new Date().toISOString()} · <a href="https://github.com/xmrtdao/mobilemonero" style="color: #4a7cff;">GitHub</a>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th onclick="sortBy('name')">Function ↕</th>
+          <th onclick="sortBy('methods')">Method ↕</th>
+          <th onclick="sortBy('type')">Type ↕</th>
+          <th onclick="sortBy('desc')">Description ↕</th>
+          <th>Expected Input</th>
+          <th>Endpoint</th>
+        </tr>
+      </thead>
+      <tbody id="fnBody">
+        <tr><td colspan="6" class="loading">Loading function catalog…</td></tr>
+      </tbody>
+    </table>
   </div>
+  
+  <div class="footer">
+    ⚡ Vex · ${new Date().toISOString()} · 
+    Supabase: ${supabaseUrl}/functions/v1/{name}
+  </div>
+
+  <script>
+  const SUPABASE_URL = '${supabaseUrl}';
+  let functions = [];
+  let sortKey = 'name';
+  let sortDir = 1;
+
+  // Load edge function catalog
+  fetch('/api/catalog')
+    .then(r => r.json())
+    .then(data => {
+      functions = data.functions || [];
+      document.getElementById('fnCount').textContent = '— ' + functions.length + ' total';
+      renderFunctions();
+    })
+    .catch(e => {
+      document.getElementById('fnBody').innerHTML = '<tr><td colspan="6" style="color:#f87171;text-align:center;padding:2rem;">Failed to load catalog: ' + e.message + '</td></tr>';
+    });
+
+  // Load live fleet status
+  function loadFleetStatus() {
+    fetch('/api/fleet')
+      .then(r => r.json())
+      .then(data => {
+        // Hermes status
+        const hermesCard = document.getElementById('hermes-status');
+        if (hermesCard && data.hermes) {
+          if (data.hermes.status === 'ok') {
+            hermesCard.innerHTML = '<span class="badge badge-ok">ONLINE</span> <span style="color:#6b6b80;font-size:0.75rem">' + (data.hermes.device || '') + ' ' + (data.hermes.ram_mb || '') + 'MB</span>';
+          } else {
+            hermesCard.innerHTML = '<span class="badge badge-err">OFFLINE</span>';
+          }
+        }
+        // Ollama status
+        const ollamaCard = document.getElementById('ollama-status');
+        if (ollamaCard && data.ollama) {
+          const cnt = data.ollama.models || 0;
+          ollamaCard.innerHTML = cnt > 0
+            ? '<span class="badge badge-ok">' + cnt + ' models</span>'
+            : '<span class="badge badge-err">offline</span>';
+        }
+        // Tasks
+        const tasksEl = document.getElementById('live-tasks');
+        if (tasksEl && data.vex?.tasks) {
+          const s = data.vex.tasks;
+          tasksEl.textContent = s.completed + ' done / ' + s.failed + ' failed / ' + s.queueLength + ' queued';
+        }
+        // Requests
+        document.getElementById('live-uptime') && (document.getElementById('live-uptime').textContent = Math.floor(data.vex?.uptime || 0) + 's');
+      })
+      .catch(() => {});
+  }
+  loadFleetStatus();
+  setInterval(loadFleetStatus, 30000);
+
+  function renderFunctions() {
+    const search = document.getElementById('search').value.toLowerCase();
+    const methodFilter = document.getElementById('methodFilter').value;
+    const typeFilter = document.getElementById('typeFilter').value;
+
+    let filtered = functions.filter(f => {
+      if (search && !f.name.toLowerCase().includes(search) && !f.desc.toLowerCase().includes(search)) return false;
+      if (methodFilter && !f.methods.includes(methodFilter)) return false;
+      if (typeFilter === 'simple' && f.type !== 'simple endpoint') return false;
+      if (typeFilter === 'workflow' && f.type !== 'multi-action workflow') return false;
+      return true;
+    });
+
+    filtered.sort((a, b) => {
+      let va = (a[sortKey] || '').toString().toLowerCase();
+      let vb = (b[sortKey] || '').toString().toLowerCase();
+      return va < vb ? -sortDir : va > vb ? sortDir : 0;
+    });
+
+    document.getElementById('resultCount').textContent = filtered.length + ' shown';
+
+    document.getElementById('fnBody').innerHTML = filtered.map(f => {
+      const methods = (f.methods || ['POST']).map(m =>
+        '<span class="fn-method method-' + m + '">' + m + '</span>'
+      ).join('');
+      const typeTag = f.type === 'multi-action workflow'
+        ? '<span class="tag-workflow">workflow</span>'
+        : '<span class="tag-simple">simple</span>';
+      const inputs = (f.inputs && f.inputs.length)
+        ? f.inputs.map(i => '<span style="color:#fbbf24">' + i + '</span>').join(', ')
+        : '<span style="color:#4a4a5a">(see source)</span>';
+      const endpoint = SUPABASE_URL + '/functions/v1/' + f.name;
+      
+      return '<tr>' +
+        '<td class="fn-name">' + f.name + '</td>' +
+        '<td>' + methods + '</td>' +
+        '<td>' + typeTag + '</td>' +
+        '<td class="fn-desc">' + (f.desc || '') + '</td>' +
+        '<td class="fn-inputs">' + inputs + '</td>' +
+        '<td class="endpoint-url"><span>' + endpoint + '</span></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function filterFunctions() { renderFunctions(); }
+  function sortBy(key) {
+    if (sortKey === key) sortDir *= -1;
+    else { sortKey = key; sortDir = 1; }
+    renderFunctions();
+  }
+  </script>
 </body>
 </html>`);
+});
+
+// API: Edge Function Catalog
+app.get('/api/catalog', (req, res) => {
+  const catalogPath = join(__dirname, 'edge-function-catalog.json');
+  try {
+    const data = JSON.parse(readFileSync(catalogPath, 'utf8'));
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: 'Catalog not available', message: e.message });
+  }
+});
+
+// API: Live Fleet Status (aggregated from all agents)
+app.get('/api/fleet', async (req, res) => {
+  trackRequest('/api/fleet');
+  
+  const hostname = execSync('hostname', { encoding: 'utf8' }).trim();
+  const tunnelUrl = state.get('tunnel-url');
+  const stats = taskRunner.getStats();
+  
+  // Ping Hermes
+  let hermes = null;
+  try {
+    const h = await fetch('https://dose-effect-dist-interviews.trycloudflare.com/health', { 
+      signal: AbortSignal.timeout(5000) 
+    });
+    if (h.ok) hermes = await h.json();
+  } catch (e) { hermes = { error: e.message }; }
+  
+  // Ping Ollama
+  let ollama = null;
+  try {
+    const o = await fetch('http://localhost:11434/api/tags', {
+      signal: AbortSignal.timeout(3000)
+    });
+    if (o.ok) {
+      const data = await o.json();
+      ollama = { models: data.models?.length || 0, model_list: data.models?.map(m => m.name) || [] };
+    }
+  } catch (e) { ollama = { error: e.message }; }
+  
+  // System resources
+  let resources = null;
+  try {
+    const snapshot = await getFullSnapshot();
+    resources = snapshot.resources;
+  } catch (e) { resources = { error: e.message }; }
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    vex: {
+      status: 'online',
+      host: hostname,
+      uptime: process.uptime(),
+      port: PORT,
+      version: '2.0.0',
+      tools: Object.keys(toolHandlers).length,
+      handlers: Object.keys(handlers).length,
+      tasks: stats,
+      tunnel: tunnelUrl,
+    },
+    hermes,
+    ollama,
+    resources,
+    supabase: 'https://vawouugtzwmejxqkeqqj.supabase.co',
+    edge_functions: 198,
+  });
 });
 
 // Status
