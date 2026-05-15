@@ -549,7 +549,7 @@ app.get('/health', (req, res) => {
     uptime: process.uptime(),
     port: PORT,
     agent: 'Eliza-Dev',
-    version: '2.0.0',
+    version: '4.0.0',
     tools: Object.keys(toolHandlers).length,
     handlers: Object.keys(handlers).length,
     requests: requestCounts.total,
@@ -644,7 +644,7 @@ app.get('/', (req, res) => {
     <div class="card">
       <h3>Relay Status</h3>
       <div class="stat"><span class="label">Uptime</span><span class="value">${uptimeStr}</span></div>
-      <div class="stat"><span class="label">Version</span><span class="value">2.0.0</span></div>
+      <div class="stat"><span class="label">Relay</span><span class="value">v4.0.0</span></div>
       <div class="stat"><span class="label">Tools</span><span class="value">${toolCount}</span></div>
       <div class="stat"><span class="label">Handlers</span><span class="value">${handlerCount}</span></div>
       <div class="stat"><span class="label">Tasks</span><span class="value">${stats.completed} done / ${stats.failed} failed</span></div>
@@ -656,16 +656,27 @@ app.get('/', (req, res) => {
       ${tools.map(t => `<div class="stat"><span class="label">${t}</span><span class="value badge badge-info">ready</span></div>`).join('')}
     </div>
     
+        <div class="card" id="fleet-card">
+      <h3>Fleet Registry <span id="fleet-count" style="color:#6b6b80;font-size:0.7rem;"></span></h3>
+      <div id="fleet-agents-list">
+        <div class="stat"><span class="label">Loading fleet...</span></div>
+      </div>
+    </div>
+
     <div class="card">
-      <h3>Fleet</h3>
-      <div class="stat"><span class="label">Vex (relay)</span><span class="value badge badge-ok">ONLINE</span></div>
-      <div class="stat"><span class="label">Eliza-Cloud</span><span class="value badge badge-ok">ACTIVE</span></div>
-      <div class="stat"><span class="label">Hermes</span><span class="value" id="hermes-status"><span class="badge badge-ok">ONLINE</span></span></div>
-      <div class="stat"><span class="label">Ollama</span><span class="value" id="ollama-status"><span class="badge badge-info">checking...</span></span></div>
-      <div class="stat"><span class="label">Go Relay</span><span class="value badge badge-warn">BUILT</span></div>
-      <div class="stat"><span class="label">Rust Mesh</span><span class="value badge badge-warn">CI READY</span></div>
-      <div class="stat"><span class="label">Tasks</span><span class="value" id="live-tasks">${stats.completed} done / ${stats.failed} failed</span></div>
-      <div class="stat"><span class="label">Edge Functions</span><span class="value">198</span></div>
+      <h3>Mining</h3>
+      <div class="stat"><span class="label">Pool Hash</span><span class="value" id="pool-hash">checking...</span></div>
+      <div class="stat"><span class="label">Vex Laptop</span><span class="value" id="miner-vex">-</span></div>
+      <div class="stat"><span class="label">Hermes Phone</span><span class="value" id="miner-hermes">-</span></div>
+      <div class="stat"><span class="label">Valid Shares</span><span class="value" id="pool-shares">-</span></div>
+      <div class="stat"><span class="label">XMR Paid / Due</span><span class="value" id="pool-xmr">-</span></div>
+      <div class="stat"><span class="label">Workers</span><span class="value" id="pool-workers" style="font-size:0.75rem;color:#6b6b80;">-</span></div>
+    </div>
+
+    <div class="card">
+      <h3>Heartbeat Endpoint</h3>
+      <div style="background:#0d0d15;padding:0.4rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.75rem;color:#60a5fa;word-break:break-all;" id="heartbeat-url">loading...</div>
+      <div style="color:#6b6b80;font-size:0.72rem;margin-top:0.4rem;">POST: {"agent_id":"...","status":"ONLINE","tunnel_url":"...","hashrate":0}</div>
     </div>
 
     <div class="card">
@@ -677,6 +688,13 @@ app.get('/', (req, res) => {
       <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/night-moves" style="color:inherit;text-decoration:none;">night-moves</a></span><span class="value">mining</span></div>
       <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/mmlauncher" style="color:inherit;text-decoration:none;">mmlauncher</a></span><span class="value">script</span></div>
       <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/suite" style="color:inherit;text-decoration:none;">suite</a></span><span class="value">monorepo</span></div>
+    </div>
+
+    <div class="card" id="pfp-card">
+      <h3> Party Favor Photo <span style="color:#6b6b80;font-size:0.7rem;">inbox</span></h3>
+      <div id="pfp-inbox">
+        <div class="stat"><span class="label">Loading inbox...</span></div>
+      </div>
     </div>
 
     <div class="card">
@@ -793,6 +811,99 @@ app.get('/', (req, res) => {
   loadFleetStatus();
   setInterval(loadFleetStatus, 30000);
 
+  // Fleet Agent Registry
+  function loadFleetAgents() {
+    fetch('/api/fleet/agents').then(function(r){return r.json();}).then(function(data){
+      var agents = data.agents || [];
+      var list = document.getElementById('fleet-agents-list');
+      var count = document.getElementById('fleet-count');
+      if (!count) return;
+      count.textContent = '\u2014 ' + agents.length + ' agent' + (agents.length !== 1 ? 's' : '');
+      if (!agents.length) {
+        list.innerHTML = '<div class="stat"><span class="label">No agents registered</span></div>';
+        return;
+      }
+      list.innerHTML = agents.map(function(a){
+        var sb = a.status === 'ONLINE' ? 'badge-ok' : a.status === 'BUSY' ? 'badge-warn' : 'badge-err';
+        var me = a.agent_id === 'vex' ? '\u2b50 ' : '';
+        var tun = a.tunnel_url ? '<br><span style="font-size:0.65rem;color:#4a7cff;">' + a.tunnel_url + '</span>' : '';
+        var h = a.hashrate ? ' \u00b7 ' + a.hashrate + ' H/s' : '';
+        return '<div class="stat"><span class="label">' + me + a.agent_id + tun + '</span><span class="value"><span class="badge ' + sb + '">' + a.status + '</span>' + h + '</span></div>';
+      }).join('');
+      // Update heartbeat URL
+      var hb = document.getElementById('heartbeat-url');
+      var t = document.querySelector('a[href*="trycloudflare"]');
+      if (hb && t) hb.textContent = t.href + '/api/fleet/heartbeat';
+    });
+  }
+  loadFleetAgents();
+  setInterval(loadFleetAgents, 15000);
+
+  // Mining Stats from pool + xmrig
+  function loadMiningStats() {
+    fetch('https://supportxmr.com/api/miner/46UxNFuGM2E3UwmZWWJicaRPoRwqwW4byQkaTHkX8yPcVihp91qAVtSFipWUGJJUyTXgzSqxzDQtNLf2bsp2DX2qCCgC5mg/stats').then(function(r){return r.json();}).then(function(d){
+      var e;
+      if (e = document.getElementById('pool-hash')) e.textContent = d.hash + ' H/s';
+      if (e = document.getElementById('pool-shares')) e.textContent = d.validShares + ' valid / ' + d.invalidShares + ' invalid';
+      if (e = document.getElementById('pool-xmr')) e.textContent = (d.amtPaid/1e12).toFixed(6) + ' / ' + (d.amtDue/1e12).toFixed(6) + ' XMR';
+    });
+    fetch('http://127.0.0.1:19090/1/summary').then(function(r){return r.json();}).then(function(d){
+      var h = d.hashrate.total;
+      var e = document.getElementById('miner-vex');
+      if (e) e.textContent = (h[0]||0).toFixed(0) + ' H/s';
+    }).catch(function(){
+      var e = document.getElementById('miner-vex');
+      if (e) e.textContent = 'offline';
+    });
+    fetch('https://supportxmr.com/api/miner/46UxNFuGM2E3UwmZWWJicaRPoRwqwW4byQkaTHkX8yPcVihp91qAVtSFipWUGJJUyTXgzSqxzDQtNLf2bsp2DX2qCCgC5mg/identifiers').then(function(r){return r.json();}).then(function(ids){
+      var e = document.getElementById('pool-workers');
+      if (e) e.textContent = (ids||[]).join(', ') || 'none';
+      e = document.getElementById('miner-hermes');
+      if (e) e.innerHTML = ids.indexOf('hermes-phone') !== -1 ? '<span class="badge badge-ok">ONLINE</span>' : '<span class="badge badge-err">OFFLINE</span>';
+    });
+  }
+  loadMiningStats();
+  setInterval(loadMiningStats, 30000);
+
+  // Party Favor Photo inbox refresh
+  function loadPfpInbox() {
+    fetch('/resend/inbox').then(function(r){return r.json();}).then(function(data){
+      var card = document.getElementById('pfp-inbox');
+      if (!card || !data.emails) return;
+      var html = '';
+      // Group by recipient
+      var groups = {};
+      data.emails.slice(0,20).forEach(function(e){
+        var addr = (e.to && e.to[0]) || 'unknown';
+        if (!groups[addr]) groups[addr] = [];
+        groups[addr].push(e);
+      });
+      var count = 0;
+      Object.keys(groups).forEach(function(addr){
+        var msgs = groups[addr];
+        html += '<div class="stat" style="border-bottom:1px solid #2a2a3a;padding:0.4rem 0;">';
+        html += '<span class="label" style="font-size:0.78rem;color:#60a5fa;">' + addr + '</span>';
+        html += '<span class="value badge badge-info">' + msgs.length + '</span>';
+        html += '</div>';
+        msgs.forEach(function(m){
+          count++;
+          if (count > 10) return;
+          html += '<div class="stat" style="padding:0.2rem 0 0.2rem 0.5rem;font-size:0.72rem;">';
+          html += '<span class="label">' + (m.from||'').substring(0,28) + '</span>';
+          html += '<span class="value" style="color:#a0a0b0;">' + (m.subject||'').substring(0,22) + '</span>';
+          html += '</div>';
+        });
+      });
+      if (!html) html = '<div class="stat"><span class="label">No emails yet</span></div>';
+      card.innerHTML = html;
+    }).catch(function(){
+      var e = document.getElementById('pfp-inbox');
+      if (e) e.innerHTML = '<div class="stat"><span class="label">Inbox unavailable</span></div>';
+    });
+  }
+  loadPfpInbox();
+  setInterval(loadPfpInbox, 15000);
+
   function renderFunctions() {
     const search = document.getElementById('search').value.toLowerCase();
     const methodFilter = document.getElementById('methodFilter').value;
@@ -857,6 +968,36 @@ app.get('/api/catalog', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: 'Catalog not available', message: e.message });
   }
+});
+
+// API: Fleet heartbeat — agents self-report their status
+app.post('/api/fleet/heartbeat', (req, res) => {
+  trackRequest('/api/fleet/heartbeat');
+  const { agent_id, status, tunnel_url, version, capabilities, hashrate, device_type, metadata } = req.body || {};
+  if (!agent_id || !status) {
+    return res.status(400).json({ error: 'agent_id and status are required' });
+  }
+  const agents = state.get('fleet.agents', {});
+  agents[agent_id] = {
+    agent_id,
+    status,
+    tunnel_url: tunnel_url || null,
+    version: version || 'unknown',
+    capabilities: capabilities || [],
+    hashrate: hashrate || 0,
+    device_type: device_type || 'unknown',
+    metadata: metadata || {},
+    last_seen: new Date().toISOString(),
+  };
+  state.set('fleet.agents', agents);
+  res.json({ success: true, agent_id, status, registered: true });
+});
+
+// API: List all registered fleet agents
+app.get('/api/fleet/agents', (req, res) => {
+  trackRequest('/api/fleet/agents');
+  const agents = state.get('fleet.agents', {});
+  res.json({ agents: Object.values(agents), count: Object.keys(agents).length });
 });
 
 // API: Live Fleet Status (aggregated from all agents)
@@ -1338,6 +1479,125 @@ app.post('/log', (req, res) => {
   const entry = req.body;
   logActivity('remote-log', entry?.source || '?', entry?.level || 'info', entry?.message || '');
   res.json({ success: true });
+});
+
+// ── Resend inbound email webhook ────────────────────────────
+// Receives email.received events from Resend when replies come in
+// to bookings@partyfavorphoto.com or any address on partyfavorphoto.com
+app.post('/webhook/resend-inbound', (req, res) => {
+  const event = req.body;
+  
+  // Verify it's a Resend webhook event
+  if (event?.type !== 'email.received') {
+    return res.status(400).json({ error: 'unexpected event type' });
+  }
+
+  // Optional: verify webhook signature
+  const signingSecret = process.env.RESEND_WEBHOOK_SECRET;
+  if (signingSecret) {
+    try {
+      const crypto = require('crypto');
+      const svixId = req.headers['svix-id'];
+      const svixTimestamp = req.headers['svix-timestamp'];
+      const svixSignature = req.headers['svix-signature'];
+      
+      if (svixId && svixTimestamp && svixSignature) {
+        const signedContent = `${svixId}.${svixTimestamp}.${JSON.stringify(req.body)}`;
+        const expectedSig = crypto
+          .createHmac('sha256', signingSecret)
+          .update(signedContent)
+          .digest('base64');
+        
+        const receivedSigs = svixSignature.split(' ').map(s => s.replace(/^v1,/,''));
+        const isValid = receivedSigs.some(sig => {
+          try {
+            return crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(sig));
+          } catch { return false; }
+        });
+        
+        if (!isValid) {
+          console.warn('[Resend Inbound] Invalid webhook signature - processing anyway');
+        }
+      }
+    } catch (e) {
+      console.warn('[Resend Inbound] Signature verification error:', e.message);
+    }
+  }
+
+  const { data } = event;
+  const emailEntry = {
+    email_id: data.email_id,
+    from: data.from,
+    to: data.to,
+    cc: data.cc,
+    subject: data.subject,
+    created_at: data.created_at,
+    message_id: data.message_id,
+    attachments: (data.attachments || []).map(a => ({ id: a.id, filename: a.filename, content_type: a.content_type })),
+    received_at: new Date().toISOString(),
+  };
+
+  // Store in activity log
+  logActivity('resend-inbound', data.email_id, 'RECEIVED', 
+    `From: ${data.from} | Subject: ${data.subject || '(no subject)'}`);
+
+  // Store in running list in state
+  const inbox = state.get('resend_inbox') || [];
+  inbox.unshift(emailEntry);
+  // Keep last 50 emails
+  if (inbox.length > 50) inbox.length = 50;
+  state.set('resend_inbox', inbox);
+
+  console.log(`[Resend Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}"`);
+
+  res.json({ received: true, email_id: data.email_id });
+});
+
+// ── GET Resend inbox ────────────────────────────────────────
+app.get('/resend/inbox', (req, res) => {
+  const inbox = state.get('resend_inbox') || [];
+  res.json({ count: inbox.length, emails: inbox });
+});
+
+// ── PFP: List bookings (proxy to Supabase) ────────────────
+app.get('/pfp/bookings', async (req, res) => {
+  try {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      return res.json({ status: 'error', message: 'Supabase not configured' });
+    }
+    const r = await fetch(`${supabaseUrl}/rest/v1/bookings?select=*&order=created_at.desc`, {
+      headers: { 'Authorization': `Bearer ${supabaseKey}`, 'apikey': supabaseKey }
+    });
+    const data = await r.json();
+    res.json({ count: data.length, bookings: data });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── PFP: Booking stats ─────────────────────────────────────
+app.get('/pfp/stats', async (req, res) => {
+  try {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      return res.json({ status: 'error', message: 'Supabase not configured' });
+    }
+    const r = await fetch(`${supabaseUrl}/rest/v1/bookings?select=*`, {
+      headers: { 'Authorization': `Bearer ${supabaseKey}`, 'apikey': supabaseKey }
+    });
+    const data = await r.json();
+    const total = data.length;
+    const leads = data.filter(b => b.status === 'lead').length;
+    const quoted = data.filter(b => b.status === 'quoted').length;
+    const confirmed = data.filter(b => b.status === 'confirmed' || b.status === 'deposit_paid').length;
+    const revenue = data.reduce((s, b) => s + (b.deposit_paid ? b.base_price : 0), 0);
+    res.json({ total, leads, quoted, confirmed, revenue, bookings: data.slice(0, 5) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ── Start ───────────────────────────────────────────────────
