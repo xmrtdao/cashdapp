@@ -55,17 +55,55 @@ if (batch.length === 0) {
 
 let sent = 0, errors = 0;
 const logDir = path.join(__dirname, '..', 'relay-data');
+const LOCK_FILE = path.join(logDir, 'campaign.lock');
+
+// File-based lock to prevent concurrent campaign runs
+function acquireLock() {
+  try {
+    if (existsSync(LOCK_FILE)) {
+      const lockAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+      if (lockAge < 3600000) {
+        console.log('Campaign already running (age: ' + Math.round(lockAge/1000) + 's) — exiting');
+        return false;
+      }
+      fs.unlinkSync(LOCK_FILE);
+    }
+    fs.writeFileSync(LOCK_FILE, String(Date.now()));
+    return true;
+  } catch { return false; }
+}
+function releaseLock() {
+  try { if (existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE); } catch {}
+}
+
+if (!acquireLock()) process.exit(0);
+process.on('exit', releaseLock);
+process.on('SIGINT', () => { releaseLock(); process.exit(1); });
+process.on('uncaughtException', () => { releaseLock(); process.exit(1); });
+
+function appendSent(email) {
+  sentHistory.push({ email, ts: Date.now() });
+  fs.writeFileSync(SENT_FILE, JSON.stringify(sentHistory, null, 2));
+}
 
 function sendNext() {
   if (batch.length === 0 || sent + errors >= count) {
     const summary = `[${new Date().toISOString()}] Campaign: ${sent} sent, ${errors} errors`;
     console.log(summary);
     fs.appendFileSync(LOG_FILE, summary + '\n');
-    // Save sent history
-    fs.writeFileSync(SENT_FILE, JSON.stringify(sentHistory, null, 2));
+    releaseLock();
     return;
   }
   const entry = batch.shift();
+  
+  // Double-check this email hasn't been sent already (defense in depth)
+  const recentSentCheck = new Set(sentHistory.filter(s => s.ts > Date.now() - 30*24*60*60*1000).map(s => s.email));
+  if (recentSentCheck.has(entry.email)) {
+    // Already sent in this session — skip
+    sent++;
+    setTimeout(sendNext, 10);
+    return;
+  }
   // Build dynamic email body with Stripe booking links
   const stripeGeneral = 'https://buy.stripe.com/8x25kD7ezg6h4iC15YbZe03';
   const stripe3hr = 'https://buy.stripe.com/9B63cv9mH07j3eyeWObZe06';
@@ -142,7 +180,7 @@ partyfavorphoto.com
     res.on('end', () => {
       if (data.includes('"status":"sent"')) {
         sent++;
-        sentHistory.push({ email: entry.email, ts: Date.now() });
+        appendSent(entry.email);
       } else {
         errors++;
       }
