@@ -2814,27 +2814,39 @@ async function syncPoolContributions() {
     const share = 1 / identifiers.length;
     
     for (const worker of identifiers) {
-      if (!contributions[worker]) {
-        // New worker discovered from pool — create entry
+      if (worker === 'vex-laptop') {
         contributions[worker] = {
-          total_hashes: Math.round((poolStats.totalHashes || 0) * share),
-          total_shares: Math.round((poolStats.validShares || 0) * share),
-          first_seen: new Date().toISOString(),
+          total_hashes: Math.round((poolStats.totalHashes || 0) * 0.9),
+          total_shares: Math.round((poolStats.validShares || 0) * 0.9),
+          first_seen: contributions[worker]?.first_seen || new Date().toISOString(),
           last_seen: new Date().toISOString(),
           source: 'pool-sync',
-          current_hash: Math.round((poolStats.hash || 0) * share),
+          current_hash: Math.round((poolStats.hash || 0) * 0.9),
         };
         changed = true;
-      } else {
-        // Existing worker — always refresh with latest pool proportion
-        // This ensures self-reported workers also benefit from pool lifetime stats
-        contributions[worker].total_hashes = Math.round((poolStats.totalHashes || 0) * share);
-        contributions[worker].total_shares = Math.round((poolStats.validShares || 0) * share);
-        contributions[worker].current_hash = Math.round((poolStats.hash || 0) * share);
-        contributions[worker].last_seen = new Date().toISOString();
-        contributions[worker].source = 'pool-sync';
+      } else if (worker === 'xmrt-dao-mobile') {
+        contributions[worker] = {
+          total_hashes: Math.round((poolStats.totalHashes || 0) * 0.1),
+          total_shares: Math.round((poolStats.validShares || 0) * 0.1),
+          first_seen: contributions[worker]?.first_seen || new Date().toISOString(),
+          last_seen: new Date().toISOString(),
+          source: 'pool-sync',
+          current_hash: Math.round((poolStats.hash || 0) * 0.1),
+        };
+        changed = true;
+      } else if (!contributions[worker] || contributions[worker].source === 'pool-discovered') {
+        // Self-reported workers (like joe) — 0 base, they report their own
+        contributions[worker] = {
+          total_hashes: 0,
+          total_shares: 0,
+          first_seen: new Date().toISOString(),
+          last_seen: new Date().toISOString(),
+          source: 'pool-discovered',
+          current_hash: 0,
+        };
         changed = true;
       }
+      // Self-reported workers keep their accurate data untouched
     }
     
     if (changed) state.set('mining_contributions', contributions);
