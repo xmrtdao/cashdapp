@@ -1289,6 +1289,9 @@ app.get('/', (req, res) => {
     <div class="card">
       <h3>Mining Script</h3>
       <pre style="background:#0d0d15;padding:0.6rem;border-radius:6px;font-size:0.72rem;overflow-x:auto;color:#a0a0b0;white-space:pre-wrap;word-break:break-all;">curl -o signup.py -L https://raw.githubusercontent.com/xmrtdao/mmlauncher/main/scripts/mobile-signup.py && sha256sum signup.py && python3 signup.py</pre>
+      <div style="margin-top:6px;font-size:11px;color:#6b6b80;">After setup, run the share reporter:</div>
+      <pre style="background:#0d0d15;padding:0.4rem 0.6rem;border-radius:4px;font-size:0.7rem;overflow-x:auto;color:#60a5fa;white-space:pre-wrap;word-break:break-all;">curl -o xmrig-report.py -L https://raw.githubusercontent.com/xmrtdao/mmlauncher/main/scripts/xmrig-report.py
+python3 xmrig-report.py --daemon --worker your-alias</pre>
     </div>
   </div>
 
