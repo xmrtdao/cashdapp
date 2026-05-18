@@ -1152,14 +1152,15 @@ app.get('/', (req, res) => {
       </div>
     </div>
     <div class="card">
-      <h3>Mining</h3>
-      <div class="stat"><span class="label">Total Hash</span><span class="value" id="pool-hash">checking...</span></div>
-      <div class="stat"><span class="label">Vex Laptop</span><span class="value" id="miner-vex">-</span></div>
-      <div class="stat"><span class="label">Hermes Phone</span><span class="value" id="miner-hermes">-</span></div>
-      <div class="stat"><span class="label">Hermes Hash</span><span class="value" id="hermes-hash">0 H/s</span></div>
+      <h3>Mining Pool <span id="pool-workers" style="color:#6b6b80;font-weight:400;font-size:0.7rem;">-</span></h3>
+      <div class="stat"><span class="label">Pool Hashrate</span><span class="value" id="pool-hash">checking...</span></div>
       <div class="stat"><span class="label">Valid Shares</span><span class="value" id="pool-shares">-</span></div>
       <div class="stat"><span class="label">XMR Paid / Due</span><span class="value" id="pool-xmr">-</span></div>
-      <div class="stat"><span class="label">Workers</span><span class="value" id="pool-workers" style="font-size:0.75rem;color:#6b6b80;">-</span></div>
+    </div>
+    <div class="card">
+      <h3>Leaderboard</h3>
+      <div style="margin-bottom:6px;font-size:11px;color:#6b6b80;">Live hashrate · shares · XMRT rewards</div>
+      <div id="miner-leaderboard"><div class="stat"><span class="label">Loading...</span></div></div>
     </div>
     <div class="card">
       <h3>Web Mining Pool</h3>
@@ -1222,12 +1223,12 @@ app.get('/', (req, res) => {
     </div>
 
     <div class="card">
-      <h3 style="color:#4ade80;">DAO Membership</h3>
-      <div class="stat"><span class="label"><a href="https://whop.com/xmrt-dao" target="_blank" style="color:#4ade80;text-decoration:none;">Join XMRT DAO</a></span><span class="value">free</span></div>
-      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_W6r4uqGWNaKHp" target="_blank" style="color:#ff6b35;text-decoration:none;">DAO Premium</a></span><span class="value">$9.99/mo</span></div>
-      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_Wj1nh8AJhdsLN" target="_blank" style="color:#ff6b35;text-decoration:none;">DAO Premium Yearly</a></span><span class="value">$99.99/yr</span></div>
-      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_n853GD3f5IXm0" target="_blank" style="color:#60a5fa;text-decoration:none;">DAO Supporter</a></span><span class="value">$19.99</span></div>
-      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">Premium includes 2x mining rewards, governance voting, early hardware access</div>
+      <h3>XMRT DAO Membership</h3>
+      <div class="stat"><span class="label"><a href="https://whop.com/xmrt-dao" target="_blank" style="color:#4ade80;text-decoration:none;">Free Tier</a></span><span class="value">free</span></div>
+      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_W6r4uqGWNaKHp" target="_blank" style="color:#ff6b35;text-decoration:none;">Premium</a></span><span class="value">$9.99/mo</span></div>
+      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_Wj1nh8AJhdsLN" target="_blank" style="color:#ff6b35;text-decoration:none;">Premium Yearly</a></span><span class="value">$99.99/yr</span></div>
+      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_n853GD3f5IXm0" target="_blank" style="color:#60a5fa;text-decoration:none;">Supporter</a></span><span class="value">$19.99</span></div>
+      <div style="margin-top:6px;font-size:11px;color:#6b6b80;">Premium: 2x rewards · governance · early hardware</div>
     </div>
 
     <div class="card">
@@ -1289,9 +1290,6 @@ app.get('/', (req, res) => {
     <div class="card">
       <h3>Mining Script</h3>
       <pre style="background:#0d0d15;padding:0.6rem;border-radius:6px;font-size:0.72rem;overflow-x:auto;color:#a0a0b0;white-space:pre-wrap;word-break:break-all;">curl -o signup.py -L https://raw.githubusercontent.com/xmrtdao/mmlauncher/main/scripts/mobile-signup.py && sha256sum signup.py && python3 signup.py</pre>
-      <div style="margin-top:6px;font-size:11px;color:#6b6b80;">After setup, run the share reporter:</div>
-      <pre style="background:#0d0d15;padding:0.4rem 0.6rem;border-radius:4px;font-size:0.7rem;overflow-x:auto;color:#60a5fa;white-space:pre-wrap;word-break:break-all;">curl -o xmrig-report.py -L https://raw.githubusercontent.com/xmrtdao/mmlauncher/main/scripts/xmrig-report.py
-python3 xmrig-report.py --daemon --worker your-alias</pre>
     </div>
   </div>
 
@@ -1359,41 +1357,21 @@ python3 xmrig-report.py --daemon --worker your-alias</pre>
       document.getElementById('fnBody').innerHTML = '<tr><td colspan="7" style="color:#f87171;text-align:center;padding:2rem;">Failed to load catalog: ' + e.message + '</td></tr>';
     });
 
-  // Load live fleet status
-  function loadFleetStatus() {
-    fetch('/api/fleet')
-      .then(r => r.json())
-      .then(data => {
-        // Hermes status
-        const hermesCard = document.getElementById('hermes-status');
-        if (hermesCard && data.hermes) {
-          if (data.hermes.status === 'ok') {
-            hermesCard.innerHTML = '<span class="badge badge-ok">ONLINE</span> <span style="color:#6b6b80;font-size:0.75rem">' + (data.hermes.device || '') + ' ' + (data.hermes.ram_mb || '') + 'MB</span>';
-          } else {
-            hermesCard.innerHTML = '<span class="badge badge-err">OFFLINE</span>';
-          }
-        }
-        // Ollama status
-        const ollamaCard = document.getElementById('ollama-status');
-        if (ollamaCard && data.ollama) {
-          const cnt = data.ollama.models || 0;
-          ollamaCard.innerHTML = cnt > 0
-            ? '<span class="badge badge-ok">' + cnt + ' models</span>'
-            : '<span class="badge badge-err">offline</span>';
-        }
-        // Tasks
-        const tasksEl = document.getElementById('live-tasks');
-        if (tasksEl && data.vex?.tasks) {
-          const s = data.vex.tasks;
-          tasksEl.textContent = s.completed + ' done / ' + s.failed + ' failed / ' + s.queueLength + ' queued';
-        }
-        // Requests
-        document.getElementById('live-uptime') && (document.getElementById('live-uptime').textContent = Math.floor(data.vex?.uptime || 0) + 's');
-      })
-      .catch(() => {});
+  // Load pool stats for mining card
+  function loadPoolStats() {
+    fetch('/api/mining/pool-stats').then(function(r){return r.json();}).then(function(d){
+      var e;
+      if (e = document.getElementById('pool-hash')) e.textContent = (d.hash || 0).toFixed(0) + ' H/s';
+      if (e = document.getElementById('pool-shares')) e.textContent = (d.validShares||0).toLocaleString() + ' valid / ' + (d.invalidShares||0) + ' invalid';
+      if (e = document.getElementById('pool-xmr')) e.textContent = ((d.amtPaid||0)/1e12).toFixed(6) + ' / ' + ((d.amtDue||0)/1e12).toFixed(6) + ' XMR';
+    }).catch(function(){});
+    fetch('/api/mining/pool-identifiers').then(function(r){return r.json();}).then(function(ids){
+      var e = document.getElementById('pool-workers');
+      if (e) e.textContent = ids && ids.length ? ids.join(', ') : 'none';
+    }).catch(function(){});
   }
-  loadFleetStatus();
-  setInterval(loadFleetStatus, 30000);
+  loadPoolStats();
+  setInterval(loadPoolStats, 30000);
 
   // Fleet Agent Registry
   function loadFleetAgents() {
