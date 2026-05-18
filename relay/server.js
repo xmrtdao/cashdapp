@@ -1525,8 +1525,16 @@ app.get('/', (req, res) => {
         el.innerHTML = '<div class="stat"><span class="label">No contributors yet</span></div>';
         return;
       }
-      el.innerHTML = d.workers.slice(0,5).map(function(w) {
-        return '<div class="stat"><span class="label">' + w.worker.slice(0,16) + '</span><span class="value">' + w.xmr_earned + ' XMR / ' + w.xmrt_earned + ' XMRT</span></div>';
+      var now = Date.now();
+      el.innerHTML = d.workers.slice(0,10).map(function(w) {
+        var lastSeen = new Date(w.last_seen).getTime();
+        var minutesAgo = Math.round((now - lastSeen) / 60000);
+        var isOnline = minutesAgo < 10;
+        var statusDot = isOnline ? '<span style="color:#4ade80;">●</span>' : '<span style="color:#6b6b80;">○</span>';
+        var hashDisplay = w.current_hash > 0 ? w.current_hash + ' H/s' : '-';
+        var sharesDisplay = w.total_shares > 0 ? w.total_shares.toLocaleString() : '0';
+        var timeAgo = minutesAgo < 1 ? 'just now' : minutesAgo + 'm ago';
+        return '<div class="stat"><span class="label">' + statusDot + ' ' + w.worker.slice(0,16) + '<br><span style="font-size:0.65rem;color:#6b6b80;">' + hashDisplay + ' · ' + timeAgo + '</span></span><span class="value">' + sharesDisplay + ' shares<br><span style="font-size:0.65rem;color:#fbbf24;">' + w.xmrt_earned + ' XMRT</span></span></div>';
       }).join('');
     }).catch(function(){
       var el = document.getElementById('miner-leaderboard');
