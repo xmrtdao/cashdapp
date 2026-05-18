@@ -2778,6 +2778,32 @@ app.get('/sent-emails', (req, res) => {
   res.json({ count: sentLog.length, emails: sentLog.slice(0, limit) });
 });
 
+// POST /mining/heartbeat — worker reports live hashrate (no cumulative shares)
+// Shares are calculated from pool sync, this is just for live status + last_seen
+app.post('/mining/heartbeat', (req, res) => {
+  const { worker, hashrate } = req.body;
+  if (!worker) return res.status(400).json({ error: 'worker required' });
+  
+  const contributions = state.get('mining_contributions') || {};
+  if (!contributions[worker]) {
+    contributions[worker] = {
+      total_hashes: 0,
+      total_shares: 0,
+      current_hash: 0,
+      first_seen: new Date().toISOString(),
+      last_seen: new Date().toISOString(),
+      source: 'self-reported',
+    };
+  }
+  contributions[worker].current_hash = hashrate || 0;
+  contributions[worker].last_seen = new Date().toISOString();
+  contributions[worker].source = 'self-reported';
+  state.set('mining_contributions', contributions);
+  
+  logActivity('mining', worker, 'HEARTBEAT', `${hashrate||0} H/s`);
+  res.json({ recorded: true, worker, hashrate });
+});
+
 // ── Mining contribution tracking ────────────────────────
 // Records hashrate contributions from web miners by worker ID
 // Used to calculate XMRT rewards proportional to XMR mined
