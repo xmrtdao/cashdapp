@@ -1985,7 +1985,7 @@ const FLEET_CHAT_MAX = 500;
 const FLEET_AGENTS = {
   'vex': { name: 'Vex', endpoint: 'local', type: 'relay' },
   'eliza': { name: 'Eliza-Cloud', endpoint: 'eliza-relay', type: 'cloud' },
-  'hermes': { name: 'Hermes', endpoint: 'https://functional-graph-juan-lunch.trycloudflare.com', type: 'mobile' },
+  'hermes': { name: 'Hermes', endpoint: 'https://fleet.mobilemonero.com', type: 'mobile' },
 };
 
 function getFleetChatMessages(limit = 50) {
