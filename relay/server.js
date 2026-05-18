@@ -963,7 +963,25 @@ function guessHandlerFromTitle(title) {
 
 // ── Express App ─────────────────────────────────────────────
 const app = express();
-app.use(express.json({ limit: '5mb' }));
+
+// Raw body capture for requests without Content-Type (some agents omit it)
+// Forgiving JSON parser — handles all bodies as potential JSON
+app.use(express.json({ limit: '5mb', type: () => true }));
+
+// Fallback: parse body as JSON for requests without Content-Type
+app.use((req, res, next) => {
+  if (req.body && typeof req.body === 'object') return next();
+  if (req.headers['content-type']) return next();
+  
+  let raw = '';
+  req.on('data', c => raw += c);
+  req.on('end', () => {
+    if (raw) {
+      try { req.body = JSON.parse(raw); } catch {}
+    }
+    next();
+  });
+});
 
 // Health check
 app.get('/health', (req, res) => {
