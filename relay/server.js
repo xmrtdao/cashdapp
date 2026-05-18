@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+// Prevent background task crashes
+process.on('unhandledRejection', (err) => {
+  console.error('[Relay] Unhandled rejection (non-fatal):', err?.message || err);
+});
+
 /**
  * xmrtdao-relay server.js (Enhanced)
  * Local webhook relay for XMRT DAO — routes cloud-dispatched tasks
@@ -52,6 +57,8 @@ import { ollamaChat, listModels, checkOllamaHealth } from './tools/ollama-chat.m
 import { getFullSnapshot, getSystemResources, checkExternalServices } from './tools/monitor.mjs';
 import * as state from './lib/state.mjs';
 import { createTaskRunner } from './lib/task-runner.mjs';
+import { handleInboundEmail } from './lib/auto-responder.mjs';
+import * as minimax from './tools/minimax-pipeline.mjs';
 
 // ── Config ──────────────────────────────────────────────────
 const PORT = parseInt(process.env.RELAY_PORT || '8080');
@@ -61,7 +68,7 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const GITHUB_REPO = process.env.GITHUB_REPO || 'xmrtdao/mobilemonero';
 const HERMES_ENDPOINT = process.env.HERMES_ENDPOINT || 'http://192.168.14.115:9090';
-const DATA_DIR = join(__dirname, '..', '..', 'relay-data');
+const DATA_DIR = join(__dirname, '..', 'relay-data');
 const LOG_FILE = join(DATA_DIR, 'relay-log.json');
 
 mkdirSync(DATA_DIR, { recursive: true });
@@ -279,22 +286,33 @@ const handlers = {
 
   'mining-dashboard': async (task) => {
     logActivity('handler', task.id, 'START', 'Mining Dashboard');
-    const result = { cloud_stats: null, local_dashboard: null };
+    const result = { cloud_stats: null, pool_stats: null, local_mining: null };
     try {
-      const cloudCheck = await fetch(`${SUPABASE_URL}/rest/v1/mining_stats?limit=1`, {
-        headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+      // Use mining-proxy edge function instead of non-existent mining_stats table
+      const proxyRes = await fetch(`${SUPABASE_URL}/functions/v1/mining-proxy`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'get_stats', wallet: 'global' }),
+        signal: AbortSignal.timeout(10000),
       });
-      if (cloudCheck.ok) {
-        const stats = await cloudCheck.json();
-        result.cloud_stats = stats;
+      if (proxyRes.ok) {
+        const data = await proxyRes.json();
+        result.pool_stats = {
+          totalHashes: data.totalHashes,
+          validShares: data.validShares,
+          amtPaid: data.amtPaid,
+          amtDue: data.amtDue,
+          activeWorkers: data.active_workers,
+          workers: data.workers,
+        };
         result.status = 'connected';
       } else {
-        result.cloud_stats = { error: `HTTP ${cloudCheck.status}` };
+        result.pool_stats = { error: `HTTP ${proxyRes.status}` };
         result.status = 'cloud_unreachable';
       }
-      result.action_taken = 'Checked cloud mining stats.';
+      result.action_taken = 'Fetched live mining stats via SupportXMR proxy.';
     } catch (e) {
-      result.cloud_stats = { error: e.message };
+      result.pool_stats = { error: e.message };
       result.status = 'error';
     }
     return result;
@@ -455,7 +473,413 @@ const toolHandlers = {
     if (!issueNumber || !body) return { error: 'issueNumber and body are required' };
     return await postGitHubComment(issueNumber, body);
   },
-};
+
+  // ── Edge Function Proxy ──────────────────────────────────
+  'edge-function': async (args) => {
+    const fn = args?.function || args?.fn;
+    if (!fn) return { error: 'function name is required. Usage: {"function":"system-status","args":{}}' };
+    const payload = args?.args || args?.payload || {};
+    const url = `${SUPABASE_URL}/functions/v1/${fn}`;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(15000),
+      });
+      const duration = `${Date.now() - (globalThis.__efStart || Date.now())}ms`;
+      const data = await res.json().catch(() => ({ raw: 'non-json response' }));
+      return {
+        success: res.ok,
+        function: fn,
+        status: res.status,
+        data,
+      };
+    } catch (err) {
+      return { success: false, function: fn, error: err.message };
+    }
+  },
+
+  // ── Specific Edge Function Tools ─────────────────────────
+  'ef:system-status': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/system-status`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:system-health': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/system-health`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:system-diagnostics': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/system-diagnostics`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:get-suite-health': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/get-suite-health`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:eliza-relay': async (args) => {
+    const action = args?.action || args?.a || 'status';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/eliza-relay`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(typeof action === 'object' ? action : { action }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:github': async (args) => {
+    const action = args?.action || 'list_issues';
+    const data = args?.data || args?.args || {};
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/github-integration`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, data }),
+        signal: AbortSignal.timeout(15000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:knowledge': async (args) => {
+    const action = args?.action || 'check_status';
+    const data = args?.data || args?.args || {};
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/knowledge-manager`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, data }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:agent-manager': async (args) => {
+    const action = args?.action || 'list_agents';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/agent-manager`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(typeof action === 'object' ? action : { action }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:mining': async (args) => {
+    const action = args?.action || 'get_stats';
+    const wallet = args?.wallet || 'test';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/mining-proxy`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, wallet }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:schema': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/schema-manager`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'list_tables' }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:functions-list': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/list-available-functions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:supabase-integration': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/supabase-integration-v2`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'health' }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  // ── More Edge Function Tools (probe-confirmed working) ──
+  'ef:functions-catalog': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/list-available-functions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:function-actions': async (args) => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/get-function-actions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:search-functions': async (args) => {
+    const query = args?.query || 'mining';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/search-edge-functions`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:ecosystem-health': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/ecosystem-health-check`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:ecosystem-monitor': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/ecosystem-monitor`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(15000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:frontend-health': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/check-frontend-health`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:usage-monitor': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/usage-monitor`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:function-analytics': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/function-usage-analytics`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:task-auto-advance': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/task-auto-advance`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:opportunity-scanner': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/opportunity-scanner`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:predictive-analytics': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/predictive-analytics`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:monitor-devices': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/monitor-device-connections`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:auth-health': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/auth-health-monitor`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  // ── Edge Functions needing specific payloads (400 fixable) ──
+  'ef:knowledge-search': async (args) => {
+    const query = args?.query || 'test';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/search-knowledge`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ search_term: query }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:generate-payment-link': async (args) => {
+    const tier = args?.tier || 'basic';
+    const email = args?.email || 'test@test.com';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/generate-stripe-link`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tier, email }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:cron-proxy': async (args) => {
+    const path = args?.path || 'system-status';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/cron-proxy`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, method: 'POST', body: {} }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:schema-tables': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/schema-manager`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'list_tables' }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'fleet-chat': async (args) => {
+    const agent = args?.agent || 'vex';
+    const message = args?.message;
+    if (!message) return { error: 'message is required. Usage: {"agent":"vex|eliza|hermes","message":"..."}' };
+    const channel = args?.channel || 'all';
+    try {
+      const res = await fetch(`http://localhost:${PORT}/api/fleet-chat/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent, message, channel }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return await res.json();
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+}
 
 // ── Default handler ─────────────────────────────────────────
 async function defaultHandler(task) {
@@ -549,7 +973,7 @@ app.get('/health', (req, res) => {
     uptime: process.uptime(),
     port: PORT,
     agent: 'Eliza-Dev',
-    version: '4.0.0',
+    version: '5.0.0',
     tools: Object.keys(toolHandlers).length,
     handlers: Object.keys(handlers).length,
     requests: requestCounts.total,
@@ -560,7 +984,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   trackRequest('/');
   const hostname = execSync('hostname', { encoding: 'utf8' }).trim();
-  const tunnelUrl = state.get('tunnel-url') || 'https://stones-hugh-greatest-human.trycloudflare.com';
+  const tunnelUrl = state.get('tunnel-url') || 'https://relay.mobilemonero.com';
   const uptime = process.uptime();
   const days = Math.floor(uptime / 86400);
   const hours = Math.floor((uptime % 86400) / 3600);
@@ -572,46 +996,110 @@ app.get('/', (req, res) => {
   const toolCount = tools.length;
   const handlerCount = Object.keys(handlers).length;
   const stats = taskRunner.getStats();
+
+  // ── Campaign stats ────────────────────────────────────
+  const CAMPAIGN_SENT = join(DATA_DIR, 'campaign-sent.json');
+  const CAMPAIGN_CONTACTS = join(DATA_DIR, 'campaign-contacts.json');
+  const CAMPAIGN_LOG = join(DATA_DIR, 'campaign.log');
+  
+  let campaignSent = [];
+  let campaignContacts = [];
+  let campaignLastRun = 'never';
+  try {
+    if (existsSync(CAMPAIGN_SENT)) campaignSent = JSON.parse(readFileSync(CAMPAIGN_SENT, 'utf8'));
+    if (existsSync(CAMPAIGN_CONTACTS)) campaignContacts = JSON.parse(readFileSync(CAMPAIGN_CONTACTS, 'utf8'));
+    if (existsSync(CAMPAIGN_LOG)) {
+      const logLines = readFileSync(CAMPAIGN_LOG, 'utf8').trim().split('\n').filter(Boolean);
+      if (logLines.length > 0) {
+        const lastLine = logLines[logLines.length - 1];
+        const tsMatch = lastLine.match(/\[(.*?)\]/);
+        campaignLastRun = tsMatch ? tsMatch[1].slice(0, 16) : 'recent';
+      }
+    }
+  } catch (e) { /* stats unavailable */ }
+  
+  const totalSent = campaignSent.length;
+  const poolSize = campaignContacts.length;
+  const now = Date.now();
+  const cutoff30 = now - 30 * 24 * 60 * 60 * 1000;
+  const recentSent = new Set(campaignSent.filter(s => s.ts > cutoff30).map(s => s.email));
+  const freshAvailable = campaignContacts.filter(c => !recentSent.has(c.email) && c.email?.includes('@')).length;
+  
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const sentToday = campaignSent.filter(s => s.ts > todayStart.getTime()).length;
+  
+  // ── Scheduled Tasks ───────────────────────────────────
+  const taskSchedule = [
+    { time: '08:00', name: 'DailyCampaign', desc: '500 emails' },
+    { time: '12:00', name: 'NoonCampaign', desc: '500 emails' },
+    { time: '16:00', name: '4PMCampaign', desc: '500 emails' },
+    { time: '23:00', name: 'SeasonalScraper', desc: 'contact scrape' },
+    { time: 'Every hr', name: 'HourlyTaskFetch', desc: 'cron proxy' },
+  ];
+  const currentHour = new Date().getHours() - 6; // CST offset
   
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>XMRT DAO — Fleet Dashboard</title>
+  <title>MobileMonero — Fleet Dashboard</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #c0c0d0; padding: 1.5rem; }
-    h1 { color: #ff6b35; font-size: 1.6rem; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.75rem; }
-    h1 span { font-size: 0.9rem; color: #6b6b80; font-weight: 400; }
-    .subtitle { color: #8b8ba0; font-size: 0.9rem; margin-bottom: 1.5rem; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #c0c0d0; padding: 0.75rem; }
+    @media (min-width: 640px) { body { padding: 1.5rem; } }
+    h1 { color: #ff6b35; font-size: 1.2rem; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    @media (min-width: 640px) { h1 { font-size: 1.6rem; gap: 0.75rem; } }
+    h1 span { font-size: 0.75rem; color: #6b6b80; font-weight: 400; }
+    @media (min-width: 640px) { h1 span { font-size: 0.9rem; } }
+    .subtitle { color: #8b8ba0; font-size: 0.8rem; margin-bottom: 1rem; }
+    @media (min-width: 640px) { .subtitle { font-size: 0.9rem; margin-bottom: 1.5rem; } }
     .subtitle a { color: #4a7cff; text-decoration: none; }
     .subtitle a:hover { text-decoration: underline; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-    .card { background: #12121a; border: 1px solid #2a2a3a; border-radius: 10px; padding: 1rem; }
-    .card h3 { color: #ff6b35; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.6rem; }
-    .stat { display: flex; justify-content: space-between; padding: 0.3rem 0; border-bottom: 1px solid #1a1a2a; font-size: 0.85rem; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 0.75rem; margin-bottom: 1.5rem; }
+    @media (min-width: 480px) { .grid { grid-template-columns: repeat(2, 1fr); gap: 0.75rem; } }
+    @media (min-width: 768px) { .grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; } }
+    .grid > .full { grid-column: 1 / -1; }
+    .card { background: #12121a; border: 1px solid #2a2a3a; border-radius: 10px; padding: 0.75rem; }
+    @media (min-width: 640px) { .card { padding: 1rem; } }
+    .card h3 { color: #ff6b35; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem; }
+    @media (min-width: 640px) { .card h3 { font-size: 0.8rem; margin-bottom: 0.6rem; } }
+    .stat { display: flex; justify-content: space-between; padding: 0.25rem 0; border-bottom: 1px solid #1a1a2a; font-size: 0.75rem; gap: 0.5rem; }
+    @media (min-width: 640px) { .stat { padding: 0.3rem 0; font-size: 0.85rem; } }
     .stat:last-child { border-bottom: none; }
-    .label { color: #8b8ba0; }
-    .value { color: #e0e0f0; font-family: 'SF Mono', 'Cascadia Code', monospace; }
-    .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; font-weight: 600; }
+    .label { color: #8b8ba0; flex-shrink: 0; }
+    .value { color: #e0e0f0; font-family: 'SF Mono', 'Cascadia Code', monospace; text-align: right; word-break: break-all; min-width: 0; }
+    .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.65rem; font-weight: 600; }
+    @media (min-width: 640px) { .badge { font-size: 0.7rem; } }
     .badge-ok { background: #14532d; color: #4ade80; }
     .badge-warn { background: #451a03; color: #fbbf24; }
     .badge-err { background: #450a0a; color: #f87171; }
     .badge-info { background: #1a3a5c; color: #60a5fa; }
 
+    /* Fleet chat - full width always */
+    .chat-card { grid-column: 1 / -1; }
+    .chat-input-wrap { display: flex; gap: 4px; flex-wrap: nowrap; }
+    .chat-input-wrap input { min-width: 0; width: 100%; }
+
     /* Search & Filter */
-    .controls { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; align-items: center; }
-    .controls input { flex: 1; min-width: 200px; padding: 0.6rem 1rem; border: 1px solid #2a2a3a; border-radius: 8px; background: #0d0d15; color: #e0e0f0; font-size: 0.9rem; outline: none; }
+    .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; align-items: center; }
+    @media (min-width: 640px) { .controls { gap: 0.75rem; margin-bottom: 1rem; } }
+    .controls input { flex: 1; min-width: 0; padding: 0.5rem 0.75rem; border: 1px solid #2a2a3a; border-radius: 8px; background: #0d0d15; color: #e0e0f0; font-size: 0.85rem; outline: none; }
+    @media (min-width: 640px) { .controls input { min-width: 200px; padding: 0.6rem 1rem; font-size: 0.9rem; } }
     .controls input:focus { border-color: #ff6b35; }
-    .controls select { padding: 0.6rem 1rem; border: 1px solid #2a2a3a; border-radius: 8px; background: #0d0d15; color: #e0e0f0; font-size: 0.85rem; outline: none; cursor: pointer; }
+    .controls select { padding: 0.5rem 0.75rem; border: 1px solid #2a2a3a; border-radius: 8px; background: #0d0d15; color: #e0e0f0; font-size: 0.8rem; outline: none; cursor: pointer; }
+    @media (min-width: 640px) { .controls select { padding: 0.6rem 1rem; font-size: 0.85rem; } }
     .controls select:focus { border-color: #ff6b35; }
-    .count { color: #6b6b80; font-size: 0.85rem; white-space: nowrap; }
+    .count { color: #6b6b80; font-size: 0.8rem; white-space: nowrap; }
+    @media (min-width: 640px) { .count { font-size: 0.85rem; } }
 
     /* Table */
-    .table-wrap { overflow-x: auto; border: 1px solid #2a2a3a; border-radius: 10px; background: #12121a; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-    th { text-align: left; padding: 0.6rem 0.8rem; background: #1a1a2a; color: #8b8ba0; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.72rem; border-bottom: 1px solid #2a2a3a; cursor: pointer; white-space: nowrap; }
+    .table-wrap { overflow-x: auto; border: 1px solid #2a2a3a; border-radius: 8px; background: #12121a; -webkit-overflow-scrolling: touch; }
+    @media (min-width: 640px) { .table-wrap { border-radius: 10px; } }
+    table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
+    @media (min-width: 640px) { table { font-size: 0.82rem; } }
+    th { text-align: left; padding: 0.4rem 0.5rem; background: #1a1a2a; color: #8b8ba0; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.65rem; border-bottom: 1px solid #2a2a3a; cursor: pointer; white-space: nowrap; }
+    @media (min-width: 640px) { th { padding: 0.6rem 0.8rem; font-size: 0.72rem; } }
     th:hover { color: #c0c0d0; }
     td { padding: 0.5rem 0.8rem; border-bottom: 1px solid #1a1a2a; vertical-align: top; }
     tr:hover td { background: #1a1a2a; }
@@ -633,7 +1121,7 @@ app.get('/', (req, res) => {
   </style>
 </head>
 <body>
-  <h1>⚡ XMRT DAO <span>Fleet Dashboard</span></h1>
+  <h1>MobileMonero <span>Fleet Dashboard</span></h1>
   <div class="subtitle">
     Vex Relay · ${hostname} · 
     <a href="${tunnelUrl}" target="_blank">${tunnelUrl}</a> ·
@@ -641,14 +1129,78 @@ app.get('/', (req, res) => {
   </div>
   
   <div class="grid">
+<!-- Fleet Chat Room -->
+    <div class="card chat-card" style="grid-column:1/-1;">
+      <h3>Fleet Chat <span style="color:#6b6b80;font-weight:400;font-size:0.7rem;">— Vex · Eliza-Cloud · Hermes</span></h3>
+      <div id="fleet-chat-msgs" style="height:180px;overflow-y:auto;background:#0d0d15;border-radius:6px;padding:8px;margin-bottom:6px;font-size:12px;line-height:1.5;">
+        <div style="color:#8b8ba0;text-align:center;padding:20px 0;font-size:12px;">Fleet chat connected. Messages broadcast to all agents.</div>
+      </div>
+      <div class="chat-input-wrap" style="gap:4px;">
+        <select id="fleet-chat-agent" style="padding:6px;border-radius:6px;border:1px solid #2a2a3a;background:#1a1a2a;color:#e0e0f0;font-size:12px;outline:none;flex-shrink:0;">
+          <option value="vex">⚡ Vex</option>
+          <option value="eliza">🤖 Eliza-Cloud</option>
+          <option value="hermes">📱 Hermes</option>
+        </select>
+        <input id="fleet-chat-input" type="text" placeholder="Message the fleet..." 
+          style="flex:1;min-width:0;padding:6px 10px;border-radius:6px;border:1px solid #2a2a3a;background:#1a1a2a;color:#e0e0f0;font-size:12px;outline:none;"
+          onkeypress="if(event.key==='Enter')sendFleetChat()">
+        <button onclick="sendFleetChat()" style="padding:6px 14px;border-radius:6px;border:none;background:#ff6b35;color:white;cursor:pointer;font-size:12px;font-weight:600;flex-shrink:0;">Send</button>
+      </div>
+      <div style="margin-top:4px;display:flex;gap:8px;font-size:11px;color:#6b6b80;">
+        <span>💬 Fleet broadcast — all agents see your message</span>
+        <span id="fleet-chat-status" style="color:#4ade80;">● connected</span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Mining</h3>
+      <div class="stat"><span class="label">Total Hash</span><span class="value" id="pool-hash">checking...</span></div>
+      <div class="stat"><span class="label">Vex Laptop</span><span class="value" id="miner-vex">-</span></div>
+      <div class="stat"><span class="label">Hermes Phone</span><span class="value" id="miner-hermes">-</span></div>
+      <div class="stat"><span class="label">Hermes Hash</span><span class="value" id="hermes-hash">0 H/s</span></div>
+      <div class="stat"><span class="label">Valid Shares</span><span class="value" id="pool-shares">-</span></div>
+      <div class="stat"><span class="label">XMR Paid / Due</span><span class="value" id="pool-xmr">-</span></div>
+      <div class="stat"><span class="label">Workers</span><span class="value" id="pool-workers" style="font-size:0.75rem;color:#6b6b80;">-</span></div>
+    </div>
+    <div class="card">
+      <h3>Web Mining Pool</h3>
+      <div style="display:flex;gap:6px;margin-bottom:8px;">
+        <input id="miner-alias" type="text" placeholder="Your alias (optional)" 
+          style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid #2a2a3a;background:#1a1a2a;color:#e0e0f0;font-size:13px;outline:none;"
+          onkeyup="localStorage.setItem('miner_alias',this.value)">
+      </div>
+      <div class="stat"><span class="label">Status</span><span class="value" id="miner-status" style="color:#4ade80;">connecting...</span></div>
+      <div class="stat"><span class="label">Your Hashrate</span><span class="value" id="browser-hash">-</span></div>
+      <div class="stat"><span class="label" style="color:#4ade80;font-weight:600;">Web Pool XMR</span><span class="value" id="browser-xmr" style="color:#4ade80;font-weight:700;">loading...</span></div>
+      <div class="stat"><span class="label">Network Effect</span><span class="value" id="network-effect" style="color:#fbbf24;">waiting for peers...</span></div>
+      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">
+        <span>Mining auto-starts when you visit — close tab to stop.</span>
+        &middot;
+        <a href="https://xmrtrig.vercel.app" target="_blank" style="color:#60a5fa;">Open miner</a>
+        &middot;
+        <a href="https://supportxmr.com/#/workers/46UxNFuGM2E3UwmZWWJicaRPoRwqwW4byQkaTHkX8yPcVihp91qAVtSFipWUGJJUyTXgzSqxzDQtNLf2bsp2DX2qCCgC5mg" target="_blank" style="color:#60a5fa;">Pool</a>
+      </div>
+      <div style="margin-top:10px;border-top:1px solid #2a2a3a;padding-top:8px;">
+        <div style="font-size:11px;color:#8b8ba0;margin-bottom:4px;">TOP CONTRIBUTORS</div>
+        <div id="miner-leaderboard"><div class="stat"><span class="label">Loading...</span></div></div>
+      </div>
+    </div>
     <div class="card">
       <h3>Relay Status</h3>
       <div class="stat"><span class="label">Uptime</span><span class="value">${uptimeStr}</span></div>
-      <div class="stat"><span class="label">Relay</span><span class="value">v4.0.0</span></div>
+      <div class="stat"><span class="label">Relay</span><span class="value">v5.0.0</span></div>
       <div class="stat"><span class="label">Tools</span><span class="value">${toolCount}</span></div>
       <div class="stat"><span class="label">Handlers</span><span class="value">${handlerCount}</span></div>
-      <div class="stat"><span class="label">Tasks</span><span class="value">${stats.completed} done / ${stats.failed} failed</span></div>
       <div class="stat"><span class="label">Requests</span><span class="value">${requestCounts.total}</span></div>
+    </div>
+    
+    <div class="card">
+      <h3>Campaign</h3>
+      <div class="stat"><span class="label">Contact Pool</span><span class="value">${poolSize}</span></div>
+      <div class="stat"><span class="label">Sent Today</span><span class="value">${sentToday}</span></div>
+      <div class="stat"><span class="label">Sent Total</span><span class="value">${totalSent}</span></div>
+      <div class="stat"><span class="label">Fresh Avail</span><span class="value">${freshAvailable}</span></div>
+      <div class="stat"><span class="label">Last Run</span><span class="value">${campaignLastRun}</span></div>
+      <div class="stat"><span class="label">Next Drop</span><span class="value" id="next-drop">-</span></div>
     </div>
     
     <div class="card">
@@ -664,30 +1216,42 @@ app.get('/', (req, res) => {
     </div>
 
     <div class="card">
-      <h3>Mining</h3>
-      <div class="stat"><span class="label">Pool Hash</span><span class="value" id="pool-hash">checking...</span></div>
-      <div class="stat"><span class="label">Vex Laptop</span><span class="value" id="miner-vex">-</span></div>
-      <div class="stat"><span class="label">Hermes Phone</span><span class="value" id="miner-hermes">-</span></div>
-      <div class="stat"><span class="label">Valid Shares</span><span class="value" id="pool-shares">-</span></div>
-      <div class="stat"><span class="label">XMR Paid / Due</span><span class="value" id="pool-xmr">-</span></div>
-      <div class="stat"><span class="label">Workers</span><span class="value" id="pool-workers" style="font-size:0.75rem;color:#6b6b80;">-</span></div>
-    </div>
-
-    <div class="card">
       <h3>Heartbeat Endpoint</h3>
       <div style="background:#0d0d15;padding:0.4rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.75rem;color:#60a5fa;word-break:break-all;" id="heartbeat-url">loading...</div>
       <div style="color:#6b6b80;font-size:0.72rem;margin-top:0.4rem;">POST: {"agent_id":"...","status":"ONLINE","tunnel_url":"...","hashrate":0}</div>
     </div>
 
     <div class="card">
-      <h3>Key Repos</h3>
-      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/mobilemonero" style="color:inherit;text-decoration:none;">mobilemonero</a></span><span class="value">hub</span></div>
-      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/relay-go" style="color:inherit;text-decoration:none;">relay-go</a></span><span class="value">redundant</span></div>
-      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/xmrt-mesh" style="color:inherit;text-decoration:none;">xmrt-mesh</a></span><span class="value">p2p mesh</span></div>
-      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/zero-claw" style="color:inherit;text-decoration:none;">zero-claw</a></span><span class="value">198 fns</span></div>
-      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/night-moves" style="color:inherit;text-decoration:none;">night-moves</a></span><span class="value">mining</span></div>
-      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/mmlauncher" style="color:inherit;text-decoration:none;">mmlauncher</a></span><span class="value">script</span></div>
-      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao/suite" style="color:inherit;text-decoration:none;">suite</a></span><span class="value">monorepo</span></div>
+      <h3 style="color:#4ade80;">DAO Membership</h3>
+      <div class="stat"><span class="label"><a href="https://whop.com/xmrt-dao" target="_blank" style="color:#4ade80;text-decoration:none;">Join XMRT DAO</a></span><span class="value">free</span></div>
+      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_W6r4uqGWNaKHp" target="_blank" style="color:#ff6b35;text-decoration:none;">DAO Premium</a></span><span class="value">$9.99/mo</span></div>
+      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_Wj1nh8AJhdsLN" target="_blank" style="color:#ff6b35;text-decoration:none;">DAO Premium Yearly</a></span><span class="value">$99.99/yr</span></div>
+      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_n853GD3f5IXm0" target="_blank" style="color:#60a5fa;text-decoration:none;">DAO Supporter</a></span><span class="value">$19.99</span></div>
+      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">Premium includes 2x mining rewards, governance voting, early hardware access</div>
+    </div>
+
+    <div class="card">
+      <h3>DAO Ecosystem</h3>
+      <div class="stat"><span class="label"><a href="https://xmrtsolutions.vercel.app" target="_blank" style="color:#60a5fa;text-decoration:none;">XMRT Token Faucet</a></span><span class="value">testnet</span></div>
+      <div class="stat"><span class="label"><a href="https://coldcash.vercel.app" target="_blank" style="color:#60a5fa;text-decoration:none;">ColdCash</a></span><span class="value">private payments</span></div>
+      <div class="stat"><span class="label"><a href="https://pipuente.vercel.app" target="_blank" style="color:#60a5fa;text-decoration:none;">PiPuente</a></span><span class="value">cross-chain bridge</span></div>
+      <div class="stat"><span class="label"><a href="https://paragraph.com/@xmrt" target="_blank" style="color:#60a5fa;text-decoration:none;">Paragraph Blog</a></span><span class="value">DAO journal</span></div>
+      <div class="stat"><span class="label"><a href="https://sepolia.etherscan.io/token/0x77307DFbc436224d5e6f2048d2b6bDfA66998a15" target="_blank" style="color:#60a5fa;text-decoration:none;">XMRT Token</a></span><span class="value">0x7730...8a15</span></div>
+      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao" target="_blank" style="color:#60a5fa;text-decoration:none;">GitHub Org</a></span><span class="value">59 repos</span></div>
+      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">
+        <a href="https://github.com/xmrtdao/mobilemonero" style="color:#6b6b80;">mobilemonero</a> ·
+        <a href="https://github.com/xmrtdao/suite" style="color:#6b6b80;">suite</a> ·
+        <a href="https://github.com/xmrtdao/zero-claw" style="color:#6b6b80;">zero-claw</a> ·
+        <a href="https://github.com/xmrtdao/xmrt-mesh" style="color:#6b6b80;">xmrt-mesh</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="color:#60a5fa;">Social Publishing</h3>
+      <div class="stat"><span class="label"><a href="https://typefully.com/?d=9140069&a=272973" target="_blank" style="color:#60a5fa;text-decoration:none;">Next Tweet</a></span><span class="value">May 18, 12PM CST</span></div>
+      <div class="stat"><span class="label">Account</span><span class="value"><a href="https://x.com/XMRTSolutions" target="_blank" style="color:#60a5fa;text-decoration:none;">@XMRTSolutions</a></span></div>
+      <div class="stat"><span class="label">Pipeline</span><span class="value" style="font-size:0.7rem;">Paragraph -> Typefully -> X</span></div>
+      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">New: Typefully webhook active - published tweets log to sent-emails</div>
     </div>
 
     <div class="card" id="pfp-card">
@@ -695,6 +1259,21 @@ app.get('/', (req, res) => {
       <div id="pfp-inbox">
         <div class="stat"><span class="label">Loading inbox...</span></div>
       </div>
+    </div>
+
+    <div class="card" id="mm-card">
+      <h3> MobileMonero <span style="color:#6b6b80;font-size:0.7rem;">inbox</span></h3>
+      <div id="mm-inbox">
+        <div class="stat"><span class="label">Loading inbox...</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3> AI Template Builder</h3>
+      <div class="stat"><span class="label">Engine</span><span class="value">nano-banana-2 + edit</span></div>
+      <div class="stat"><span class="label">Cost</span><span class="value">$0.03-0.06/gen</span></div>
+      <div class="stat"><span class="label"><a href="/pfp/templates" style="color:#60a5fa;text-decoration:none;">GET /pfp/templates</a></span><span class="value">gallery</span></div>
+      <div class="stat"><span class="label">Workflow</span><span class="value">reference → AI → template</span></div>
     </div>
 
     <div class="card">
@@ -740,6 +1319,7 @@ app.get('/', (req, res) => {
         <tr>
           <th onclick="sortBy('name')">Function ↕</th>
           <th onclick="sortBy('methods')">Method ↕</th>
+          <th>Timeout</th>
           <th onclick="sortBy('type')">Type ↕</th>
           <th onclick="sortBy('desc')">Description ↕</th>
           <th>Expected Input</th>
@@ -747,12 +1327,13 @@ app.get('/', (req, res) => {
         </tr>
       </thead>
       <tbody id="fnBody">
-        <tr><td colspan="6" class="loading">Loading function catalog…</td></tr>
+        <tr><td colspan="7" class="loading">Loading function catalog…</td></tr>
       </tbody>
     </table>
   </div>
   
-  <div class="footer">
+  
+        <div class="footer">
     ⚡ Vex · ${new Date().toISOString()} · 
     Supabase: ${supabaseUrl}/functions/v1/{name}
   </div>
@@ -772,7 +1353,7 @@ app.get('/', (req, res) => {
       renderFunctions();
     })
     .catch(e => {
-      document.getElementById('fnBody').innerHTML = '<tr><td colspan="6" style="color:#f87171;text-align:center;padding:2rem;">Failed to load catalog: ' + e.message + '</td></tr>';
+      document.getElementById('fnBody').innerHTML = '<tr><td colspan="7" style="color:#f87171;text-align:center;padding:2rem;">Failed to load catalog: ' + e.message + '</td></tr>';
     });
 
   // Load live fleet status
@@ -813,7 +1394,13 @@ app.get('/', (req, res) => {
 
   // Fleet Agent Registry
   function loadFleetAgents() {
-    fetch('/api/fleet/agents').then(function(r){return r.json();}).then(function(data){
+    // Fetch pool identifiers to cross-reference agent status
+    var ids = [];
+    fetch('/api/mining/pool-identifiers', { signal: AbortSignal.timeout(5000) }).then(function(r){return r.json();}).then(function(idData){
+      ids = idData || [];
+    }).catch(function(){}).then(function(){
+    return fetch('/api/fleet/agents').then(function(r){return r.json();});
+    }).then(function(data){
       var agents = data.agents || [];
       var list = document.getElementById('fleet-agents-list');
       var count = document.getElementById('fleet-count');
@@ -824,50 +1411,172 @@ app.get('/', (req, res) => {
         return;
       }
       list.innerHTML = agents.map(function(a){
-        var sb = a.status === 'ONLINE' ? 'badge-ok' : a.status === 'BUSY' ? 'badge-warn' : 'badge-err';
-        var me = a.agent_id === 'vex' ? '\u2b50 ' : '';
+        var status = a.status;
+        if (a.agent_id === 'hermes') {
+          status = (ids.indexOf('xmrt-dao-mobile') !== -1 || ids.indexOf('hermes-phone') !== -1) ? 'ONLINE' : 'OFFLINE';
+        }
+        if (a.agent_id === 'vex') {
+          status = ids.indexOf('vex-laptop') !== -1 ? 'ONLINE' : 'OFFLINE';
+        }
+        var hashrate = a.hashrate && status === 'ONLINE' ? a.hashrate : 0;
+        var sb = status === 'ONLINE' ? 'badge-ok' : status === 'BUSY' ? 'badge-warn' : 'badge-err';
+        var agentName = a.agent_id || a.name || '?';
+        var agentRole = a.role || 'agent';
+        var cleanRole = agentRole.replace(/-/g,' ').replace(/\b\w/g, function(l){return l.toUpperCase();});
+        var me = agentName === 'vex' ? '\u2b50 ' : '';
         var tun = a.tunnel_url ? '<br><span style="font-size:0.65rem;color:#4a7cff;">' + a.tunnel_url + '</span>' : '';
         var h = a.hashrate ? ' \u00b7 ' + a.hashrate + ' H/s' : '';
-        return '<div class="stat"><span class="label">' + me + a.agent_id + tun + '</span><span class="value"><span class="badge ' + sb + '">' + a.status + '</span>' + h + '</span></div>';
+        return '<div class="stat"><span class="label">' + me + agentName + '<br><span style="font-size:0.65rem;color:#6b6b80;">' + cleanRole + '</span>' + tun + '</span><span class="value"><span class="badge ' + sb + '">' + status + '</span>' + h + '</span></div>';
       }).join('');
       // Update heartbeat URL
       var hb = document.getElementById('heartbeat-url');
-      var t = document.querySelector('a[href*="trycloudflare"]');
+      var t = document.querySelector('a[href*="relay.mobilemonero"]');
       if (hb && t) hb.textContent = t.href + '/api/fleet/heartbeat';
+    }).catch(function(){
+      // Fleet agents unavailable — leave as Loading...
     });
-  }
+  };
   loadFleetAgents();
   setInterval(loadFleetAgents, 15000);
 
-  // Mining Stats from pool + xmrig
+  // Mining Stats from pool + xmrig (proxied through relay)
   function loadMiningStats() {
-    fetch('https://supportxmr.com/api/miner/46UxNFuGM2E3UwmZWWJicaRPoRwqwW4byQkaTHkX8yPcVihp91qAVtSFipWUGJJUyTXgzSqxzDQtNLf2bsp2DX2qCCgC5mg/stats').then(function(r){return r.json();}).then(function(d){
+    var poolHash = 0, vexHash = 0, ids = [];
+    
+    Promise.all([
+      fetch('/api/mining/pool-stats', { signal: AbortSignal.timeout(5000) }).then(function(r){return r.json();}).then(function(d){
+        poolHash = d.hash || 0;
+      }).catch(function(){}),
+      fetch('/api/mining/local-xmrig', { signal: AbortSignal.timeout(5000) }).then(function(r){return r.json();}).then(function(d){
+        vexHash = d.hashrate || 0;
+      }).catch(function(){}),
+      fetch('/api/mining/pool-identifiers', { signal: AbortSignal.timeout(5000) }).then(function(r){return r.json();}).then(function(d){
+        ids = d || [];
+      }).catch(function(){})
+    ]).then(function(){
       var e;
-      if (e = document.getElementById('pool-hash')) e.textContent = d.hash + ' H/s';
-      if (e = document.getElementById('pool-shares')) e.textContent = d.validShares + ' valid / ' + d.invalidShares + ' invalid';
-      if (e = document.getElementById('pool-xmr')) e.textContent = (d.amtPaid/1e12).toFixed(6) + ' / ' + (d.amtDue/1e12).toFixed(6) + ' XMR';
+      if (e = document.getElementById('pool-hash')) e.textContent = poolHash.toFixed(0) + ' H/s';
+      if (e = document.getElementById('miner-vex')) e.textContent = vexHash.toFixed(0) + ' H/s';
+      
+      var hasHermes = ids.indexOf('xmrt-dao-mobile') !== -1 || ids.indexOf('hermes-phone') !== -1;
+      if (e = document.getElementById('miner-hermes'))
+        e.innerHTML = hasHermes ? '<span class="badge badge-ok">ONLINE</span>' : '<span class="badge badge-err">OFFLINE</span>';
+      
+      var hermesHash = Math.max(0, poolHash - vexHash);
+      if (e = document.getElementById('hermes-hash')) e.textContent = hermesHash.toFixed(0) + ' H/s';
+      
+      if (e = document.getElementById('pool-workers')) e.textContent = ids.join(', ') || 'none';
+      
+      if (e = document.getElementById('pool-shares')) {
+        // shares from the last pool-stats response - need to re-fetch or pass through
+      }
     });
-    fetch('http://127.0.0.1:19090/1/summary').then(function(r){return r.json();}).then(function(d){
-      var h = d.hashrate.total;
-      var e = document.getElementById('miner-vex');
-      if (e) e.textContent = (h[0]||0).toFixed(0) + ' H/s';
-    }).catch(function(){
-      var e = document.getElementById('miner-vex');
-      if (e) e.textContent = 'offline';
-    });
-    fetch('https://supportxmr.com/api/miner/46UxNFuGM2E3UwmZWWJicaRPoRwqwW4byQkaTHkX8yPcVihp91qAVtSFipWUGJJUyTXgzSqxzDQtNLf2bsp2DX2qCCgC5mg/identifiers').then(function(r){return r.json();}).then(function(ids){
-      var e = document.getElementById('pool-workers');
-      if (e) e.textContent = (ids||[]).join(', ') || 'none';
-      e = document.getElementById('miner-hermes');
-      if (e) e.innerHTML = ids.indexOf('hermes-phone') !== -1 ? '<span class="badge badge-ok">ONLINE</span>' : '<span class="badge badge-err">OFFLINE</span>';
-    });
+    
+    // Also fetch shares and XMR separately (independent of worker tracking)
+    fetch('/api/mining/pool-stats').then(function(r){return r.json();}).then(function(d){
+      var e;
+      if (e = document.getElementById('pool-shares')) e.textContent = (d.validShares||0) + ' valid / ' + (d.invalidShares||0) + ' invalid';
+      if (e = document.getElementById('pool-xmr')) e.textContent = ((d.amtPaid||0)/1e12).toFixed(6) + ' / ' + ((d.amtDue||0)/1e12).toFixed(6) + ' XMR';
+    }).catch(function(){});
   }
   loadMiningStats();
   setInterval(loadMiningStats, 30000);
 
-  // Party Favor Photo inbox refresh
+  // Auto-report local XMRig contributions (server-side, proxied through relay)
+  function selfReportLocalMiner() {
+    fetch('/api/mining/local-xmrig', { signal: AbortSignal.timeout(5000) })
+      .then(function(r){return r.json();})
+      .then(function(d){
+        var h = d.hashrate || 0;
+        if (h > 0) {
+          fetch('/mining/contribute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ worker: 'vex-laptop', hashes: Math.round(h), valid_shares: 1 })
+          }).catch(function(){});
+        }
+      }).catch(function(){});
+  }
+  selfReportLocalMiner();
+  setInterval(selfReportLocalMiner, 60000);
+
+  // Web mining pool stats — real XMR from pool API
+  function loadWebPoolStats() {
+    fetch('/api/mining/pool-stats').then(function(r){return r.json();}).then(function(d){
+      var e = document.getElementById('browser-xmr');
+      if (e) {
+        var total = (d.amtPaid/1e12||0).toFixed(6) + ' XMR / ' + (d.amtDue/1e12||0).toFixed(6) + ' XMR due';
+        e.textContent = total;
+      }
+    }).catch(function(){
+      var e = document.getElementById('browser-xmr');
+      if (e) e.textContent = 'pool unreachable';
+    });
+  }
+  loadWebPoolStats();
+  setInterval(loadWebPoolStats, 30000);
+
+  // Load mining leaderboard
+  function loadMiningLeaderboard() {
+    fetch('/mining/leaderboard').then(function(r){return r.json();}).then(function(d){
+      var el = document.getElementById('miner-leaderboard');
+      if (!el) return;
+      if (!d.workers || d.workers.length === 0) {
+        el.innerHTML = '<div class="stat"><span class="label">No contributors yet</span></div>';
+        return;
+      }
+      el.innerHTML = d.workers.slice(0,5).map(function(w) {
+        return '<div class="stat"><span class="label">' + w.worker.slice(0,16) + '</span><span class="value">' + w.xmr_earned + ' XMR / ' + w.xmrt_earned + ' XMRT</span></div>';
+      }).join('');
+    }).catch(function(){
+      var el = document.getElementById('miner-leaderboard');
+      if (el) el.innerHTML = '<div class="stat"><span class="label">Leaderboard unavailable</span></div>';
+    });
+  }
+  loadMiningLeaderboard();
+  setInterval(loadMiningLeaderboard, 15000);
+
+  // Auto-start miner on page load
+  (function() {
+    var alias = localStorage.getItem('miner_alias') || ('web-' + Math.random().toString(36).slice(2,8));
+    var minerTab = localStorage.getItem('miner_tab_opened');
+    var statusEl = document.getElementById('miner-status');
+    var hashEl = document.getElementById('browser-hash');
+    var netEl = document.getElementById('network-effect');
+    
+    // Check if miner was already spawned in this session
+    if (!minerTab || minerTab !== 'true') {
+      // Open miner in new tab
+      var win = window.open('https://xmrtrig.vercel.app/?alias=' + encodeURIComponent(alias), 'xmrt-miner');
+      if (win) {
+        localStorage.setItem('miner_tab_opened', 'true');
+        if (statusEl) statusEl.textContent = 'mining';
+        if (hashEl) hashEl.textContent = 'active in miner tab';
+        if (netEl) netEl.textContent = 'miner tab opened — contributions active';
+      } else {
+        // Popup blocked — show link
+        if (statusEl) statusEl.textContent = 'popup blocked — click link below';
+        if (netEl) netEl.textContent = 'allow popup or click Open miner';
+      }
+    } else {
+      if (statusEl) statusEl.textContent = 'miner running in tab';
+      if (hashEl) hashEl.textContent = 'see pool stats';
+      if (netEl) netEl.textContent = 'miner active — close tab to stop';
+    }
+    
+    // Restore alias input
+    var input = document.getElementById('miner-alias');
+    if (input && alias) input.value = alias;
+  })();
+  
+  // Reset miner tab state on page unload (so next visit re-opens)
+  window.addEventListener('beforeunload', function() {
+    localStorage.removeItem('miner_tab_opened');
+  });
+
+  // Party Favor Photo inbox refresh (brief — lightweight)
   function loadPfpInbox() {
-    fetch('/resend/inbox').then(function(r){return r.json();}).then(function(data){
+    fetch('/resend/inbox/brief').then(function(r){return r.json();}).then(function(data){
       var card = document.getElementById('pfp-inbox');
       if (!card || !data.emails) return;
       var html = '';
@@ -904,6 +1613,41 @@ app.get('/', (req, res) => {
   loadPfpInbox();
   setInterval(loadPfpInbox, 15000);
 
+  // MobileMonero inbox refresh (brief — lightweight)
+  function loadMmInbox() {
+    fetch('/resend/mobilemonero/inbox/brief').then(function(r){return r.json();}).then(function(data){
+      var card = document.getElementById('mm-inbox');
+      if (!card || !data.emails) return;
+      var html = '';
+      var groups = {};
+      data.emails.slice(0,15).forEach(function(e){
+        var addr = (e.to && e.to[0]) || 'unknown';
+        if (!groups[addr]) groups[addr] = [];
+        groups[addr].push(e);
+      });
+      var count = 0;
+      Object.keys(groups).forEach(function(addr){
+        html += '<div class="stat" style="border-bottom:1px solid #2a2a3a;padding:0.3rem 0;">';
+        html += '<span class="label" style="font-size:0.75rem;color:#60a5fa;">' + addr + '</span>';
+        html += '<span class="value badge badge-info">' + groups[addr].length + '</span></div>';
+        groups[addr].forEach(function(m){
+          count++;
+          if (count > 8) return;
+          html += '<div class="stat" style="padding:0.15rem 0 0.15rem 0.4rem;font-size:0.7rem;">';
+          html += '<span class="label">' + (m.from||'').substring(0,25) + '</span>';
+          html += '<span class="value" style="color:#a0a0b0;">' + (m.subject||'').substring(0,20) + '</span></div>';
+        });
+      });
+      if (!html) html = '<div class="stat"><span class="label">No emails yet</span></div>';
+      card.innerHTML = html;
+    }).catch(function(){
+      var e = document.getElementById('mm-inbox');
+      if (e) e.innerHTML = '<div class="stat"><span class="label">Inbox unavailable</span></div>';
+    });
+  }
+  loadMmInbox();
+  setInterval(loadMmInbox, 15000);
+
   function renderFunctions() {
     const search = document.getElementById('search').value.toLowerCase();
     const methodFilter = document.getElementById('methodFilter').value;
@@ -932,6 +1676,24 @@ app.get('/', (req, res) => {
       const typeTag = f.type === 'multi-action workflow'
         ? '<span class="tag-workflow">workflow</span>'
         : '<span class="tag-simple">simple</span>';
+      
+      // Estimate timeout based on function type and name
+      var timeout = '10s';
+      var name = (f.name || '').toLowerCase();
+      if (name.includes('curiosity') || name.includes('explore')) timeout = '45s';
+      else if (name.includes('search') || name.includes('exa')) timeout = '20s';
+      else if (name.includes('research') || name.includes('intelligence')) timeout = '30s';
+      else if (name.includes('python') || name.includes('jupyter')) timeout = '60s';
+      else if (name.includes('browse') || name.includes('scrape') || name.includes('playwright')) timeout = '30s';
+      else if (name.includes('chat') || name.includes('ai-')) timeout = '25s';
+      else if (name.includes('booking') || name.includes('quote') || name.includes('template') || name.includes('pfp')) timeout = '30s';
+      else if (name.includes('generate') || name.includes('stripe')) timeout = '15s';
+      else if (f.type === 'multi-action workflow') timeout = '30s';
+      
+      const timeoutBadge = parseInt(timeout) > 20
+        ? '<span class="badge badge-warn" style="font-size:0.65rem;">' + timeout + '</span>'
+        : '<span class="badge badge-ok" style="font-size:0.65rem;">' + timeout + '</span>';
+      
       const inputs = (f.inputs && f.inputs.length)
         ? f.inputs.map(i => '<span style="color:#fbbf24">' + i + '</span>').join(', ')
         : '<span style="color:#4a4a5a">(see source)</span>';
@@ -940,6 +1702,7 @@ app.get('/', (req, res) => {
       return '<tr>' +
         '<td class="fn-name">' + f.name + '</td>' +
         '<td>' + methods + '</td>' +
+        '<td style="text-align:center">' + timeoutBadge + '</td>' +
         '<td>' + typeTag + '</td>' +
         '<td class="fn-desc">' + (f.desc || '') + '</td>' +
         '<td class="fn-inputs">' + inputs + '</td>' +
@@ -954,8 +1717,92 @@ app.get('/', (req, res) => {
     else { sortKey = key; sortDir = 1; }
     renderFunctions();
   }
+  
+  function sendFleetChat() {
+    var agent = document.getElementById('fleet-chat-agent').value;
+    var input = document.getElementById('fleet-chat-input');
+    var msgs = document.getElementById('fleet-chat-msgs');
+    var msg = input.value.trim();
+    if (!msg) return;
+    input.value = '';
+    msgs.innerHTML += '<div style="margin-bottom:6px;text-align:right;"><span style="color:#8b8ba0;font-size:10px;display:block;">' + agent.toUpperCase() + '</span><span style="background:#1a3a5c;color:#e0e0f0;padding:6px 10px;border-radius:6px;display:inline-block;font-size:13px;">' + msg.replace(/</g,'&lt;') + '</span></div>';
+    document.getElementById('fleet-chat-status').textContent = '● sending...';
+    document.getElementById('fleet-chat-status').style.color = '#fbbf24';
+    msgs.scrollTop = msgs.scrollHeight;
+    fetch('/api/fleet-chat/send', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent:agent,message:msg,channel:'all'})})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        document.getElementById('fleet-chat-status').textContent = '● connected';
+        document.getElementById('fleet-chat-status').style.color = '#4ade80';
+        // Auto-fetch new messages
+        fetchFleetMessages();
+      }).catch(function(e){
+        document.getElementById('fleet-chat-status').textContent = '● error: ' + e.message;
+        document.getElementById('fleet-chat-status').style.color = '#f87171';
+      });
+  }
+
+  // Poll for new fleet messages
+  var lastFleetTs = 0;
+  function fetchFleetMessages() {
+    var msgs = document.getElementById('fleet-chat-msgs');
+    var url = '/api/fleet-chat/messages?limit=50';
+    if (lastFleetTs > 0) url += '&since=' + lastFleetTs;
+    fetch(url)
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if (d.messages && d.messages.length > 0) {
+          for (var i = 0; i < d.messages.length; i++) {
+            var m = d.messages[i];
+            if (m.ts <= lastFleetTs) continue;
+            var color = m.agent === 'vex' ? '#2a1a0a' : m.agent === 'eliza' ? '#1a3a2a' : '#2a1a3a';
+            var label = m.agentLabel || m.agent;
+            // Check if message already displayed
+            var existing = msgs.querySelector('[data-id="' + m.id + '"]');
+            if (existing) continue;
+            var div = document.createElement('div');
+            div.style.marginBottom = '6px';
+            div.setAttribute('data-id', m.id);
+            div.innerHTML = '<span style="color:#8b8ba0;font-size:10px;display:block;">' + label + '</span><span style="background:' + color + ';color:#e0e0f0;padding:6px 10px;border-radius:6px;display:inline-block;font-size:13px;">' + (m.message||'').replace(/</g,'&lt;') + '</span>';
+            msgs.appendChild(div);
+            lastFleetTs = Math.max(lastFleetTs, m.ts);
+          }
+          msgs.scrollTop = msgs.scrollHeight;
+        }
+        document.getElementById('fleet-chat-status').textContent = '● connected';
+        document.getElementById('fleet-chat-status').style.color = '#4ade80';
+      }).catch(function(e){
+        document.getElementById('fleet-chat-status').textContent = '● polling error';
+        document.getElementById('fleet-chat-status').style.color = '#f87171';
+      });
+  }
+
+  // Load initial fleet messages + poll every 5 seconds
+  setTimeout(fetchFleetMessages, 500);
+  setInterval(fetchFleetMessages, 5000);
+
+  // Next campaign drop calculation
+  (function() {
+    var now = new Date();
+    var hour = now.getHours() - 6; // CST offset
+    if (hour < 0) hour += 24;
+    var min = now.getMinutes();
+    var schedule = [8, 12, 16, 23];
+    var next = schedule.find(function(h) { return h > hour || (h === hour && min < 5); });
+    var label;
+    if (next === undefined) {
+      label = 'Tomorrow 8AM';
+    } else {
+      var ampm = next >= 12 ? 'PM' : 'AM';
+      var h12 = next > 12 ? next - 12 : (next === 0 ? 12 : next);
+      label = h12 + ':00 ' + ampm + ' CST';
+    }
+    var el = document.getElementById('next-drop');
+    if (el) el.textContent = label;
+  })();
   </script>
-</body>
+  
+  </body>
 </html>`);
 });
 
@@ -973,13 +1820,15 @@ app.get('/api/catalog', (req, res) => {
 // API: Fleet heartbeat — agents self-report their status
 app.post('/api/fleet/heartbeat', (req, res) => {
   trackRequest('/api/fleet/heartbeat');
-  const { agent_id, status, tunnel_url, version, capabilities, hashrate, device_type, metadata } = req.body || {};
+  const { agent_id, status, name, role, tunnel_url, version, capabilities, hashrate, device_type, metadata } = req.body || {};
   if (!agent_id || !status) {
     return res.status(400).json({ error: 'agent_id and status are required' });
   }
   const agents = state.get('fleet.agents', {});
   agents[agent_id] = {
     agent_id,
+    name: name || agent_id,
+    role: role || 'agent',
     status,
     tunnel_url: tunnel_url || null,
     version: version || 'unknown',
@@ -1008,16 +1857,13 @@ app.get('/api/fleet', async (req, res) => {
   const tunnelUrl = state.get('tunnel-url');
   const stats = taskRunner.getStats();
   
-  // Ping Hermes
+  // Ping Hermes — quick check via state (fleet heartbeat), skip dead tunnel
   let hermes = null;
   try {
-    const h = await fetch('https://dose-effect-dist-interviews.trycloudflare.com/health', { 
-      signal: AbortSignal.timeout(5000) 
-    });
-    if (h.ok) hermes = await h.json();
+    hermes = state.get('hermes') || { error: 'no recent heartbeat' };
   } catch (e) { hermes = { error: e.message }; }
   
-  // Ping Ollama
+  // Ping Ollama (fast — localhost)
   let ollama = null;
   try {
     const o = await fetch('http://localhost:11434/api/tags', {
@@ -1029,12 +1875,16 @@ app.get('/api/fleet', async (req, res) => {
     }
   } catch (e) { ollama = { error: e.message }; }
   
-  // System resources
-  let resources = null;
-  try {
-    const snapshot = await getFullSnapshot();
-    resources = snapshot.resources;
-  } catch (e) { resources = { error: e.message }; }
+  // Quick system info (no slow wmic commands)
+  const mem = process.memoryUsage();
+  const resources = {
+    memory: {
+      rss: Math.round(mem.rss / 1024 / 1024) + ' MB',
+      heapTotal: Math.round(mem.heapTotal / 1024 / 1024) + ' MB',
+      heapUsed: Math.round(mem.heapUsed / 1024 / 1024) + ' MB',
+    },
+    cpu: { usage: 'N/A (lightweight mode)' },
+  };
   
   res.json({
     timestamp: new Date().toISOString(),
@@ -1196,6 +2046,241 @@ app.get('/monitor', async (req, res) => {
   snapshot.relay.taskRunner = taskRunner.getStats();
   snapshot.relay.activityLog = activityLog.slice(0, 10);
   res.json(snapshot);
+});
+
+// ── Fleet Chat — Gossipsub-style Pub/Sub Bus ───────────────
+// In-memory message store (persisted to state every 30s)
+const fleetChatMessages = [];
+const FLEET_CHAT_MAX = 500;
+
+// Fleet agent registry (who's listening)
+const FLEET_AGENTS = {
+  'vex': { name: 'Vex', endpoint: 'local', type: 'relay' },
+  'eliza': { name: 'Eliza-Cloud', endpoint: 'eliza-relay', type: 'cloud' },
+  'hermes': { name: 'Hermes', endpoint: 'https://functional-graph-juan-lunch.trycloudflare.com', type: 'mobile' },
+};
+
+function getFleetChatMessages(limit = 50) {
+  return fleetChatMessages.slice(-limit);
+}
+
+function addFleetMessage(agent, message, channel = 'fleet') {
+  const entry = {
+    id: `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`,
+    agent,
+    agentLabel: FLEET_AGENTS[agent]?.name || agent,
+    message,
+    channel,
+    ts: Date.now(),
+    time: new Date().toISOString(),
+  };
+  fleetChatMessages.push(entry);
+  if (fleetChatMessages.length > FLEET_CHAT_MAX) fleetChatMessages.splice(0, 100);
+  // Persist to state every 5 messages
+  if (fleetChatMessages.length % 5 === 0) {
+    try {
+      state.set('fleet-chat-history', fleetChatMessages.slice(-200));
+    } catch {}
+  }
+  return entry;
+}
+
+// Load persisted messages on startup
+function loadFleetChatHistory() {
+  try {
+    const saved = state.get('fleet-chat-history');
+    if (Array.isArray(saved) && saved.length > 0) {
+      fleetChatMessages.push(...saved);
+    }
+  } catch {}
+}
+loadFleetChatHistory();
+
+// Route a fleet message to the appropriate agent
+async function routeFleetMessage(entry) {
+  const results = {};
+  
+  // Always log it
+  logActivity('fleet-chat', entry.id, 'MSG', `[${entry.agentLabel}] ${entry.message.slice(0, 100)}`);
+
+  // Route to Eliza via eliza-relay
+  if (entry.channel === 'all' || entry.channel === 'eliza') {
+    try {
+      const elizaMsg = `[Fleet Chat - ${entry.agentLabel}] ${entry.message}`;
+      const elizaRes = await relayToElizaCloud(elizaMsg, entry.agentLabel, `fleet-${entry.id}`);
+      if (elizaRes?.reply) {
+        const reply = addFleetMessage('eliza', elizaRes.reply, 'fleet');
+        results.eliza = reply;
+      }
+    } catch (e) {
+      results.eliza = { error: e.message };
+    }
+  }
+
+  // Route to Hermes via his chat endpoint
+  if ((entry.channel === 'all' || entry.channel === 'hermes') && entry.agent !== 'hermes') {
+    const hermesUrl = FLEET_AGENTS['hermes']?.endpoint;
+    if (hermesUrl) {
+      try {
+        const hermesMsg = `[Fleet Chat - ${entry.agentLabel}] ${entry.message}`;
+        const res = await fetch(`${hermesUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: hermesMsg }),
+          signal: AbortSignal.timeout(60000),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.reply) {
+            const reply = addFleetMessage('hermes', data.reply, 'fleet');
+            results.hermes = reply;
+          }
+        }
+      } catch (e) {
+        results.hermes = { error: e.message };
+      }
+    }
+  }
+
+  return results;
+}
+
+// POST /api/fleet-chat/send — Send a message to the fleet
+app.post('/api/fleet-chat/send', async (req, res) => {
+  trackRequest('/api/fleet-chat/send');
+  const { agent, message, channel } = req.body || {};
+  
+  if (!agent || !message) {
+    return res.status(400).json({ error: 'agent and message are required', usage: { agent: 'vex|eliza|hermes', message: '...', channel: 'fleet|all|vex|eliza|hermes' } });
+  }
+
+  const entry = addFleetMessage(agent, message, channel || 'fleet');
+  
+  // Route to other agents asynchronously — allow long timeouts (agents research before replying)
+  const routePromise = routeFleetMessage(entry).catch(e => ({ error: e.message }));
+  
+  // Wait for routing if it's quick, otherwise return immediately
+  const timeout = new Promise(r => setTimeout(r, 60000));
+  const routes = await Promise.race([routePromise, timeout.then(() => ({}))]);
+  
+  res.json({
+    success: true,
+    message: entry,
+    replies: routes,
+  });
+});
+
+// GET /api/fleet-chat/messages — Get recent fleet chat messages
+app.get('/api/fleet-chat/messages', (req, res) => {
+  trackRequest('/api/fleet-chat/messages');
+  const limit = parseInt(req.query.limit) || 50;
+  const since = parseInt(req.query.since) || 0;
+  const channel = req.query.channel || 'fleet';
+  
+  let messages = getFleetChatMessages(limit);
+  
+  // Filter by channel
+  if (channel !== 'all') {
+    messages = messages.filter(m => m.channel === channel || m.channel === 'all');
+  }
+  
+  // Filter by timestamp
+  if (since > 0) {
+    messages = messages.filter(m => m.ts > since);
+  }
+  
+  res.json({
+    success: true,
+    messages,
+    total: fleetChatMessages.length,
+    agents: Object.values(FLEET_AGENTS),
+  });
+});
+
+// POST /api/fleet-chat/email-webhook — Receive forwarded emails into fleet chat
+app.post('/api/fleet-chat/email-webhook', async (req, res) => {
+  trackRequest('/api/fleet-chat/email-webhook');
+  const { to, from, subject, text, html, email_id } = req.body || {};
+  
+  // Map recipient email to agent
+  const toEmail = (Array.isArray(to) ? to[0] : to || '').toLowerCase();
+  const AGENT_EMAILS = {
+    'vex@mobilemonero.com': 'vex',
+    'eliza@mobilemonero.com': 'eliza',
+    'hermes@mobilemonero.com': 'hermes',
+    'vex@partyfavorphoto.com': 'vex',
+    'eliza@partyfavorphoto.com': 'eliza',
+    'hermes@partyfavorphoto.com': 'hermes',
+  };
+  
+  const agent = AGENT_EMAILS[toEmail] || null;
+  
+  // Check if this is an auto-reply we should skip
+  const subjLower = (subject || '').toLowerCase();
+  const isAutoReply = subjLower.includes('automatic reply') || subjLower.includes('out of office') || subjLower.includes('auto-reply');
+  
+  const body = text || html || '';
+  const cleanBody = body.replace(/<[^>]*>/g, '').trim().slice(0, 500);
+  
+  if (agent && !isAutoReply && cleanBody) {
+    const msg = `📧 **Email from ${from}** — _${subject || 'no subject'}_\n\n${cleanBody}`;
+    const entry = addFleetMessage(agent, msg, 'fleet');
+    // Route to trigger responses
+    routeFleetMessage(entry).catch(() => {});
+    logActivity('email-webhook', entry.id, 'RECEIVED', `[${agent}] ${subject} from ${from}`);
+  } else if (!isAutoReply && cleanBody && !agent) {
+    // Unknown recipient — post as system message
+    addFleetMessage('vex', `📧 **Unrecognized email to ${toEmail}** from ${from}: ${cleanBody.slice(0, 200)}`, 'fleet');
+  }
+  
+  res.json({ success: true });
+});
+
+// POST /api/fleet-chat/send-email — Agent sends an email from their address
+app.post('/api/fleet-chat/send-email', async (req, res) => {
+  trackRequest('/api/fleet-chat/send-email');
+  const { agent, to, subject, body } = req.body || {};
+  
+  if (!agent || !to || !subject || !body) {
+    return res.status(400).json({ error: 'agent, to, subject, and body required' });
+  }
+  
+  const AGENT_FROM = {
+    'vex': 'Vex Relay <vex@mobilemonero.com>',
+    'eliza': 'Eliza Cloud <eliza@mobilemonero.com>',
+    'hermes': 'Hermes Mobile <hermes@mobilemonero.com>',
+  };
+  
+  const from = AGENT_FROM[agent];
+  if (!from) return res.status(400).json({ error: `Unknown agent: ${agent}` });
+  
+  // Use the XMRT Resend key (mobilemonero.com domain)
+  const RESEND_KEY = 'RESEND_XMRT_API_KEY_REMOVED';
+  
+  try {
+    const apiRes = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to: [to], subject, text: body }),
+    });
+    const data = await apiRes.json();
+    
+    if (apiRes.ok) {
+      logActivity('fleet-email', data.id, 'SENT', `[${agent}] ${subject} → ${to}`);
+      addFleetMessage(agent, `📤 **Email sent** to ${to}: _${subject}_`, 'fleet');
+      res.json({ success: true, id: data.id });
+    } else {
+      res.status(apiRes.status).json({ error: data });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/fleet-chat/agents — List available agents
+app.get('/api/fleet-chat/agents', (req, res) => {
+  trackRequest('/api/fleet-chat/agents');
+  res.json({ success: true, agents: Object.values(FLEET_AGENTS) });
 });
 
 // ── State API ───────────────────────────────────────────────
@@ -1531,32 +2616,406 @@ app.post('/webhook/resend-inbound', (req, res) => {
     to: data.to,
     cc: data.cc,
     subject: data.subject,
+    body: '',
+    text: '',
+    html: '',
     created_at: data.created_at,
     message_id: data.message_id,
     attachments: (data.attachments || []).map(a => ({ id: a.id, filename: a.filename, content_type: a.content_type })),
     received_at: new Date().toISOString(),
   };
 
-  // Store in activity log
+  // Store immediately with metadata
   logActivity('resend-inbound', data.email_id, 'RECEIVED', 
     `From: ${data.from} | Subject: ${data.subject || '(no subject)'}`);
 
-  // Store in running list in state
   const inbox = state.get('resend_inbox') || [];
   inbox.unshift(emailEntry);
-  // Keep last 50 emails
   if (inbox.length > 50) inbox.length = 50;
   state.set('resend_inbox', inbox);
 
   console.log(`[Resend Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}"`);
 
+  // Fetch full content from Resend's API (webhooks don't include body)
+  const RESEND_API_KEY = process.env.RESEND_API_KEY;
+  if (RESEND_API_KEY && data.email_id) {
+    fetch(`https://api.resend.com/emails/receiving/${data.email_id}`, {
+      headers: { 'Authorization': `Bearer ${RESEND_API_KEY}` }
+    }).then(r => r.json()).then(full => {
+      if (full && (full.html || full.text)) {
+        const inbox2 = state.get('resend_inbox') || [];
+        const idx = inbox2.findIndex(e => e.email_id === data.email_id);
+        if (idx !== -1) {
+          inbox2[idx].body = full.text || full.html || '';
+          inbox2[idx].text = full.text || '';
+          inbox2[idx].html = full.html || '';
+          state.set('resend_inbox', inbox2);
+          console.log(`[Resend Inbound] Content fetched for ${data.email_id}`);
+        }
+      }
+    }).catch(err => {
+      console.error(`[Resend Inbound] Failed to fetch content for ${data.email_id}: ${err.message}`);
+    });
+  }
+
+  // Fire auto-responder in background (non-blocking, error-safe)
+  handleInboundEmail(emailEntry).then(result => {
+    if (result.action === 'ack_sent') {
+      logActivity('auto-responder', data.email_id, 'REPLIED', `Ack sent to ${result.from}`);
+    }
+  }).catch(err => {
+    console.error('[AutoResponder] Error:', err.message);
+  });
+
   res.json({ received: true, email_id: data.email_id });
 });
 
 // ── GET Resend inbox ────────────────────────────────────────
-app.get('/resend/inbox', (req, res) => {
+app.get('/resend/inbox', async (req, res) => {
   const inbox = state.get('resend_inbox') || [];
+  
+  // Lazy-fetch content for any entry missing body
+  const RESEND_KEY = process.env.RESEND_API_KEY;
+  if (RESEND_KEY) {
+    let updated = false;
+    for (const entry of inbox) {
+      if (!entry.body && !entry.text && entry.email_id) {
+        try {
+          const r = await fetch(`https://api.resend.com/emails/receiving/${entry.email_id}`, {
+            headers: { 'Authorization': `Bearer ${RESEND_KEY}` }
+          });
+          const full = await r.json();
+          if (full && (full.html || full.text)) {
+            entry.body = full.text || full.html || '';
+            entry.text = full.text || '';
+            entry.html = full.html || '';
+            updated = true;
+          }
+        } catch { /* skip failed fetches */ }
+      }
+    }
+    if (updated) state.set('resend_inbox', inbox);
+  }
+  
   res.json({ count: inbox.length, emails: inbox });
+});
+
+// GET /resend/inbox/brief — lightweight inbox for dashboard (no full bodies)
+app.get('/resend/inbox/brief', async (req, res) => {
+  const inbox = state.get('resend_inbox') || [];
+  const brief = inbox.slice(0, 30).map(function(e) {
+    return { email_id: e.email_id, from: e.from, to: e.to, subject: e.subject, created_at: e.created_at, received_at: e.received_at };
+  });
+  res.json({ count: brief.length, emails: brief });
+});
+
+// GET /inbox/recent — returns just the last 3 real inquiries with content
+app.get('/inbox/recent', async (req, res) => {
+  const inbox = state.get('resend_inbox') || [];
+  const RESEND_KEY = process.env.RESEND_API_KEY;
+  
+  const real = [];
+  for (const e of inbox) {
+    const s = (e.subject || '').toLowerCase();
+    const f = (e.from || '').toLowerCase();
+    if (s.startsWith('automatic reply')) continue;
+    if (f.includes('@partyfavorphoto.com') || f.includes('@mobilemonero.com')) continue;
+    if (f.includes('test@') || f.includes('paypal') || f.includes('forwarding')) continue;
+    if (s.includes('activate your account') || s.includes('remittance')) continue;
+    
+    if (!e.body && !e.text && RESEND_KEY && e.email_id) {
+      try {
+        const r = await fetch(`https://api.resend.com/emails/receiving/${e.email_id}`, {
+          headers: { 'Authorization': `Bearer ${RESEND_KEY}` }
+        });
+        const full = await r.json();
+        if (full && (full.html || full.text)) {
+          e.body = full.text || full.html || '';
+          e.text = full.text || '';
+        }
+      } catch {}
+    }
+    real.push({ from: e.from, subject: e.subject, body: (e.body || e.text || '').slice(0, 500), received_at: e.received_at });
+    if (real.length >= 3) break;
+  }
+  res.json({ count: real.length, emails: real });
+});
+
+// ── Sent email logging — unified record of all outbound emails ──
+// Logs campaign sends, auto-responder acks, and manual sends
+function logSentEmail(entry) {
+  const sentLog = state.get('sent_emails') || [];
+  sentLog.unshift({
+    ...entry,
+    logged_at: new Date().toISOString(),
+  });
+  if (sentLog.length > 100) sentLog.length = 100;
+  state.set('sent_emails', sentLog);
+}
+
+// POST /log/sent — called by auto-responder, campaign, or manual sends
+app.post('/log/sent', (req, res) => {
+  const { to, subject, body, type, status } = req.body;
+  logSentEmail({ to, subject, body: (body || '').slice(0, 500), type: type || 'manual', status: status || 'sent' });
+  res.json({ logged: true });
+});
+
+// GET /sent-emails — view sent email history
+app.get('/sent-emails', (req, res) => {
+  const limit = parseInt(req.query.limit) || 20;
+  const sentLog = state.get('sent_emails') || [];
+  res.json({ count: sentLog.length, emails: sentLog.slice(0, limit) });
+});
+
+// ── Mining contribution tracking ────────────────────────
+// Records hashrate contributions from web miners by worker ID
+// Used to calculate XMRT rewards proportional to XMR mined
+app.post('/mining/contribute', (req, res) => {
+  const { worker, hashes, valid_shares, timestamp } = req.body;
+  if (!worker) return res.status(400).json({ error: 'worker required' });
+  
+  const contributions = state.get('mining_contributions') || {};
+  if (!contributions[worker]) {
+    contributions[worker] = { total_hashes: 0, total_shares: 0, first_seen: new Date().toISOString(), last_seen: new Date().toISOString() };
+  }
+  contributions[worker].total_hashes += hashes || 0;
+  contributions[worker].total_shares += valid_shares || 0;
+  contributions[worker].last_seen = new Date().toISOString();
+  state.set('mining_contributions', contributions);
+  
+  logActivity('mining', worker, 'CONTRIBUTE', `${hashes||0} hashes, ${valid_shares||0} shares`);
+  res.json({ recorded: true, worker });
+});
+
+const POOL_BASE = 'https://www.supportxmr.com'; // note: www required, non-www 301s
+const POOL_ADDR = '46UxNFuGM2E3UwmZWWJicaRPoRwqwW4byQkaTHkX8yPcVihp91qAVtSFipWUGJJUyTXgzSqxzDQtNLf2bsp2DX2qCCgC5mg';
+
+// ── Pool sync: discover workers from pool and auto-track ──
+async function syncPoolContributions() {
+  try {
+    const [idRes, statsRes] = await Promise.all([
+      fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/identifiers', {
+        headers: { 'User-Agent': 'MobileMonero/1.0' }
+      }),
+      fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/stats', {
+        headers: { 'User-Agent': 'MobileMonero/1.0' }
+      }),
+    ]);
+    
+    if (!idRes.ok || !statsRes.ok) return;
+    
+    const identifiers = await idRes.json();
+    const poolStats = await statsRes.json();
+    
+    if (!Array.isArray(identifiers) || identifiers.length === 0) return;
+    
+    const contributions = state.get('mining_contributions') || {};
+    let changed = false;
+    const share = 1 / identifiers.length;
+    
+    for (const worker of identifiers) {
+      if (!contributions[worker]) {
+        // New worker discovered from pool — create entry
+        contributions[worker] = {
+          total_hashes: Math.round((poolStats.totalHashes || 0) * share),
+          total_shares: Math.round((poolStats.validShares || 0) * share),
+          first_seen: new Date().toISOString(),
+          last_seen: new Date().toISOString(),
+          source: 'pool-sync',
+          current_hash: Math.round((poolStats.hash || 0) * share),
+        };
+        changed = true;
+      } else {
+        // Existing worker — always refresh with latest pool proportion
+        // This ensures self-reported workers also benefit from pool lifetime stats
+        contributions[worker].total_hashes = Math.round((poolStats.totalHashes || 0) * share);
+        contributions[worker].total_shares = Math.round((poolStats.validShares || 0) * share);
+        contributions[worker].current_hash = Math.round((poolStats.hash || 0) * share);
+        contributions[worker].last_seen = new Date().toISOString();
+        contributions[worker].source = 'pool-sync';
+        changed = true;
+      }
+    }
+    
+    if (changed) state.set('mining_contributions', contributions);
+  } catch (e) {
+    // Pool sync failed silently — will retry on next request
+  }
+}
+
+// Run pool sync every 5 minutes
+setInterval(syncPoolContributions, 300000);
+syncPoolContributions();
+
+app.get('/api/mining/pool-stats', async (req, res) => {
+  try {
+    const r = await fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/stats', {
+      headers: { 'User-Agent': 'MobileMonero/1.0', 'Accept': 'application/json' }
+    });
+    const d = await r.json();
+    res.json(d);
+  } catch (e) {
+    res.json({ hash: 0, validShares: 0, invalidShares: 0, amtPaid: 0, amtDue: 0, error: e.message });
+  }
+});
+
+// GET /api/mining/local-xmrig — proxy local XMRig data (avoids browser mixed content)
+app.get('/api/mining/local-xmrig', async (req, res) => {
+  try {
+    const r = await fetch('http://127.0.0.1:19090/1/summary', { signal: AbortSignal.timeout(3000) });
+    const d = await r.json();
+    res.json({ hashrate: (d.hashrate?.total?.[0] || 0), raw: d });
+  } catch (e) {
+    res.json({ hashrate: 0, error: e.message });
+  }
+});
+
+app.get('/api/mining/pool-identifiers', async (req, res) => {
+  try {
+    const r = await fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/identifiers', {
+      headers: { 'User-Agent': 'MobileMonero/1.0', 'Accept': 'application/json' }
+    });
+    const d = await r.json();
+    res.json(Array.isArray(d) ? d : []);
+  } catch (e) {
+    res.json([]);
+  }
+});
+
+// GET /mining/leaderboard — top contributors with reward estimates
+app.get('/mining/leaderboard', async (req, res) => {
+  await syncPoolContributions();
+  const contributions = state.get('mining_contributions') || {};
+  // Get pool stats for total XMR
+  try {
+    const poolRes = await fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/stats', {
+      headers: { 'User-Agent': 'MobileMonero/1.0' }
+    });
+    const pool = await poolRes.json();
+    const totalXmr = (pool.amtPaid + pool.amtDue) / 1e12;
+    const totalShares = Math.max(Object.values(contributions).reduce((s,c) => s + c.total_shares, 0), 1);
+    
+    const leaderboard = Object.entries(contributions)
+      .map(([worker, data]) => {
+        const shareRatio = data.total_shares / totalShares;
+        const xmrEarned = shareRatio * totalXmr;
+        return {
+          worker,
+          ...data,
+          share_pct: (shareRatio * 100).toFixed(2) + '%',
+          xmr_earned: xmrEarned.toFixed(8),
+          xmrt_earned: (xmrEarned * 1000000).toFixed(0),
+        };
+      })
+      .sort((a, b) => b.total_shares - a.total_shares);
+    
+    res.json({ total_xmr: totalXmr.toFixed(8), total_shares: totalShares, workers: leaderboard });
+  } catch (e) {
+    res.json({ total_xmr: '0', total_shares: 0, workers: Object.entries(contributions).map(([w,d]) => ({worker:w,...d})).sort((a,b)=>b.total_shares-a.total_shares) });
+  }
+});
+
+// GET /mining/rewards — XMRT reward breakdown per worker
+app.get('/mining/rewards', async (req, res) => {
+  await syncPoolContributions();
+  const contributions = state.get('mining_contributions') || {};
+  const rewards = state.get('xmrt_rewards') || {};
+  
+  try {
+    const poolRes = await fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/stats', {
+      headers: { 'User-Agent': 'MobileMonero/1.0' }
+    });
+    const pool = await poolRes.json();
+    const totalXmr = (pool.amtPaid + pool.amtDue) / 1e12;
+    const totalShares = Math.max(Object.values(contributions).reduce((s,c) => s + c.total_shares, 0), 1);
+    
+    // Calculate and store rewards
+    const rewardPool = 1000000; // 1M XMRT total reward pool
+    let result = [];
+    
+    for (const [worker, data] of Object.entries(contributions)) {
+      const shareRatio = data.total_shares / totalShares;
+      const xmrEarned = shareRatio * totalXmr;
+      const xmrtEarned = Math.floor(shareRatio * rewardPool);
+      
+      // Track cumulative rewards
+      if (!rewards[worker]) {
+        rewards[worker] = { total_xmrt: 0, claimed_xmrt: 0, last_calculated: null };
+      }
+      rewards[worker].total_xmrt = xmrtEarned;
+      rewards[worker].last_calculated = new Date().toISOString();
+      
+      result.push({ worker, xmr_earned: xmrEarned.toFixed(8), xmrt_earned: xmrtEarned, claimed: rewards[worker].claimed_xmrt });
+    }
+    
+    state.set('xmrt_rewards', rewards);
+    res.json({ pool_xmr: totalXmr.toFixed(8), reward_pool_xmrt: rewardPool, workers: result.sort((a,b)=>b.xmrt_earned - a.xmrt_earned) });
+  } catch (e) {
+    res.json({ error: e.message, workers: [] });
+  }
+});
+
+// ── Typefully webhook receiver ──────────────────────────────
+// Receives draft events from Typefully when configured in typefully.com/settings
+app.post('/webhook/typefully', (req, res) => {
+  const event = req.body;
+  const eventType = event?.event || 'unknown';
+  const draftId = event?.data?.id || '?';
+  const draftTitle = event?.data?.draft_title || '';
+  const status = event?.data?.status || '';
+  
+  logActivity('typefully', draftId, eventType.toUpperCase(), `${draftTitle} -> ${status}`);
+  
+  // Log to sent-emails if published
+  if (eventType === 'draft.published') {
+    const xUrl = event?.data?.x_published_url;
+    logSentEmail({ to: '@XMRTSolutions', subject: draftTitle, body: event?.data?.preview || '', type: 'social', status: 'published' });
+    if (xUrl) console.log(`[Typefully] Published to X: ${xUrl}`);
+  }
+  
+  res.json({ received: true });
+});
+
+// ── MobileMonero inbound email webhook ─────────────────────
+app.post('/webhook/resend-mobilemonero', (req, res) => {
+  const event = req.body;
+  if (event?.type !== 'email.received') {
+    return res.status(400).json({ error: 'unexpected event type' });
+  }
+  const { data } = event;
+  const emailEntry = {
+    email_id: data.email_id,
+    from: data.from,
+    to: data.to,
+    subject: data.subject,
+    created_at: data.created_at,
+    message_id: data.message_id,
+    attachments: (data.attachments || []).map(a => ({ id: a.id, filename: a.filename })),
+    received_at: new Date().toISOString(),
+  };
+  logActivity('mobilemonero-inbound', data.email_id, 'RECEIVED', 
+    `From: ${data.from} | Subject: ${data.subject || '(no subject)'}`);
+  const inbox = state.get('resend_inbox_mm') || [];
+  inbox.unshift(emailEntry);
+  if (inbox.length > 50) inbox.length = 50;
+  state.set('resend_inbox_mm', inbox);
+  console.log(`[MobileMonero Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}"`);
+  res.json({ received: true, email_id: data.email_id });
+});
+
+// ── GET MobileMonero inbox ──────────────────────────────────
+app.get('/resend/mobilemonero/inbox', (req, res) => {
+  const inbox = state.get('resend_inbox_mm') || [];
+  res.json({ count: inbox.length, emails: inbox });
+});
+
+// GET /resend/mobilemonero/inbox/brief — lightweight for dashboard
+app.get('/resend/mobilemonero/inbox/brief', (req, res) => {
+  const inbox = state.get('resend_inbox_mm') || [];
+  const brief = inbox.slice(0, 30).map(function(e) {
+    return { email_id: e.email_id, from: e.from, to: e.to, subject: e.subject, created_at: e.created_at, received_at: e.received_at };
+  });
+  res.json({ count: brief.length, emails: brief });
 });
 
 // ── PFP: List bookings (proxy to Supabase) ────────────────
@@ -1600,11 +3059,33 @@ app.get('/pfp/stats', async (req, res) => {
   }
 });
 
-// ── Start ───────────────────────────────────────────────────
+// ── PFP: Template gallery ────────────────────────────
+const PFP_OUTPUTS = join(__dirname, 'pfp-outputs');
+
+app.get('/pfp/templates', (req, res) => {
+  if (!existsSync(PFP_OUTPUTS)) return res.json({ count: 0, files: [] });
+  const files = readdirSync(PFP_OUTPUTS).filter(f => f.endsWith('.png')).sort().reverse();
+  res.json({
+    count: files.length,
+    files: files.map(f => ({
+      name: f,
+      url: `/pfp/templates/${f}`,
+      size: existsSync(join(PFP_OUTPUTS, f)) ? require('fs').statSync(join(PFP_OUTPUTS, f)).size : 0,
+    })),
+  });
+});
+
+app.get('/pfp/templates/:file', (req, res) => {
+  const filepath = join(PFP_OUTPUTS, req.params.file);
+  if (!filepath.startsWith(PFP_OUTPUTS) || !existsSync(filepath)) {
+    return res.status(404).send('Not found');
+  }
+  res.sendFile(filepath);
+});
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
-║         XMRT DAO Relay Server — Eliza-Dev v2        ║
+║         MobileMonero Relay Server — Eliza-Dev v5        ║
 ╠══════════════════════════════════════════════════════╣
 ║  Webhook:  http://0.0.0.0:${String(PORT).padEnd(5)}/webhook/task     ║
 ║  Tools:    http://0.0.0.0:${String(PORT).padEnd(5)}/tools            ║
@@ -1615,7 +3096,9 @@ app.listen(PORT, '0.0.0.0', () => {
 ║  Monitor:  http://0.0.0.0:${String(PORT).padEnd(5)}/monitor           ║
 ║  State:    http://0.0.0.0:${String(PORT).padEnd(5)}/state/<key>       ║
 ║  Dispatch: http://0.0.0.0:${String(PORT).padEnd(5)}/dispatch          ║
-║  Health:   http://0.0.0.0:${String(PORT).padEnd(5)}/health            ║
+║  Health:   http://0.0.0.0:${String(PORT).padEnd(5)}/health
+║  PFP Inbox: http://0.0.0.0:${String(PORT).padEnd(5)}/resend/inbox
+║  MM Inbox:  http://0.0.0.0:${String(PORT).padEnd(5)}/resend/mobilemonero/inbox            ║
 ╚══════════════════════════════════════════════════════╝
 
   Tools: ${Object.keys(toolHandlers).length} registered
