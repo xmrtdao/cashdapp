@@ -2882,6 +2882,86 @@ app.get('/mining/rewards', async (req, res) => {
   }
 });
 
+// ── Typefully integration — API v2 with Bearer auth ──────
+const TYPEFULLY_API = 'https://api.typefully.com/v2';
+const TYPEFULLY_KEY_PATH = join(__dirname, '..', 'typefully-integration social set id xmrtsolutions@gmai.com.txt');
+const SOCIAL_SET_ID = '272973';
+
+function getTypefullyKey() {
+  try {
+    const content = readFileSync(TYPEFULLY_KEY_PATH, 'utf8');
+    const match = content.match(/TYPEFULLY_API_KEY:\s*(\S+)/);
+    return match ? match[1].trim() : process.env.TYPEFULLY_API_KEY;
+  } catch {
+    return process.env.TYPEFULLY_API_KEY;
+  }
+}
+
+async function typefullyRequest(method, path, body) {
+  const key = getTypefullyKey();
+  if (!key) return { success: false, error: 'No Typefully API key found' };
+  
+  const opts = {
+    method,
+    headers: {
+      'Authorization': 'Bearer ' + key,
+      'Content-Type': 'application/json',
+    }
+  };
+  if (body) opts.body = JSON.stringify(body);
+  
+  try {
+    const r = await fetch(TYPEFULLY_API + path, opts);
+    const data = await r.json();
+    if (!r.ok) return { success: false, error: data?.error?.message || data?.detail || 'Typefully error', status: r.status };
+    return { success: true, data };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
+// POST /api/typefully/schedule — schedule a tweet
+// Body: { content, scheduled_at?, title? }
+app.post('/api/typefully/schedule', async (req, res) => {
+  const { content, scheduled_at, title } = req.body || {};
+  if (!content) return res.status(400).json({ error: 'content is required' });
+  
+  const payload = {
+    platforms: {
+      x: { enabled: true, posts: [{ text: content }] }
+    },
+    draft_title: title || '',
+  };
+  if (scheduled_at) payload.publish_at = scheduled_at;
+  
+  const result = await typefullyRequest('POST', '/social-sets/' + SOCIAL_SET_ID + '/drafts', payload);
+  
+  if (result.success) {
+    const d = result.data;
+    logActivity('typefully', d.id, 'SCHEDULED', (title || content).slice(0, 80));
+    logSentEmail({ to: '@XMRTSolutions', subject: title || 'Tweet', body: content.slice(0, 500), type: 'social', status: d.status });
+    res.json({
+      success: true,
+      draft_id: d.id,
+      status: d.status,
+      scheduled_date: d.scheduled_date,
+      private_url: d.private_url,
+    });
+  } else {
+    res.status(400).json({ error: result.error });
+  }
+});
+
+// GET /api/typefully/drafts — list recent drafts
+app.get('/api/typefully/drafts', async (req, res) => {
+  const result = await typefullyRequest('GET', '/social-sets/' + SOCIAL_SET_ID + '/drafts?limit=' + (req.query.limit || 10));
+  if (result.success) {
+    res.json({ count: result.data.count, drafts: result.data.results });
+  } else {
+    res.status(400).json({ error: result.error });
+  }
+});
+
 // ── Typefully webhook receiver ──────────────────────────────
 // Receives draft events from Typefully when configured in typefully.com/settings
 app.post('/webhook/typefully', (req, res) => {
