@@ -1416,82 +1416,6 @@ app.get('/', (req, res) => {
   setInterval(loadFleetAgents, 15000);
 
   // Mining Stats from pool + xmrig (proxied through relay)
-  function loadMiningStats() {
-    var poolHash = 0, vexHash = 0, ids = [];
-    
-    Promise.all([
-      fetch('/api/mining/pool-stats', { signal: AbortSignal.timeout(5000) }).then(function(r){return r.json();}).then(function(d){
-        poolHash = d.hash || 0;
-      }).catch(function(){}),
-      fetch('/api/mining/local-xmrig', { signal: AbortSignal.timeout(5000) }).then(function(r){return r.json();}).then(function(d){
-        vexHash = d.hashrate || 0;
-      }).catch(function(){}),
-      fetch('/api/mining/pool-identifiers', { signal: AbortSignal.timeout(5000) }).then(function(r){return r.json();}).then(function(d){
-        ids = d || [];
-      }).catch(function(){})
-    ]).then(function(){
-      var e;
-      if (e = document.getElementById('pool-hash')) e.textContent = poolHash.toFixed(0) + ' H/s';
-      if (e = document.getElementById('miner-vex')) e.textContent = vexHash.toFixed(0) + ' H/s';
-      
-      var hasHermes = ids.indexOf('xmrt-dao-mobile') !== -1 || ids.indexOf('hermes-phone') !== -1;
-      if (e = document.getElementById('miner-hermes'))
-        e.innerHTML = hasHermes ? '<span class="badge badge-ok">ONLINE</span>' : '<span class="badge badge-err">OFFLINE</span>';
-      
-      var hermesHash = Math.max(0, poolHash - vexHash);
-      if (e = document.getElementById('hermes-hash')) e.textContent = hermesHash.toFixed(0) + ' H/s';
-      
-      if (e = document.getElementById('pool-workers')) e.textContent = ids.join(', ') || 'none';
-      
-      if (e = document.getElementById('pool-shares')) {
-        // shares from the last pool-stats response - need to re-fetch or pass through
-      }
-    });
-    
-    // Also fetch shares and XMR separately (independent of worker tracking)
-    fetch('/api/mining/pool-stats').then(function(r){return r.json();}).then(function(d){
-      var e;
-      if (e = document.getElementById('pool-shares')) e.textContent = (d.validShares||0) + ' valid / ' + (d.invalidShares||0) + ' invalid';
-      if (e = document.getElementById('pool-xmr')) e.textContent = ((d.amtPaid||0)/1e12).toFixed(6) + ' / ' + ((d.amtDue||0)/1e12).toFixed(6) + ' XMR';
-    }).catch(function(){});
-  }
-  loadMiningStats();
-  setInterval(loadMiningStats, 30000);
-
-  // Auto-report local XMRig contributions (server-side, proxied through relay)
-  function selfReportLocalMiner() {
-    fetch('/api/mining/local-xmrig', { signal: AbortSignal.timeout(5000) })
-      .then(function(r){return r.json();})
-      .then(function(d){
-        var h = d.hashrate || 0;
-        if (h > 0) {
-          fetch('/mining/contribute', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ worker: 'vex-laptop', hashes: Math.round(h), valid_shares: 1 })
-          }).catch(function(){});
-        }
-      }).catch(function(){});
-  }
-  selfReportLocalMiner();
-  setInterval(selfReportLocalMiner, 60000);
-
-  // Web mining pool stats — real XMR from pool API
-  function loadWebPoolStats() {
-    fetch('/api/mining/pool-stats').then(function(r){return r.json();}).then(function(d){
-      var e = document.getElementById('browser-xmr');
-      if (e) {
-        var total = (d.amtPaid/1e12||0).toFixed(6) + ' XMR / ' + (d.amtDue/1e12||0).toFixed(6) + ' XMR due';
-        e.textContent = total;
-      }
-    }).catch(function(){
-      var e = document.getElementById('browser-xmr');
-      if (e) e.textContent = 'pool unreachable';
-    });
-  }
-  loadWebPoolStats();
-  setInterval(loadWebPoolStats, 30000);
-
   // Load mining leaderboard
   function loadMiningLeaderboard() {
     fetch('/mining/leaderboard').then(function(r){return r.json();}).then(function(d){
@@ -1519,6 +1443,24 @@ app.get('/', (req, res) => {
   }
   loadMiningLeaderboard();
   setInterval(loadMiningLeaderboard, 15000);
+
+  // Local XMRig heartbeat (vex-laptop auto-reports hashrate)
+  function localMinerHeartbeat() {
+    fetch('/api/mining/local-xmrig', { signal: AbortSignal.timeout(5000) })
+      .then(function(r){return r.json();})
+      .then(function(d){
+        var h = d.hashrate || 0;
+        if (h > 0) {
+          fetch('/mining/heartbeat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ worker: 'vex-laptop', hashrate: Math.round(h) })
+          }).catch(function(){});
+        }
+      }).catch(function(){});
+  }
+  localMinerHeartbeat();
+  setInterval(localMinerHeartbeat, 60000);
 
   // Party Favor Photo inbox refresh (brief — lightweight)
   function loadPfpInbox() {
