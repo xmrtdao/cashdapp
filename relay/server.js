@@ -1244,10 +1244,11 @@ app.get('/', (req, res) => {
 
     <div class="card">
       <h3 style="color:#60a5fa;">Social Publishing</h3>
-      <div class="stat"><span class="label"><a href="https://typefully.com/?d=9140069&a=272973" target="_blank" style="color:#60a5fa;text-decoration:none;">Next Tweet</a></span><span class="value">May 18, 12PM CST</span></div>
+      <div class="stat"><span class="label">Last Tweet</span><span class="value" style="color:#4ade80;">✅ Published</span></div>
+      <div class="stat"><span class="label">Content</span><span class="value" style="font-size:0.7rem;">DAO Economy Article Promotion</span></div>
       <div class="stat"><span class="label">Account</span><span class="value"><a href="https://x.com/XMRTSolutions" target="_blank" style="color:#60a5fa;text-decoration:none;">@XMRTSolutions</a></span></div>
       <div class="stat"><span class="label">Pipeline</span><span class="value" style="font-size:0.7rem;">Paragraph -> Typefully -> X</span></div>
-      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">New: Typefully webhook active - published tweets log to sent-emails</div>
+      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">Next tweet TBD — add content to Typefully queue</div>
     </div>
 
     <div class="card" id="pfp-card">
