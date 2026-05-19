@@ -965,8 +965,8 @@ function guessHandlerFromTitle(title) {
 const app = express();
 
 // Raw body capture for requests without Content-Type (some agents omit it)
-// Forgiving JSON parser — handles all bodies as potential JSON
-app.use(express.json({ limit: '5mb', type: () => true }));
+// Standard JSON parser — fleet chat endpoint has its own fallback for missing Content-Type
+app.use(express.json({ limit: '5mb' }));
 
 // Fallback: parse body as JSON for requests without Content-Type
 app.use((req, res, next) => {
