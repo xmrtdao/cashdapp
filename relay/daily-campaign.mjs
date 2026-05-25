@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Daily Campaign Send — Party Favor Photo
+ * Daily Campaign Send -�" Party Favor Photo
  * Sends outreach emails from the seasonal-scraper contact pool. Usage: daily-campaign.mjs [count=50]
  * Called by Windows Task Scheduler at 8:00 AM daily.
  */
@@ -9,6 +9,7 @@ import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { buildCampaignHtml } from './lib/email-template.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,6 +29,17 @@ const API = 'https://vawouugtzwmejxqkeqqj.supabase.co/functions/v1/resend-email'
 const CONTACTS_FILE = path.join(__dirname, '..', 'relay-data', 'campaign-contacts.json');
 const LOG_FILE = path.join(__dirname, '..', 'relay-data', 'campaign.log');
 const SENT_FILE = path.join(__dirname, '..', 'relay-data', 'campaign-sent.json');
+const SUPPRESSION_FILE = path.join(__dirname, '..', 'relay-data', 'suppression-list.json');
+
+function loadSuppression() {
+  try {
+    if (fs.existsSync(SUPPRESSION_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SUPPRESSION_FILE, 'utf8'));
+      return new Set(data.suppressed || []);
+    }
+  } catch {}
+  return new Set();
+}
 
 // Load contacts, mark sent ones
 let contacts = [];
@@ -36,16 +48,51 @@ try { contacts = JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf8')); } catch { c
 let sentHistory = [];
 try { sentHistory = JSON.parse(fs.readFileSync(SENT_FILE, 'utf8')); } catch { sentHistory = []; }
 
-// Filter out already-sent emails (last 30 days)
+// Filter out already-sent emails (last 30 days) and suppressed
 const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
 const recentSent = new Set(sentHistory.filter(s => s.ts > cutoff).map(s => s.email));
+const suppressed = loadSuppression();
 
-const available = contacts.filter(c => !recentSent.has(c.email) && c.email.includes('@'));
+let available = contacts.filter(c => !recentSent.has(c.email) && c.email.includes('@'));
+
+if (suppressed.size > 0) {
+  const blocked = available.filter(c => suppressed.has(c.email));
+  if (blocked.length > 0) {
+    console.log(`[Campaign] Skipping ${blocked.length} suppressed contacts`);
+    available = available.filter(c => !suppressed.has(c.email));
+  }
+}
 
 // Pick 50, prioritizing untried ones
 const day = new Date().getDate();
 const sorted = [...available].sort((a, b) => (a.sentCount || 0) - (b.sentCount || 0));
-const count = parseInt(process.argv[2]) || 50;
+const count = parseInt(process.argv[2]) || 100;
+
+// Convert text body to HTML with images
+function buildHtmlBody(textBody) {
+  const paragraphs = textBody.split('\n\n');
+  const html = paragraphs.map(p => {
+    const trimmed = p.trim();
+    if (!trimmed) return '';
+    if (trimmed.startsWith('- ')) {
+      return '<ul>' + trimmed.split('\n').map(l => '<li>' + l.replace(/^- /, '') + '</li>').join('') + '</ul>';
+    }
+    if (trimmed.startsWith('https://')) {
+      // Check if it looks like an image (ends with image extension) or a URL
+      const imgExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'];
+      const isImage = imgExts.some(ext => trimmed.toLowerCase().includes(ext));
+      if (isImage) {
+        return '<p><img src="' + trimmed + '" style="max-width:100%;border-radius:8px;max-height:350px;"/></p>';
+      }
+      return '<p><a href="' + trimmed + '" style="display:inline-block;background:#ff6b35;color:#000;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:700;">Book Now</a></p>';
+    }
+    if (trimmed.startsWith('  ') || trimmed.includes('-- $')) {
+      return '<p>' + trimmed.replace(/  /g, '&nbsp; ') + '</p>';
+    }
+    return '<p>' + trimmed + '</p>';
+  }).filter(Boolean).join('\n');
+  return '<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;">' + html + '</div>';
+}
 const batch = sorted.slice(0, count);
 
 if (batch.length === 0) {
@@ -60,10 +107,10 @@ const LOCK_FILE = path.join(logDir, 'campaign.lock');
 // File-based lock to prevent concurrent campaign runs
 function acquireLock() {
   try {
-    if (existsSync(LOCK_FILE)) {
+    if (fs.existsSync(LOCK_FILE)) {
       const lockAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
       if (lockAge < 3600000) {
-        console.log('Campaign already running (age: ' + Math.round(lockAge/1000) + 's) — exiting');
+        console.log('Campaign already running (age: ' + Math.round(lockAge/1000) + 's) -�" exiting');
         return false;
       }
       fs.unlinkSync(LOCK_FILE);
@@ -73,7 +120,7 @@ function acquireLock() {
   } catch { return false; }
 }
 function releaseLock() {
-  try { if (existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE); } catch {}
+  try { if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE); } catch {}
 }
 
 if (!acquireLock()) process.exit(0);
@@ -99,7 +146,7 @@ function sendNext() {
   // Double-check this email hasn't been sent already (defense in depth)
   const recentSentCheck = new Set(sentHistory.filter(s => s.ts > Date.now() - 30*24*60*60*1000).map(s => s.email));
   if (recentSentCheck.has(entry.email)) {
-    // Already sent in this session — skip
+    // Already sent in this session -�" skip
     sent++;
     setTimeout(sendNext, 10);
     return;
@@ -109,88 +156,105 @@ function sendNext() {
   const stripe3hr = 'https://buy.stripe.com/9B63cv9mH07j3eyeWObZe06';
   const stripe4hr = 'https://buy.stripe.com/eVqcN556r4nz16qeWObZe04';
   
-  // Choose template based on contact topic
-  const topic = (entry.topic || '').toLowerCase();
-  const isCorporate = topic.includes('conference') || topic.includes('corporate') || topic.includes('trade') || topic.includes('convention');
-  
-  const body = isCorporate ? `Hi there,
+  const templateA = `Hello again from Party Favor Photo,
 
-I'm Joe, the owner of Party Favor Photo. We provide photo experiences for corporate conferences and trade shows across the DC and Dallas areas.
+You may have seen photo booths that use an iPad on a stand with a ring light -- that is the common setup these days. But that has never been how we do it.
 
-What makes us different: we can serve your event from both ends.
+Since day one, we have built our experience around a professional DSLR camera with strobe lighting -- the same gear photographers use for weddings and editorial shoots. There is a real difference:
 
-**Morning Session — Professional Corporate Headshots**
-Set up in the conference hall or a breakout room. Attendees get polished, professional headshots they can use for LinkedIn, badges, and company directories. No more hunting people down for photos later.
+- Strobe flash -- freezes motion, works in any lighting from dark ballrooms to outdoor day events, and creates that clean, professional look
+- DSLR quality -- large sensor, sharp detail, prints that actually look good at 4x6 and larger
+- Bounce-diffused lighting -- soft, flattering light on faces. No harsh shadows, no red-eye, no washed-out look
+- Professional attendant -- someone sets the lighting, adjusts for each group, and keeps the energy up
 
-**Evening Reception — Branded Photo Booth**
-Custom branded templates, props, and instant sharing. The perfect way to cap off a conference day — keeps people networking, having fun, and creating shareable content that promotes your event.
+The difference is obvious side by side. A tablet with a ring light works fine for selfies. Our setup produces photos people actually want to print and keep.
 
-Double the value from a single vendor booking.
-
-Here's our corporate pricing:
-
-  Half-Day (headshots or reception) — $747
-  ${stripe3hr}
-
-  Full Conference Day (headshots + reception) — $996
-  ${stripe4hr}
-
-We handle setup, breakdown, and all equipment. Your attendees get pro-quality results, your event gets documented, and you get one less thing to worry about.
-
-Click a link above to book or reply for a custom quote.
-
-Warmly,
-
-Joe Lee
-Party Favor Photo
-(202) 798-0610
-partyfavorphoto.com` : `Hi there,
-
-I'm Joe, the owner of Party Favor Photo — we're an award-winning photo booth company serving the DC and Dallas areas. We specialize in high school graduation parties, ANGP events, and school celebrations.
-
-Our StudioStation photo booth features a professional DSLR camera, studio strobe lighting, sequin backdrops, unlimited custom prints, and QR code sharing. We handle everything from setup to breakdown.
-
-Here's what we offer:
-
-  StudioStation 2hr — $498
+Packages:
+  2 hours -- $498
   ${stripeGeneral}
 
-  StudioStation 3hr — $747
+  3 hours -- $747
   ${stripe3hr}
 
-  StudioStation 4hr — $996
+  4 hours -- $996
   ${stripe4hr}
 
-Click a link above to book instantly! No commitment until deposit. Questions? Reply to this email or call/text.
+Military and non-profit rate -- $398. Just reply.
+
+No commitment until deposit. Questions? Reply or call.
 
 Warmly,
 
 Joe Lee
 Party Favor Photo
 (202) 798-0610
-partyfavorphoto.com
-5.0 on The Knot & WeddingWire`;
+partyfavorphoto.com`;
+
+  // Template B: Limited time $100 off (A/B test)
+  const COUPON_CODE = 'STUDIO100';
+  const templateB = `Hello again from Party Favor Photo,
+
+We are running a limited-time offer for our past clients and wanted you to be the first to know.
+
+For the next 30 days, save $100 on any StudioStation package.
+
+Here is what you already know about our setup -- professional DSLR camera with strobe lighting, not a tablet on a stick. The strobe flash creates clean, professional photos in any venue. Your guests see the difference immediately.
+
+Packages at the discounted rate (limited time):
+
+  2 hours -- $398 (regularly $498)
+  ${stripeGeneral}
+
+  3 hours -- $647 (regularly $747)
+  ${stripe3hr}
+
+  4 hours -- $896 (regularly $996)
+  ${stripe4hr}
+
+Offer ends in 30 days. No commitment until deposit. Questions? Reply or call.
+
+Warmly,
+
+Joe Lee
+Party Favor Photo
+(202) 798-0610
+partyfavorphoto.com`;
+
+  // A/B split: alternate based on email hash
+  const body = templateA;
+  const subject = 'The difference: DSLR + strobe vs tablet + ring light';
   
+  // Build proper multipart email with HTML + plain text fallback
+  const htmlBody = buildCampaignHtml(body);
+  const postData = JSON.stringify({ to: entry.email, subject, body, html: htmlBody });
   const req = https.request(API, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${KEY}` }
+    headers: {
+      'Authorization': `Bearer ${KEY}`,
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(postData),
+    },
   }, (res) => {
     let data = '';
-    res.on('data', c => data += c);
+    res.on('data', (chunk) => { data += chunk; });
     res.on('end', () => {
-      if (data.includes('"status":"sent"')) {
+      if (res.statusCode === 200) {
         sent++;
         appendSent(entry.email);
+        console.log(`  [${sent}] Sent to ${entry.email}`);
       } else {
         errors++;
+        console.error(`  [ERR] ${entry.email}: HTTP ${res.statusCode} ${data.slice(0,100)}`);
       }
-      process.stdout.write(sent + errors < count ? '.' : '.\n');
-      setTimeout(sendNext, 120);
+      setTimeout(sendNext, 10);
     });
   });
-  req.on('error', () => { errors++; setTimeout(sendNext, 120); });
-  const subject = isCorporate ? 'Conference photo experience — headshots + evening booth' : 'Hello from Party Favor Photo';
-  req.write(JSON.stringify({ to: entry.email, subject, body }));
+  req.on('error', (err) => {
+    errors++;
+    console.error(`  [ERR] ${entry.email}: ${err.message}`);
+    setTimeout(sendNext, 10);
+  });
+  req.write(postData);
   req.end();
 }
 
