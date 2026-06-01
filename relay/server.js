@@ -2233,12 +2233,17 @@ loadUniversityStatus();
   function loadPfpInbox() {
     fetch('/resend/inbox/brief').then(function(r){return r.json();}).then(function(data){
       var card = document.getElementById('pfp-inbox');
-      if (!card || !data.emails) return;
+      if (!card) return;
+      var emails = data.emails || data.recent || [];
+      if (!emails.length) {
+        card.innerHTML = '<div class="stat"><span class="label">No emails yet</span></div>';
+        return;
+      }
       var html = '';
       // Group by recipient
       var groups = {};
-      data.emails.slice(0,20).forEach(function(e){
-        var addr = (e.to && e.to[0]) || 'unknown';
+      emails.slice(0,20).forEach(function(e){
+        var addr = Array.isArray(e.to) ? (e.to[0] || 'unknown') : (e.to || 'unknown');
         if (!groups[addr]) groups[addr] = [];
         groups[addr].push(e);
       });
@@ -2272,11 +2277,16 @@ loadUniversityStatus();
   function loadMmInbox() {
     fetch('/resend/mobilemonero/inbox/brief').then(function(r){return r.json();}).then(function(data){
       var card = document.getElementById('mm-inbox');
-      if (!card || !data.emails) return;
+      if (!card) return;
+      var emails = data.emails || data.recent || [];
+      if (!emails.length) {
+        card.innerHTML = '<div class="stat"><span class="label">No emails yet</span></div>';
+        return;
+      }
       var html = '';
       var groups = {};
-      data.emails.slice(0,15).forEach(function(e){
-        var addr = (e.to && e.to[0]) || 'unknown';
+      emails.slice(0,15).forEach(function(e){
+        var addr = Array.isArray(e.to) ? (e.to[0] || 'unknown') : (e.to || 'unknown');
         if (!groups[addr]) groups[addr] = [];
         groups[addr].push(e);
       });
@@ -4360,7 +4370,7 @@ app.get('/resend/inbox/brief', (req, res) => {
     total: inbox.pfp.length,
     unread: inbox.pfp.filter(e => !e.read).length,
     recent: inbox.pfp.slice(0, 5).map(e => ({
-      id: e.id, from: e.from, subject: e.subject,
+      id: e.id, from: e.from, to: e.to, subject: e.subject,
       receivedAt: e.receivedAt, read: e.read,
     })),
   });
@@ -4400,7 +4410,7 @@ app.get('/resend/mobilemonero/inbox/brief', (req, res) => {
     total: inbox.mobilemonero.length,
     unread: inbox.mobilemonero.filter(e => !e.read).length,
     recent: inbox.mobilemonero.slice(0, 5).map(e => ({
-      id: e.id, from: e.from, subject: e.subject,
+      id: e.id, from: e.from, to: e.to, subject: e.subject,
       receivedAt: e.receivedAt, read: e.read,
     })),
   });
