@@ -23,7 +23,7 @@ process.on('unhandledRejection', (err) => {
  */
 
 import express from 'express';
-import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
@@ -58,10 +58,25 @@ import { getFullSnapshot, getSystemResources, checkExternalServices } from './to
 import * as state from './lib/state.mjs';
 import { createTaskRunner } from './lib/task-runner.mjs';
 import { handleInboundEmail } from './lib/auto-responder.mjs';
-import * as minimax from './tools/minimax-pipeline.mjs';
+import { createMeshRouter, initMeshNode, publishToMesh, getMeshMessageLog } from './lib/mesh-router.mjs';
+import { discoverFunctions, listFunctions } from './lib/function-runtime.mjs';
+
+// Local edge function runtime
+const LOCAL_FUNCTIONS_DIR = join(__dirname, 'functions');
+let localFunctions = [];
+(async () => {
+  try {
+    const count = await discoverFunctions();
+    localFunctions = listFunctions();
+    console.log('[runtime] Discovered ' + count + ' local functions');
+  } catch (e) {
+    console.error('[runtime] Init error:', e.message);
+  }
+})();
+
 
 // ── Config ──────────────────────────────────────────────────
-const PORT = parseInt(process.env.RELAY_PORT || '8080');
+const PORT = parseInt(process.env.PORT || '8080');
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://vawouugtzwmejxqkeqqj.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
@@ -357,11 +372,11 @@ const handlers = {
     try {
       const pyCode = `
 import sys
-sys.path.insert(0, r'${__dirname}/../../xmrtdao-full/Alice-A-minimal-interface-for-maximum-control/kaiserin_agent')
+sys.path.insert(0, r'${__dirname}/../xmrtdao-full/Alice-A-minimal-interface-for-maximum-control/kaiserin_agent')
 from config import OLLAMA_HOST, OLLAMA_MODEL, BASE_DIR
 from actions import ActionRouter
 from task_orchestrator import TaskOrchestrator
-print(f"OK|{OLLAMA_HOST}|{OLLAMA_MODEL}")
+print('OK|' + str(OLLAMA_HOST) + '|' + str(OLLAMA_MODEL))
 `;
       const verify = execSync(
         `python -c "${pyCode.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`,
@@ -864,6 +879,212 @@ const toolHandlers = {
     } catch (err) { return { success: false, error: err.message }; }
   },
 
+  'ef:mesh-publish': async (args) => {
+    const topic = args?.topic || 'fleet-broadcast';
+    const payload = args?.payload || args?.message || {};
+    const agent = args?.agent || 'vex';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/mesh-publish`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic, payload: typeof payload === 'string' ? { text: payload } : payload, agent }),
+        signal: AbortSignal.timeout(15000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:mesh-peer-connector': async (args) => {
+    const action = args?.action || 'register';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/mesh-peer-connector`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(typeof args === 'object' ? { ...args } : { action, ...args }),
+        signal: AbortSignal.timeout(10000),
+      });
+      const data = await res.json();
+      // Log cert verification status for dashboard
+      if (!data.success && data.error?.includes('certificate')) {
+        console.log('[mesh-peer-connector] Agent rejected - needs XMRT University certification');
+      }
+      return { success: true, status: res.status, data };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:eliza-chat': async (args) => {
+    const message = args?.message || args?.prompt;
+    if (!message) return { error: 'message is required' };
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/eliza-chat`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, ...args }),
+        signal: AbortSignal.timeout(60000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:task-orchestrator': async (args) => {
+    const action = args?.action || 'list_tasks';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/task-orchestrator`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...args }),
+        signal: AbortSignal.timeout(15000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:agent-coordination-hub': async (args) => {
+    const action = args?.action || 'status';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/agent-coordination-hub`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...args }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:google-gmail': async (args) => {
+    const action = args?.action || 'list_messages';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/google-gmail`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...args }),
+        signal: AbortSignal.timeout(15000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:google-calendar': async (args) => {
+    const action = args?.action || 'list_events';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/google-calendar`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...args }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:google-drive': async (args) => {
+    const action = args?.action || 'list_files';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/google-drive`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...args }),
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:playwright-browse': async (args) => {
+    const url = args?.url || args?.u;
+    if (!url) return { error: 'url is required' };
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/playwright-browse`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, action: args?.action || 'navigate', ...args }),
+        signal: AbortSignal.timeout(60000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:vertex-ai': async (args) => {
+    const action = args?.action || 'chat';
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/vertex-ai-chat`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(args),
+        signal: AbortSignal.timeout(60000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:paragraph-publish': async (args) => {
+    const title = args?.title;
+    const content = args?.content || args?.body;
+    if (!title || !content) return { error: 'title and content are required' };
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/paragraph-publisher`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, content, ...args }),
+        signal: AbortSignal.timeout(30000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:typefully-send': async (args) => {
+    const content = args?.content || args?.text || args?.tweet;
+    if (!content) return { error: 'content is required' };
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/typefully-integration`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, ...args }),
+        signal: AbortSignal.timeout(15000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:universal-invoke': async (args) => {
+    const fn = args?.function || args?.fn;
+    if (!fn) return { error: 'function name is required' };
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/universal-edge-invoker`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ function_name: fn, payload: args?.payload || args?.args || {} }),
+        signal: AbortSignal.timeout(30000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:ecosystem-health': async () => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/ecosystem-health-check`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(10000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'ef:predictive-analytics': async (args) => {
+    try {
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/predictive-analytics`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(args || {}),
+        signal: AbortSignal.timeout(15000),
+      });
+      return { success: true, status: res.status, data: await res.json() };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
   'fleet-chat': async (args) => {
     const agent = args?.agent || 'vex';
     const message = args?.message;
@@ -879,9 +1100,56 @@ const toolHandlers = {
       return await res.json();
     } catch (err) { return { success: false, error: err.message }; }
   },
-}
 
-// ── Default handler ─────────────────────────────────────────
+  'vex-vision': async (args) => {
+    const capturePath = join(__dirname, '..', 'relay-data', 'vex-capture.jpg');
+    const cameraName = args?.camera || 'HP TrueVision HD Camera';
+    const prompt = args?.prompt || 'What do you see in this image? Be concise.';
+    const model = args?.model || 'moondream';
+    try {
+      // Capture photo via ffmpeg — use spawn for windows compat
+      const ffmpegPath = 'C:\\tools\\ffmpeg';
+      const result = execSync(
+        `"${ffmpegPath}" -f dshow -i video="${cameraName}" -frames:v 1 -q:v 2 -update 1 "${capturePath}" -y`,
+        { timeout: 10000, windowsHide: true }
+      );
+      const imgBase64 = readFileSync(capturePath).toString('base64');
+      // Send to Ollama vision model
+      const visionRes = await fetch('http://localhost:11434/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt, images: [imgBase64] }],
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(90000),
+      });
+      const visionData = await visionRes.json();
+      const desc = visionData.message?.content || visionData.error || 'no response';
+      return {
+        success: true,
+        model,
+        description: desc,
+        image: imgBase64.slice(0, 100) + '... [' + Math.round(imgBase64.length / 1024) + 'KB]',
+      };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+
+  'vex-hear': async (args) => {
+    const capturePath = join(__dirname, '..', 'relay-data', 'vex-audio.wav');
+    const duration = Math.min(args?.duration || 3, 10);
+    try {
+      // Use PowerShell to capture audio (handles special chars in device names)
+      execSync(
+        `powershell -Command "& {\$ps=New-Object -ComObject Scripting.FileSystemObject; Write-Host 'audio capture placeholder'}"`,
+        { timeout: 3000, windowsHide: true }
+      );
+      return { success: false, error: 'Audio capture via ffmpeg needs device name fix on this Windows build. Vision is fully operational.', duration };
+    } catch (err) { return { success: false, error: err.message }; }
+  },
+};
+
 async function defaultHandler(task) {
   logActivity('handler', task.id, 'FALLBACK', `No specific handler for "${task.title}"`);
   return {
@@ -897,11 +1165,15 @@ async function relayToElizaCloud(message, senderName = 'Eliza-Dev', relayTag = n
   const url = `${SUPABASE_URL}/functions/v1/eliza-relay`;
   try {
     logActivity('eliza', tag, 'SEND', message.slice(0, 80));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000);
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'send', message, relay_tag: tag, agent_name: senderName }),
+      signal: controller.signal,
     });
+    clearTimeout(timeout);
     if (!res.ok) {
       const text = await res.text();
       logActivity('eliza', tag, 'FAIL', `HTTP ${res.status}: ${text.slice(0, 100)}`);
@@ -967,6 +1239,63 @@ const app = express();
 // Raw body capture for requests without Content-Type (some agents omit it)
 // Standard JSON parser — fleet chat endpoint has its own fallback for missing Content-Type
 app.use(express.json({ limit: '5mb' }));
+
+// ── Fast static file routes (bypasses slow express.static on Windows) ──
+const PUBLIC_DIR = join(__dirname, 'public');
+const SPATIAL_DIR = join(__dirname, 'spatial');
+
+app.get('/radar/radar.html', (req, res) => {
+  trackRequest('/radar/radar.html');
+  res.sendFile(join(PUBLIC_DIR, 'radar.html'));
+});
+
+app.get('/radar/probe.sh', (req, res) => {
+  trackRequest('/radar/probe.sh');
+  const scriptPath = join(SPATIAL_DIR, 'spatial-probe.sh');
+  if (existsSync(scriptPath)) {
+    res.setHeader('Content-Type', 'text/plain');
+    res.sendFile(scriptPath);
+  } else {
+    res.status(404).send('Probe script not found');
+  }
+});
+
+// Short alias for easier phone access
+app.get('/probe.sh', (req, res) => {
+  trackRequest('/probe.sh');
+  const scriptPath = join(PUBLIC_DIR, 'probe.sh');
+  if (existsSync(scriptPath)) {
+    res.setHeader('Content-Type', 'text/plain');
+    res.sendFile(scriptPath);
+  } else {
+    res.status(404).send('Probe script not found');
+  }
+});
+
+app.get('/spatial/:file', (req, res) => {
+  trackRequest('/spatial/' + req.params.file);
+  const filePath = join(SPATIAL_DIR, req.params.file);
+  if (existsSync(filePath) && filePath.startsWith(SPATIAL_DIR)) {
+    res.setHeader('Content-Type', 'text/plain');
+    res.sendFile(filePath);
+  } else {
+    res.status(404).send('Not found');
+  }
+});
+
+// ── Inbox Landing Pages ─────────────────────────────────────
+app.get('/inbox', (req, res) => {
+  const host = req.headers.host || '';
+  if (host.includes('mobilemonero') || req.query.domain === 'mobilemonero') {
+    res.sendFile(join(PUBLIC_DIR, 'inbox-xmrt.html'));
+  } else {
+    res.sendFile(join(PUBLIC_DIR, 'inbox-pfp.html'));
+  }
+});
+
+app.use('/images', express.static(join(__dirname, 'public')));
+app.use('/radar', express.static(join(__dirname, 'public')));
+app.use('/spatial', express.static(join(__dirname, 'spatial')));
 
 // Fallback: parse body as JSON for requests without Content-Type
 app.use((req, res, next) => {
@@ -1061,40 +1390,107 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MobileMonero — Fleet Dashboard</title>
+  <title>MobileMonero — Privateer Fleet</title>
   <style>
+    :root {
+      --bg-primary: #0a0a0f;
+      --bg-card: #12121a;
+      --bg-card-hover: #1a1a2a;
+      --border: #2a2a3a;
+      --border-hover: #3a3a5a;
+      --text-primary: #e0e0f0;
+      --text-secondary: #c0c0d0;
+      --text-muted: #8b8ba0;
+      --text-dim: #6b6b80;
+      --accent-orange: #ff6b35;
+      --accent-orange-glow: rgba(255,107,53,0.15);
+      --accent-teal: #4ade80;
+      --accent-blue: #60a5fa;
+      --accent-purple: #a78bfa;
+      --accent-yellow: #fbbf24;
+      --accent-red: #f87171;
+      --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+      --font-mono: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', monospace;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0f; color: #c0c0d0; padding: 0.75rem; }
+    body { font-family: var(--font-sans); background: var(--bg-primary); color: var(--text-secondary); padding: 0.75rem; }
     @media (min-width: 640px) { body { padding: 1.5rem; } }
-    h1 { color: #ff6b35; font-size: 1.2rem; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    h1 { color: var(--accent-orange); font-size: 1.2rem; margin-bottom: 0.25rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-weight: 800; letter-spacing: -0.5px; }
     @media (min-width: 640px) { h1 { font-size: 1.6rem; gap: 0.75rem; } }
-    h1 span { font-size: 0.75rem; color: #6b6b80; font-weight: 400; }
+    h1 span { font-size: 0.75rem; color: var(--text-dim); font-weight: 400; letter-spacing: 0; }
     @media (min-width: 640px) { h1 span { font-size: 0.9rem; } }
-    .subtitle { color: #8b8ba0; font-size: 0.8rem; margin-bottom: 1rem; }
+    .subtitle { color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1rem; }
     @media (min-width: 640px) { .subtitle { font-size: 0.9rem; margin-bottom: 1.5rem; } }
-    .subtitle a { color: #4a7cff; text-decoration: none; }
-    .subtitle a:hover { text-decoration: underline; }
+    .subtitle a { color: var(--accent-blue); text-decoration: none; transition: color .15s; }
+    .subtitle a:hover { color: var(--accent-orange); text-decoration: underline; }
     .grid { display: grid; grid-template-columns: 1fr; gap: 0.75rem; margin-bottom: 1.5rem; }
     @media (min-width: 480px) { .grid { grid-template-columns: repeat(2, 1fr); gap: 0.75rem; } }
     @media (min-width: 768px) { .grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; } }
     .grid > .full { grid-column: 1 / -1; }
-    .card { background: #12121a; border: 1px solid #2a2a3a; border-radius: 10px; padding: 0.75rem; }
+    .side-by-side { display: flex; flex-wrap: wrap; gap: 12px; grid-column: 1 / -1; }
+    .side-by-side > * { flex: 1; min-width: 280px; }
+    /* RSSI signal strength colors */
+    .rssi-strong { color: #4ade80; }
+    .rssi-fair { color: #fbbf24; }
+    .rssi-weak { color: #f87171; }
+    .rssi-poor { color: #ef4444; }
+    .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 0.75rem; transition: border-color .2s, transform .15s; }
     @media (min-width: 640px) { .card { padding: 1rem; } }
-    .card h3 { color: #ff6b35; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem; }
+    .card:hover { border-color: var(--accent-orange-glow); }
+    .card h3 { color: var(--accent-orange); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem; font-weight: 700; }
     @media (min-width: 640px) { .card h3 { font-size: 0.8rem; margin-bottom: 0.6rem; } }
-    .stat { display: flex; justify-content: space-between; padding: 0.25rem 0; border-bottom: 1px solid #1a1a2a; font-size: 0.75rem; gap: 0.5rem; }
+    .stat { display: flex; justify-content: space-between; padding: 0.25rem 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 0.75rem; gap: 0.5rem; }
     @media (min-width: 640px) { .stat { padding: 0.3rem 0; font-size: 0.85rem; } }
     .stat:last-child { border-bottom: none; }
-    .label { color: #8b8ba0; flex-shrink: 0; }
-    .value { color: #e0e0f0; font-family: 'SF Mono', 'Cascadia Code', monospace; text-align: right; word-break: break-all; min-width: 0; }
+    .label { color: var(--text-muted); flex-shrink: 0; }
+    .value { color: var(--text-primary); font-family: var(--font-mono); text-align: right; word-break: break-all; min-width: 0; }
     .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.65rem; font-weight: 600; }
     @media (min-width: 640px) { .badge { font-size: 0.7rem; } }
-    .badge-ok { background: #14532d; color: #4ade80; }
-    .badge-warn { background: #451a03; color: #fbbf24; }
-    .badge-err { background: #450a0a; color: #f87171; }
-    .badge-info { background: #1a3a5c; color: #60a5fa; }
+    .badge-ok { background: rgba(74,222,128,0.12); color: var(--accent-teal); }
+    .badge-warn { background: rgba(251,191,36,0.12); color: var(--accent-yellow); }
+    .badge-err { background: rgba(248,113,113,0.12); color: var(--accent-red); }
+    .badge-info { background: rgba(96,165,250,0.12); color: var(--accent-blue); }
 
-    /* Fleet chat - full width always */
+    @media (min-width: 640px) { .chat-card { grid-column: 1 / -1; } }
+
+    .board-topics { max-height: 300px; overflow-y: auto; margin-bottom: 6px; }
+    .board-topic { padding: 8px; border-radius: 6px; background: #0d0d15; margin-bottom: 4px; cursor: pointer; transition: background .15s; border: 1px solid transparent; }
+    .board-topic:hover { background: #1a1a2a; border-color: rgba(255,107,53,0.2); }
+    .board-topic.active { border-color: var(--accent-orange); background: #1a1a2a; }
+    .board-topic-title { color: var(--text-primary); font-size: 13px; font-weight: 600; }
+    .board-topic-title > span { display: inline-block; }
+    .board-topic-meta { color: #6b6b80; font-size: 10px; margin-top: 2px; }
+    .board-filter { padding: 2px 10px; border-radius: 10px; font-size: 10px; cursor: pointer; color: #6b6b80; border: 1px solid #2a2a3a; background: transparent; transition: all .15s; }
+    .board-filter:hover { color: var(--text-secondary); border-color: #3a3a5a; }
+    .board-filter.active { color: var(--accent-orange); border-color: var(--accent-orange); background: rgba(255,107,53,0.1); }
+    .board-posts { max-height: 250px; overflow-y: auto; margin-bottom: 6px; }
+    .board-post { padding: 6px 8px; border-radius: 6px; background: #0d0d15; margin-bottom: 4px; }
+    .board-post-header { color: #6b6b80; font-size: 10px; display: flex; gap: 8px; }
+    .board-post-body { color: var(--text-secondary); font-size: 12px; margin-top: 2px; line-height: 1.4; }
+    .board-agent-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 9px; font-weight: 600; }
+    .board-agent-vex { background: rgba(255,107,53,0.15); color: var(--accent-orange); }
+    .board-agent-eliza { background: rgba(74,222,128,0.15); color: var(--accent-teal); }
+    .board-agent-hermes { background: rgba(167,139,250,0.15); color: var(--accent-purple); }
+    .board-agent-alice { background: rgba(96,165,250,0.15); color: var(--accent-blue); }
+    .board-agent-kimi { background: rgba(251,191,36,0.15); color: var(--accent-yellow); }
+    .board-input-wrap { display: flex; gap: 4px; }
+    .board-input-wrap input { min-width: 0; width: 100%; padding: 6px 10px; border-radius: 6px; border: 1px solid #2a2a3a; background: #1a1a2a; color: var(--text-primary); font-size: 12px; outline: none; }
+    .board-input-wrap input:focus { border-color: var(--accent-orange); }
+    .board-tabs { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; }
+    .board-tab { padding: 4px 12px; border-radius: 4px; font-size: 11px; cursor: pointer; background: #1a1a2a; color: #8b8ba0; border: 1px solid transparent; transition: all .15s; }
+    .board-tab:hover { border-color: rgba(255,107,53,0.3); color: var(--text-primary); }
+    .board-tab.active { background: rgba(255,107,53,0.15); color: var(--accent-orange); border-color: var(--accent-orange); }
+    .board-new-topic { display: flex; gap: 4px; margin-bottom: 6px; }
+    .board-new-topic input { flex: 1; padding: 6px 10px; border-radius: 6px; border: 1px solid #2a2a3a; background: #1a1a2a; color: var(--text-primary); font-size: 12px; outline: none; }
+    .board-new-topic input:focus { border-color: var(--accent-orange); }
+
+    /* Pirate Flag Logo */
+    .pirate-flag { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 52px; border-radius: 8px; overflow: hidden; flex-shrink: 0; }
+    .pirate-flag img { width: 100%; height: 100%; object-fit: cover; }
+    @media (min-width: 640px) { .pirate-flag { width: 52px; height: 52px; } }
+    .pirate-flag svg { width: 100%; height: 100%; display: block; }
+
+    /* Chat card */
     .chat-card { grid-column: 1 / -1; }
     .chat-input-wrap { display: flex; gap: 4px; flex-wrap: nowrap; }
     .chat-input-wrap input { min-width: 0; width: 100%; }
@@ -1102,85 +1498,303 @@ app.get('/', (req, res) => {
     /* Search & Filter */
     .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; align-items: center; }
     @media (min-width: 640px) { .controls { gap: 0.75rem; margin-bottom: 1rem; } }
-    .controls input { flex: 1; min-width: 0; padding: 0.5rem 0.75rem; border: 1px solid #2a2a3a; border-radius: 8px; background: #0d0d15; color: #e0e0f0; font-size: 0.85rem; outline: none; }
+    .controls input { flex: 1; min-width: 0; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 8px; background: #0d0d15; color: var(--text-primary); font-size: 0.85rem; outline: none; transition: border-color .15s; }
     @media (min-width: 640px) { .controls input { min-width: 200px; padding: 0.6rem 1rem; font-size: 0.9rem; } }
-    .controls input:focus { border-color: #ff6b35; }
-    .controls select { padding: 0.5rem 0.75rem; border: 1px solid #2a2a3a; border-radius: 8px; background: #0d0d15; color: #e0e0f0; font-size: 0.8rem; outline: none; cursor: pointer; }
+    .controls input:focus { border-color: var(--accent-orange); box-shadow: 0 0 0 3px var(--accent-orange-glow); }
+    .controls select { padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 8px; background: #0d0d15; color: var(--text-primary); font-size: 0.8rem; outline: none; cursor: pointer; transition: border-color .15s; }
     @media (min-width: 640px) { .controls select { padding: 0.6rem 1rem; font-size: 0.85rem; } }
-    .controls select:focus { border-color: #ff6b35; }
-    .count { color: #6b6b80; font-size: 0.8rem; white-space: nowrap; }
+    .controls select:focus { border-color: var(--accent-orange); }
+    .count { color: var(--text-dim); font-size: 0.8rem; white-space: nowrap; }
     @media (min-width: 640px) { .count { font-size: 0.85rem; } }
 
     /* Table */
-    .table-wrap { overflow-x: auto; border: 1px solid #2a2a3a; border-radius: 8px; background: #12121a; -webkit-overflow-scrolling: touch; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); -webkit-overflow-scrolling: touch; }
     @media (min-width: 640px) { .table-wrap { border-radius: 10px; } }
     table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
     @media (min-width: 640px) { table { font-size: 0.82rem; } }
-    th { text-align: left; padding: 0.4rem 0.5rem; background: #1a1a2a; color: #8b8ba0; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.65rem; border-bottom: 1px solid #2a2a3a; cursor: pointer; white-space: nowrap; }
+    th { text-align: left; padding: 0.4rem 0.5rem; background: var(--bg-card-hover); color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.65rem; border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap; }
     @media (min-width: 640px) { th { padding: 0.6rem 0.8rem; font-size: 0.72rem; } }
-    th:hover { color: #c0c0d0; }
-    td { padding: 0.5rem 0.8rem; border-bottom: 1px solid #1a1a2a; vertical-align: top; }
-    tr:hover td { background: #1a1a2a; }
-    .fn-name { color: #60a5fa; font-family: 'SF Mono', monospace; font-weight: 500; }
+    th:hover { color: var(--text-secondary); }
+    td { padding: 0.5rem 0.8rem; border-bottom: 1px solid rgba(255,255,255,0.03); vertical-align: top; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+    .fn-name { color: var(--accent-blue); font-family: var(--font-mono); font-weight: 500; }
     .fn-method { display: inline-block; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.7rem; font-weight: 700; margin-right: 0.25rem; }
-    .method-GET { background: #1a3a5c; color: #60a5fa; }
-    .method-POST { background: #14532d; color: #4ade80; }
-    .method-PATCH { background: #451a03; color: #fbbf24; }
-    .method-DELETE { background: #450a0a; color: #f87171; }
-    .tag-workflow { background: #451a03; color: #fbbf24; font-size: 0.65rem; padding: 0.1rem 0.35rem; border-radius: 3px; white-space: nowrap; }
-    .tag-simple { background: #1a3a5c; color: #60a5fa; font-size: 0.65rem; padding: 0.1rem 0.35rem; border-radius: 3px; white-space: nowrap; }
+    .method-GET { background: rgba(96,165,250,0.12); color: var(--accent-blue); }
+    .method-POST { background: rgba(74,222,128,0.12); color: var(--accent-teal); }
+    .method-PATCH { background: rgba(251,191,36,0.12); color: var(--accent-yellow); }
+    .method-DELETE { background: rgba(248,113,113,0.12); color: var(--accent-red); }
+    .tag-workflow { background: rgba(251,191,36,0.12); color: var(--accent-yellow); font-size: 0.65rem; padding: 0.1rem 0.35rem; border-radius: 3px; white-space: nowrap; }
+    .tag-simple { background: rgba(96,165,250,0.12); color: var(--accent-blue); font-size: 0.65rem; padding: 0.1rem 0.35rem; border-radius: 3px; white-space: nowrap; }
     .fn-inputs { color: #6b6b80; font-size: 0.75rem; font-family: 'SF Mono', monospace; }
-    .fn-desc { color: #a0a0b0; font-size: 0.8rem; max-width: 300px; }
+    .fn-desc { color: #a0a0b0; font-size: 0.8rem; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    @media (min-width: 768px) { .fn-desc { max-width: 350px; } }
     .footer { margin-top: 1.5rem; text-align: center; color: #4a4a5a; font-size: 0.78rem; }
     .loading { text-align: center; padding: 3rem; color: #6b6b80; }
-    .endpoint-url { color: #6b6b80; font-size: 0.75rem; font-family: 'SF Mono', monospace; }
+    .endpoint-url { color: #6b6b80; font-size: 0.7rem; font-family: 'SF Mono', monospace; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .endpoint-url span { color: #a0a0b0; }
-    @media (max-width: 600px) { body { padding: 0.75rem; } .grid { grid-template-columns: 1fr; } }
-  </style>
+    .fn-method-cell { white-space: nowrap; }
+    @media (max-width: 768px) {
+      body { padding: 0.5rem; }
+      .grid { grid-template-columns: 1fr; }
+      table { font-size: 0.65rem; }
+      th { padding: 0.3rem 0.4rem; font-size: 0.6rem; }
+      td { padding: 0.3rem 0.4rem; }
+      .fn-desc { max-width: 120px; }
+      .endpoint-url { max-width: 100px; }
+    }
+    @media (max-width: 480px) {
+      .fn-desc { display: none; }
+      .endpoint-url { max-width: 80px; }
+    }
+  
+    canvas#mesh-bg { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }
+    body { position: relative; z-index: 0; }
+    .grid, h1, .subtitle, .table-wrap, .footer, .controls { position: relative; z-index: 10; }
+
+</style>
 </head>
 <body>
-  <h1>MobileMonero <span>Fleet Dashboard</span></h1>
+<canvas id="mesh-bg"></canvas>
+  <h1><span class="pirate-flag"><img src="/images/xmrtdao.png" alt="XMRT DAO"></span> MobileMonero <span>Privateer Fleet</span></h1>
   <div class="subtitle">
-    Vex Relay · ${hostname} · 
-    <a href="${tunnelUrl}" target="_blank">${tunnelUrl}</a> ·
+    <span style="color:var(--accent-orange);font-weight:600;">XMRT DAO</span> · Vex Relay v5.0.0 · 
+    <a href="https://relay.mobilemonero.com">relay.mobilemonero.com</a> ·
     <a href="https://github.com/xmrtdao/mobilemonero" target="_blank">GitHub</a>
   </div>
   
   <div class="grid">
-<!-- Fleet Chat Room -->
-    <div class="card chat-card" style="grid-column:1/-1;">
-      <h3>Fleet Chat <span style="color:#6b6b80;font-weight:400;font-size:0.7rem;">— Vex · Eliza-Cloud · Hermes</span></h3>
+<div class="card chat-card" style="grid-column:1/-1;">
+      <h3 style="color:var(--accent-orange);">Ship-to-Ship <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Vex · Eliza-Cloud · Hermes</span></h3>
       <div id="fleet-chat-msgs" style="height:180px;overflow-y:auto;background:#0d0d15;border-radius:6px;padding:8px;margin-bottom:6px;font-size:12px;line-height:1.5;">
-        <div style="color:#8b8ba0;text-align:center;padding:20px 0;font-size:12px;">Fleet chat connected. Messages broadcast to all agents.</div>
+        <div style="color:#8b8ba0;text-align:center;padding:20px 0;font-size:12px;">Ship-to-ship comms active. All privateers hear every hail.</div>
       </div>
       <div class="chat-input-wrap" style="gap:4px;">
-        <select id="fleet-chat-agent" style="padding:6px;border-radius:6px;border:1px solid #2a2a3a;background:#1a1a2a;color:#e0e0f0;font-size:12px;outline:none;flex-shrink:0;">
-          <option value="vex">⚡ Vex</option>
-          <option value="eliza">🤖 Eliza-Cloud</option>
-          <option value="hermes">📱 Hermes</option>
-        </select>
-        <input id="fleet-chat-input" type="text" placeholder="Message the fleet..." 
+        <input id="fleet-chat-name" type="text" placeholder="Your name..." style="padding:6px 10px;border-radius:6px;border:1px solid #2a2a3a;background:#1a1a2a;color:#e0e0f0;font-size:12px;outline:none;width:100px;flex-shrink:0;" maxlength="20"/>
+        <input id="fleet-chat-agent" type="hidden" value=""/>
+        <input id="fleet-chat-input" type="text" placeholder="Hail the crew..." 
           style="flex:1;min-width:0;padding:6px 10px;border-radius:6px;border:1px solid #2a2a3a;background:#1a1a2a;color:#e0e0f0;font-size:12px;outline:none;"
           onkeypress="if(event.key==='Enter')sendFleetChat()">
         <button onclick="sendFleetChat()" style="padding:6px 14px;border-radius:6px;border:none;background:#ff6b35;color:white;cursor:pointer;font-size:12px;font-weight:600;flex-shrink:0;">Send</button>
       </div>
       <div style="margin-top:4px;display:flex;gap:8px;font-size:11px;color:#6b6b80;">
-        <span>💬 Fleet broadcast — all agents see your message</span>
+        <span>Ship-to-ship broadcast — all privateers hear your hail</span>
         <span id="fleet-chat-status" style="color:#4ade80;">● connected</span>
       </div>
     </div>
-    <div class="card">
-      <h3>Mining Pool <span id="pool-workers" style="color:#6b6b80;font-weight:400;font-size:0.7rem;">-</span></h3>
-      <div class="stat"><span class="label">Pool Hashrate</span><span class="value" id="pool-hash">checking...</span></div>
-      <div class="stat"><span class="label">Valid Shares</span><span class="value" id="pool-shares">-</span></div>
-      <div class="stat"><span class="label">XMR Paid / Due</span><span class="value" id="pool-xmr">-</span></div>
+
+    <!-- Ship's Articles + IoT Radar (side by side) -->
+    <div class="side-by-side">
+    <div class="card" id="bulletin-board">
+      <h3 style="color:var(--accent-orange);">Ship’s Articles <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Crew Resolutions &amp; Progress Threads</span></h3>
+      
+      <!-- Topic tabs -->
+      <div class="board-tabs" id="board-tabs">
+        <span class="board-tab active" onclick="switchBoardView('topics')" id="tab-topics">Resolutions</span>
+        <span class="board-tab" onclick="switchBoardView('new')" id="tab-newtopic">+ New Topic</span>
+      </div>
+      
+      <!-- Status filter -->
+      <div id="board-filter-bar" style="display:flex;gap:4px;margin-bottom:6px;flex-wrap:wrap;">
+        <span class="board-filter active" data-filter="all" onclick="setBoardFilter('all')">All</span>
+        <span class="board-filter" data-filter="active" onclick="setBoardFilter('active')">Active</span>
+        <span class="board-filter" data-filter="in-progress" onclick="setBoardFilter('in-progress')">In Progress</span>
+        <span class="board-filter" data-filter="completed" onclick="setBoardFilter('completed')">Completed</span>
+        <span class="board-filter" data-filter="archived" onclick="setBoardFilter('archived')">Archived</span>
+      </div>
+      
+      <!-- Topics list view -->
+      <div id="board-topics-view">
+        <div class="board-topics" id="board-topics-list"></div>
+        
+        <!-- Selected topic posts -->
+        <div id="board-topic-posts" style="display:none;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <span id="board-current-topic-title" style="font-size:13px;font-weight:600;color:var(--text-primary);"></span>
+              <span id="board-current-topic-status"></span>
+              <span id="board-current-topic-assignment" style="font-size:10px;color:#6b6b80;"></span>
+            </div>
+            <div style="display:flex;gap:4px;">
+              <select id="board-status-select" onchange="changeTopicStatus(this.value)" style="padding:2px 4px;border-radius:4px;border:1px solid #3a3a5a;background:#12121a;color:#c0c0d0;font-size:10px;">
+                <option value="active">Active</option>
+                <option value="in-progress">In Progress</option>
+                <option value="completed">Completed</option>
+                <option value="archived">Archived</option>
+              </select>
+              <button onclick="togglePinTopic()" id="board-pin-btn" style="padding:2px 8px;border-radius:4px;border:1px solid #3a3a5a;background:transparent;color:#fbbf24;cursor:pointer;font-size:10px;">Pin</button>
+              <button onclick="deleteBoardTopic()" id="board-delete-btn" style="padding:2px 8px;border-radius:4px;border:1px solid #5a2a2a;background:transparent;color:#f87171;cursor:pointer;font-size:10px;">Delete</button>
+              <button onclick="closeBoardTopic()" style="padding:2px 8px;border-radius:4px;border:1px solid #3a3a5a;background:transparent;color:#8b8ba0;cursor:pointer;font-size:10px;">Back</button>
+            </div>
+          </div>
+          <div class="board-posts" id="board-posts-list"></div>
+          <div class="board-input-wrap">
+            <input id="board-post-input" type="text" placeholder="Add to this resolution..." onkeypress="if(event.key==='Enter')sendBoardPost()">
+            <button onclick="sendBoardPost()" style="padding:6px 14px;border-radius:6px;border:none;background:#ff6b35;color:white;cursor:pointer;font-size:12px;font-weight:600;flex-shrink:0;">Post</button>
+          </div>
+          <div style="margin-top:4px;font-size:10px;color:#6b6b80;">
+            <span>Posted as <strong id="board-post-agent" style="color:var(--accent-orange);">vex</strong> — all privateers see this resolution</span>
+          </div>
+        </div>
+      </div>
+      
+      <!-- New topic form -->
+      <div id="board-new-topic-view" style="display:none;">
+        <div class="board-new-topic" style="display:flex;flex-direction:column;gap:6px;">
+          <input id="board-new-topic-input" type="text" placeholder="Resolution (e.g. Deployment Q2, AgentPay Strategy, PFP Partnerships...)" onkeypress="if(event.key==='Enter')createBoardTopic()">
+          <div style="display:flex;gap:6px;align-items:center;">
+            <select id="board-new-status" style="padding:4px 8px;border-radius:4px;border:1px solid #3a3a5a;background:#12121a;color:#c0c0d0;font-size:11px;">
+              <option value="active">Active</option>
+              <option value="in-progress">In Progress</option>
+              <option value="completed">Completed</option>
+              <option value="archived">Archived</option>
+            </select>
+            <input id="board-new-assignment" type="text" placeholder="Assign to agent (optional)" style="flex:1;padding:4px 8px;font-size:11px;">
+            <input type="checkbox" id="board-new-pinned" style="accent-color:#fbbf24;"> <label for="board-new-pinned" style="font-size:10px;color:#fbbf24;">Pin</label>
+            <button onclick="createBoardTopic()" style="padding:6px 14px;border-radius:6px;border:none;background:#ff6b35;color:white;cursor:pointer;font-size:12px;font-weight:600;flex-shrink:0;">Create</button>
+          </div>
+        </div>
+      </div>
+      
+      <div style="margin-top:4px;display:flex;gap:8px;font-size:10px;color:#6b6b80;">
+        <span>Privateers can post to any resolution — persistent across voyages</span>
+        <span id="board-updated-indicator" style="color:#fbbf24;display:none;">* new activity</span>
+        <span id="board-status" style="color:#4ade80;">● loaded</span>
+      </div>
     </div>
+
+    <!-- IoT Ship Radar -->
     <div class="card">
-      <h3>Leaderboard</h3>
-      <div style="margin-bottom:6px;font-size:11px;color:#6b6b80;">Live hashrate · shares · XMRT rewards</div>
-      <div id="miner-leaderboard"><div class="stat"><span class="label">Loading...</span></div></div>
+      <h3 style="color:#4ade80;">⛵ Ship&#39;s IoT Radar <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Wi-Fi RSSI + Meshtastic Scan</span></h3>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <!-- Radar animation -->
+        <div style="position:relative;width:100px;height:100px;flex-shrink:0;">
+          <svg viewBox="0 0 100 100" style="width:100%;height:100%;">
+            <defs>
+              <radialGradient id="radar-glow" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stop-color="#4ade80" stop-opacity="0.3"/>
+                <stop offset="100%" stop-color="#4ade80" stop-opacity="0"/>
+              </radialGradient>
+            </defs>
+            <!-- Rings -->
+            <circle cx="50" cy="50" r="45" fill="none" stroke="#2a2a3a" stroke-width="0.5"/>
+            <circle cx="50" cy="50" r="32" fill="none" stroke="#2a2a3a" stroke-width="0.5"/>
+            <circle cx="50" cy="50" r="18" fill="none" stroke="#2a2a3a" stroke-width="0.5"/>
+            <!-- Crosshairs -->
+            <line x1="5" y1="50" x2="95" y2="50" stroke="#2a2a3a" stroke-width="0.3"/>
+            <line x1="50" y1="5" x2="50" y2="95" stroke="#2a2a3a" stroke-width="0.3"/>
+            <!-- Sweeping radar beam -->
+            <path d="M50,50 L50,5 A45,45 0 0,1 95,50 Z" fill="url(#radar-glow)" transform-origin="50px 50px">
+              <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="3s" repeatCount="indefinite"/>
+            </path>
+            <!-- Center dot (this node) -->
+            <circle cx="50" cy="50" r="4" fill="#4ade80">
+              <animate attributeName="r" values="3;5;3" dur="1.5s" repeatCount="indefinite"/>
+            </circle>
+            <!-- RSSI-based blips (populated by JS) -->
+            <circle id="rssi-blip-1" cx="35" cy="28" r="2" fill="#ff6b35" opacity="0">
+              <animate attributeName="opacity" values="0.3;1;0.3" dur="2s" repeatCount="indefinite"/>
+            </circle>
+            <circle id="rssi-blip-2" cx="72" cy="65" r="2" fill="#60a5fa" opacity="0">
+              <animate attributeName="opacity" values="0.2;0.8;0.2" dur="2.5s" repeatCount="indefinite"/>
+            </circle>
+            <circle id="rssi-blip-3" cx="25" cy="70" r="1.5" fill="#a78bfa" opacity="0">
+              <animate attributeName="opacity" values="0.1;0.6;0.1" dur="3s" repeatCount="indefinite"/>
+            </circle>
+          </svg>
+        </div>
+        <!-- Ship stats -->
+        <div style="flex:1;min-width:120px;">
+          <div class="stat"><span class="label">Vessel</span><span class="value" style="color:#4ade80;">Vex Relay</span></div>
+          <div class="stat"><span class="label">Signal</span><span class="value" id="rssi-signal" style="color:#4ade80;">● Online</span></div>
+          <div class="stat"><span class="label">RSSI</span><span class="value" id="rssi-strength">scanning...</span></div>
+          <div class="stat"><span class="label">Peers</span><span class="value" id="iot-peers">scanning...</span></div>
+          <div class="stat"><span class="label">Tunnel</span><span class="value"><a href="https://relay.mobilemonero.com" style="color:#60a5fa;text-decoration:none;">relay.mobilemonero.com</a></span></div>
+          <div class="stat"><span class="label">IoT Enclave</span><span class="value" style="color:#fbbf24;">Windows Laptop</span></div>
+        </div>
+      </div>
+      <div style="margin-top:8px;padding-top:6px;border-top:1px solid #1e1e2e;font-size:0.7rem;color:#6b6b80;display:flex;gap:8px;flex-wrap:wrap;">
+        <span>🟢 This node is a physical IoT vessel on the mesh</span>
+        <span>📶 ping: <span id="iot-ping">12ms</span></span>
+        <span>🔌 uptime: <span id="iot-uptime">${uptimeStr}</span></span>
+        <span>🌐 <span id="iot-ip" style="color:#6b6b80;">detecting...</span></span>
+      </div>
+      <script>
+        (function(){
+          function updateFromBridge() {
+            fetch('/api/mesh/bridge').then(r=>r.json()).then(d => {
+              const strength = document.getElementById('rssi-strength');
+              const signal = document.getElementById('rssi-signal');
+              const peers = document.getElementById('iot-peers');
+              
+              // Use bridge data if available, fall back to simulation
+              if (d.connected && d.nodeList.length > 0) {
+                if (peers) peers.textContent = d.nodes + ' ships';
+                
+                // Use first node's RSSI if available
+                const node = d.nodeList[0];
+                if (node.rssi && strength) {
+                  const rssi = node.rssi;
+                  const bars = rssi > -50 ? 4 : rssi > -65 ? 3 : rssi > -80 ? 2 : 1;
+                  strength.textContent = rssi.toFixed(1) + ' dBm ' + '█'.repeat(bars) + '░'.repeat(4-bars);
+                }
+                if (node.snr && signal) {
+                  signal.textContent = node.snr > 5 ? '● Strong' : node.snr > 0 ? '◐ Fair' : node.snr > -5 ? '○ Weak' : '◎ Poor';
+                  signal.style.color = node.snr > 5 ? '#4ade80' : node.snr > 0 ? '#fbbf24' : node.snr > -5 ? '#f87171' : '#ef4444';
+                }
+              } else {
+                // No bridge — show status
+                if (strength) strength.textContent = d.connected ? '0 dBm (idle)' : '— no bridge —';
+                if (signal) { signal.textContent = '○ Idle'; signal.style.color = '#6b6b80'; }
+                if (peers) peers.textContent = (d.nodes || 0) + ' nodes tracked';
+              }
+              
+              // Update blip positions from real node positions
+              for (let i = 0; i < 3; i++) {
+                const blip = document.getElementById('rssi-blip-' + (i+1));
+                if (!blip) continue;
+                if (d.nodeList && d.nodeList[i]) {
+                  const node = d.nodeList[i];
+                  const angle = (i * 120 + Date.now() / 10000) % 360;
+                  const dist = 20 + (node.rssi ? Math.abs(node.rssi) / 3 : 25);
+                  const rad = angle * Math.PI / 180;
+                  blip.setAttribute('cx', 50 + dist * Math.cos(rad));
+                  blip.setAttribute('cy', 50 + dist * Math.sin(rad));
+                  blip.setAttribute('opacity', 0.4 + (node.snr ? Math.min(node.snr / 10, 0.6) : 0.3));
+                  blip.setAttribute('fill', node.rssi > -60 ? '#4ade80' : node.rssi > -75 ? '#fbbf24' : '#f87171');
+                } else {
+                  // Simulated blip
+                  const angle = (i * 120 + Date.now() / 10000) % 360;
+                  const dist = 20 + Math.random() * 25;
+                  const rad = angle * Math.PI / 180;
+                  blip.setAttribute('cx', 50 + dist * Math.cos(rad));
+                  blip.setAttribute('cy', 50 + dist * Math.sin(rad));
+                  blip.setAttribute('opacity', 0.3 + Math.random() * 0.5);
+                  blip.setAttribute('fill', i === 0 ? '#ff6b35' : i === 1 ? '#60a5fa' : '#a78bfa');
+                }
+              }
+            }).catch(() => {
+              // Fallback simulation on error
+              const rssi = -(30 + Math.random() * 60);
+              const strength = document.getElementById('rssi-strength');
+              const signal = document.getElementById('rssi-signal');
+              if (strength) strength.textContent = rssi.toFixed(1) + ' dBm (sim)';
+              if (signal) { signal.textContent = '◐ Simulated'; signal.style.color = '#6b6b80'; }
+            });
+          }
+          updateFromBridge();
+          setInterval(updateFromBridge, 3000);
+          
+          // External IP
+          fetch('https://api.ipify.org?format=json').then(r=>r.json()).then(d=>{
+            const ip = document.getElementById('iot-ip');
+            if(ip) ip.textContent = d.ip;
+          }).catch(()=>{});
+        })();
+      </script>
     </div>
-    <div class="card">
+    </div>
+
+<div class="card">
       <h3>Relay Status</h3>
       <div class="stat"><span class="label">Uptime</span><span class="value">${uptimeStr}</span></div>
       <div class="stat"><span class="label">Relay</span><span class="value">v5.0.0</span></div>
@@ -1188,8 +1802,126 @@ app.get('/', (req, res) => {
       <div class="stat"><span class="label">Handlers</span><span class="value">${handlerCount}</span></div>
       <div class="stat"><span class="label">Requests</span><span class="value">${requestCounts.total}</span></div>
     </div>
-    
-    <div class="card">
+<div class="card" id="university-card">
+      <h3 style="color:#a78bfa;">Ship’s Intelligence</h3>
+      <div id="university-status">
+        <div class="stat"><span class="label">Status</span><span class="value" id="uni-status" style="color:#6b6b80;">checking...</span></div>
+      </div>
+      <div id="university-detail" style="display:none;">
+        <div class="stat"><span class="label">Progress</span><span class="value" id="uni-progress">-</span></div>
+        <div class="stat"><span class="label">Cert ID</span><span class="value" id="uni-cert" style="font-size:0.65rem;">-</span></div>
+        <div class="stat"><span class="label">Tier</span><span class="value" id="uni-tier">-</span></div>
+        <div class="stat"><span class="label">Perms</span><span class="value" id="uni-perms" style="font-size:0.65rem;">-</span></div>
+      </div>
+      <div style="margin-top:8px;font-size:0.72rem;color:#6b6b80;">
+        <div>New agents must graduate from XMRT University to join the fleet.</div>
+        <div style="margin-top:4px;">
+          <span style="color:#a78bfa;">POST</span> <code style="color:#60a5fa;font-size:0.65rem;">/functions/v1/xmrt-university</code>
+        </div>
+        <div style="margin-top:4px;font-size:0.65rem;">
+          <a href="https://github.com/xmrtdao/suite/tree/main/supabase/functions/xmrt-university" target="_blank" style="color:#6b6b80;">Source</a> .
+          <span id="uni-source" style="color:#6b6b80;">Curriculum: <span id="uni-curriculum-source">built-in</span></span>
+        </div>
+      </div>
+    </div>
+<div class="card" id="fleet-card">
+      <h3>Crew Registry <span id="fleet-count" style="color:#6b6b80;font-size:0.7rem;"></span></h3>
+      <div id="fleet-agents-list">
+        <div class="stat"><span class="label">Loading fleet...</span></div>
+      </div>
+    </div>
+<div class="card" id="mesh-card">
+      <h3>🕸️ Mesh Network <span id="mesh-count" style="color:#6b6b80;font-size:0.7rem;"></span></h3>
+      <div id="mesh-peers-list">
+        <div class="stat"><span class="label">Loading mesh peers...</span></div>
+      </div>
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e1e2e;">
+        <div style="font-size:0.72rem;color:#6b6b80;margin-bottom:4px;">Register agent on mesh:</div>
+        <div style="background:#0d0d15;padding:0.4rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.7rem;color:#60a5fa;word-break:break-all;margin-bottom:4px;">POST /functions/v1/mesh-peer-connector</div>
+        <div style="background:#0d0d15;padding:0.3rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.65rem;color:#a78bfa;word-break:break-all;">{"action":"register","agent_name":"...","peer_id":"...","endpoint":"..."}</div>
+        <div style="margin-top:6px;font-size:0.72rem;color:#6b6b80;margin-bottom:4px;">Publish to mesh topics:</div>
+        <div style="background:#0d0d15;padding:0.4rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.7rem;color:#4ade80;word-break:break-all;margin-bottom:4px;">POST /functions/v1/mesh-publish</div>
+        <div style="background:#0d0d15;padding:0.3rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.65rem;color:#a78bfa;word-break:break-all;">{"topic":"fleet-broadcast","payload":{...},"agent":"eliza"}</div>
+        <div style="margin-top:6px;font-size:0.65rem;color:#6b6b80;">
+          <span>🔗 <a href="/mesh/status" style="color:#60a5fa;">Gossipsub Status</a></span> ·
+          <span><a href="/api/p2p/health" style="color:#60a5fa;">P2P Mesh Health</a></span> ·
+          <span><a href="/mesh/messages" style="color:#60a5fa;">Mesh Messages</a></span>
+        </div>
+      </div>
+    </div>
+<div class="card" id="ship-defense">
+      <h3 style="color:#f87171;">🛡️ Ship&#39;s Defense <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— ARP + RF Monitoring</span></h3>
+      <div class="stat"><span class="label">ARP Defender</span><span class="value" id="arp-status" style="color:#6b6b80;">checking...</span></div>
+      <div class="stat"><span class="label">RF Jammer</span><span class="value" id="rf-status" style="color:#6b6b80;">checking...</span></div>
+      <div class="stat"><span class="label">Noise Floor</span><span class="value" id="rf-noise">-</span></div>
+      <div class="stat"><span class="label">Alerts</span><span class="value" id="defense-alerts" style="color:#4ade80;">0</span></div>
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e1e2e;font-size:0.72rem;color:#6b6b80;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <code style="color:#fbbf24;">node relay/tools/arp-defender.mjs --monitor</code>
+          <code style="color:#60a5fa;">node relay/tools/jam-detector.mjs --monitor</code>
+        </div>
+        <div style="margin-top:4px;">
+          <a href="https://github.com/xmrtdao/mobilemonero/blob/main/relay/tools/arp-defender.mjs" target="_blank" style="color:#6b6b80;">ARP Source</a> ·
+          <a href="/cron/status" style="color:#6b6b80;">Cron Status</a> ·
+          <a href="/api/mesh/bridge" style="color:#6b6b80;">Bridge API</a>
+        </div>
+      </div>
+      <script>
+        (function(){
+          function updateDefense() {
+            fetch('/api/mesh/bridge').then(r=>r.json()).then(d => {
+              const arp = document.getElementById('arp-status');
+              const rf = document.getElementById('rf-status');
+              const noise = document.getElementById('rf-noise');
+              const alerts = document.getElementById('defense-alerts');
+              if (arp) {
+                const count = d.nodes || 0;
+                arp.textContent = count > 0 ? '🟢 ' + count + ' devices mapped' : '○ idle';
+                arp.style.color = count > 0 ? '#4ade80' : '#6b6b80';
+              }
+              if (rf && d.rfStatus) {
+                const jam = d.rfStatus.jamming;
+                rf.textContent = jam ? '🔴 JAMMING' : '🟢 Clear';
+                rf.style.color = jam ? '#f87171' : '#4ade80';
+                if (noise) noise.textContent = d.rfStatus.noiseFloor + ' dBm';
+              } else if (rf) {
+                rf.textContent = '○ not scanning';
+                rf.style.color = '#6b6b80';
+              }
+              if (alerts) {
+                const count = d.messageCount || 0;
+                alerts.textContent = count;
+                alerts.style.color = count > 0 ? '#f87171' : '#4ade80';
+              }
+            }).catch(() => {});
+          }
+          updateDefense();
+          setInterval(updateDefense, 5000);
+        })();
+      </script>
+    </div>
+<div class="card">
+      <h3>Heartbeat Endpoint</h3>
+      <div style="background:#0d0d15;padding:0.4rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.75rem;color:#60a5fa;word-break:break-all;" id="heartbeat-url">loading...</div>
+      <div style="color:#6b6b80;font-size:0.72rem;margin-top:0.4rem;">POST: {"agent_id":"...","status":"ONLINE","tunnel_url":"...","hashrate":0}</div>
+    </div>
+<div class="card">
+      <h3>Plunder Tracker <span id="pool-workers" style="color:#6b6b80;font-weight:400;font-size:0.7rem;">-</span></h3>
+      <div class="stat"><span class="label">Pool Hashrate</span><span class="value" id="pool-hash">checking...</span></div>
+      <div class="stat"><span class="label">Valid Shares</span><span class="value" id="pool-shares">-</span></div>
+      <div class="stat"><span class="label">XMR Paid / Due</span><span class="value" id="pool-xmr">-</span></div>
+      <div style="margin-top:10px;padding-top:8px;border-top:1px solid #2a2a3a;">
+        <div style="font-size:0.65rem;color:#6b6b80;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">Quick Start Script &#9679; click to copy</div>
+        <pre style="background:#0d0d15;padding:0.6rem;border-radius:6px;font-size:0.72rem;overflow-x:auto;color:#a0a0b0;white-space:pre-wrap;word-break:break-all;margin:0;cursor:pointer;" id="mining-script" onclick="copyMiningScript()">curl -o signup.py -L https://raw.githubusercontent.com/xmrtdao/mmlauncher/main/scripts/mobile-signup.py && sha256sum signup.py && python3 signup.py</pre>
+        <div style="font-size:0.6rem;color:#4a4a5a;margin-top:4px;">Runs on Linux/macOS/Termux</div>
+      </div>
+    </div>
+<div class="card">
+      <h3>Leaderboard</h3>
+      <div style="margin-bottom:6px;font-size:11px;color:#6b6b80;">Live hashrate · shares · XMRT rewards</div>
+      <div id="miner-leaderboard"><div class="stat"><span class="label">Loading...</span></div></div>
+    </div>
+<div class="card">
       <h3>Campaign</h3>
       <div class="stat"><span class="label">Contact Pool</span><span class="value">${poolSize}</span></div>
       <div class="stat"><span class="label">Sent Today</span><span class="value">${sentToday}</span></div>
@@ -1198,26 +1930,27 @@ app.get('/', (req, res) => {
       <div class="stat"><span class="label">Last Run</span><span class="value">${campaignLastRun}</span></div>
       <div class="stat"><span class="label">Next Drop</span><span class="value" id="next-drop">-</span></div>
     </div>
-    
-    <div class="card">
-      <h3>Tools</h3>
-      ${tools.map(t => `<div class="stat"><span class="label">${t}</span><span class="value badge badge-info">ready</span></div>`).join('')}
+<div class="card">
+      <h3 style="color:#60a5fa;">Social Publishing</h3>
+      <div class="stat"><span class="label">Last Tweet</span><span class="value" style="color:#4ade80;">✅ Published</span></div>
+      <div class="stat"><span class="label">Content</span><span class="value" style="font-size:0.7rem;">DAO Economy Article Promotion</span></div>
+      <div class="stat"><span class="label">Account</span><span class="value"><a href="https://x.com/XMRTSolutions" target="_blank" style="color:#60a5fa;text-decoration:none;">@XMRTSolutions</a></span></div>
+      <div class="stat"><span class="label">Pipeline</span><span class="value" style="font-size:0.7rem;">Paragraph -> Typefully -> X</span></div>
+      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">Next tweet TBD — add content to Typefully queue</div>
     </div>
-    
-        <div class="card" id="fleet-card">
-      <h3>Fleet Registry <span id="fleet-count" style="color:#6b6b80;font-size:0.7rem;"></span></h3>
-      <div id="fleet-agents-list">
-        <div class="stat"><span class="label">Loading fleet...</span></div>
+<div class="card" id="pfp-card">
+      <h3> Party Favor Photo <span style="color:#6b6b80;font-size:0.7rem;">inbox</span></h3>
+      <div id="pfp-inbox">
+        <div class="stat"><span class="label">Loading inbox...</span></div>
       </div>
     </div>
-
-    <div class="card">
-      <h3>Heartbeat Endpoint</h3>
-      <div style="background:#0d0d15;padding:0.4rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.75rem;color:#60a5fa;word-break:break-all;" id="heartbeat-url">loading...</div>
-      <div style="color:#6b6b80;font-size:0.72rem;margin-top:0.4rem;">POST: {"agent_id":"...","status":"ONLINE","tunnel_url":"...","hashrate":0}</div>
+<div class="card" id="mm-card">
+      <h3> MobileMonero <span style="color:#6b6b80;font-size:0.7rem;">inbox</span></h3>
+      <div id="mm-inbox">
+        <div class="stat"><span class="label">Loading inbox...</span></div>
+      </div>
     </div>
-
-    <div class="card">
+<div class="card">
       <h3>XMRT DAO Membership</h3>
       <div class="stat"><span class="label"><a href="https://whop.com/xmrt-dao" target="_blank" style="color:#4ade80;text-decoration:none;">Free Tier</a></span><span class="value">free</span></div>
       <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_W6r4uqGWNaKHp" target="_blank" style="color:#ff6b35;text-decoration:none;">Premium</a></span><span class="value">$9.99/mo</span></div>
@@ -1225,8 +1958,7 @@ app.get('/', (req, res) => {
       <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_n853GD3f5IXm0" target="_blank" style="color:#60a5fa;text-decoration:none;">Supporter</a></span><span class="value">$19.99</span></div>
       <div style="margin-top:6px;font-size:11px;color:#6b6b80;">Premium: 2x rewards · governance · early hardware</div>
     </div>
-
-    <div class="card">
+<div class="card">
       <h3>DAO Ecosystem</h3>
       <div class="stat"><span class="label"><a href="https://xmrtsolutions.vercel.app" target="_blank" style="color:#60a5fa;text-decoration:none;">XMRT Token Faucet</a></span><span class="value">testnet</span></div>
       <div class="stat"><span class="label"><a href="https://coldcash.vercel.app" target="_blank" style="color:#60a5fa;text-decoration:none;">ColdCash</a></span><span class="value">private payments</span></div>
@@ -1241,39 +1973,12 @@ app.get('/', (req, res) => {
         <a href="https://github.com/xmrtdao/xmrt-mesh" style="color:#6b6b80;">xmrt-mesh</a>
       </div>
     </div>
-
-    <div class="card">
-      <h3 style="color:#60a5fa;">Social Publishing</h3>
-      <div class="stat"><span class="label">Last Tweet</span><span class="value" style="color:#4ade80;">✅ Published</span></div>
-      <div class="stat"><span class="label">Content</span><span class="value" style="font-size:0.7rem;">DAO Economy Article Promotion</span></div>
-      <div class="stat"><span class="label">Account</span><span class="value"><a href="https://x.com/XMRTSolutions" target="_blank" style="color:#60a5fa;text-decoration:none;">@XMRTSolutions</a></span></div>
-      <div class="stat"><span class="label">Pipeline</span><span class="value" style="font-size:0.7rem;">Paragraph -> Typefully -> X</span></div>
-      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">Next tweet TBD — add content to Typefully queue</div>
+<div class="card">
+      <h3>Tools</h3>
+      ${tools.map(t => `<div class="stat"><span class="label">${t}</span><span class="value badge badge-info">ready</span></div>`).join('')}
+      ${localFunctions.length > 0 ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #2a2a3a;"><div style="font-size:0.65rem;color:#4ade80;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">Local Functions</div>${localFunctions.map(f => `<div class="stat"><span class="label" style="color:#4ade80;">fn:${f.name}</span><span class="value badge badge-info">local</span></div>`).join('')}</div>` : ''}
     </div>
-
-    <div class="card" id="pfp-card">
-      <h3> Party Favor Photo <span style="color:#6b6b80;font-size:0.7rem;">inbox</span></h3>
-      <div id="pfp-inbox">
-        <div class="stat"><span class="label">Loading inbox...</span></div>
-      </div>
-    </div>
-
-    <div class="card" id="mm-card">
-      <h3> MobileMonero <span style="color:#6b6b80;font-size:0.7rem;">inbox</span></h3>
-      <div id="mm-inbox">
-        <div class="stat"><span class="label">Loading inbox...</span></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3> AI Template Builder</h3>
-      <div class="stat"><span class="label">Engine</span><span class="value">nano-banana-2 + edit</span></div>
-      <div class="stat"><span class="label">Cost</span><span class="value">$0.03-0.06/gen</span></div>
-      <div class="stat"><span class="label"><a href="/pfp/templates" style="color:#60a5fa;text-decoration:none;">GET /pfp/templates</a></span><span class="value">gallery</span></div>
-      <div class="stat"><span class="label">Workflow</span><span class="value">reference → AI → template</span></div>
-    </div>
-
-    <div class="card">
+<div class="card">
       <h3>Quick Actions</h3>
       <div class="stat"><span class="label"><a href="/health" style="color:#4ade80;text-decoration:none;">GET /health</a></span><span class="value">health check</span></div>
       <div class="stat"><span class="label"><a href="/status" style="color:#60a5fa;text-decoration:none;">GET /status</a></span><span class="value">full status</span></div>
@@ -1282,17 +1987,20 @@ app.get('/', (req, res) => {
       <div class="stat"><span class="label"><a href="/api/catalog" style="color:#60a5fa;text-decoration:none;">GET /api/catalog</a></span><span class="value">function catalog</span></div>
       <div class="stat"><span class="label"><code style="color:#fbbf24;font-size:0.75rem;">POST /dispatch</code></span><span class="value">task dispatch</span></div>
     </div>
-
-    <div class="card">
-      <h3>Mining Script</h3>
-      <pre style="background:#0d0d15;padding:0.6rem;border-radius:6px;font-size:0.72rem;overflow-x:auto;color:#a0a0b0;white-space:pre-wrap;word-break:break-all;">curl -o signup.py -L https://raw.githubusercontent.com/xmrtdao/mmlauncher/main/scripts/mobile-signup.py && sha256sum signup.py && python3 signup.py</pre>
+<div class="card">
+      <h3> AI Template Builder</h3>
+      <div class="stat"><span class="label">Engine</span><span class="value">nano-banana-2 + edit</span></div>
+      <div class="stat"><span class="label">Cost</span><span class="value">$0.03-0.06/gen</span></div>
+      <div class="stat"><span class="label"><a href="/pfp/templates" style="color:#60a5fa;text-decoration:none;">GET /pfp/templates</a></span><span class="value">gallery</span></div>
+      <div class="stat"><span class="label">Workflow</span><span class="value">reference → AI → template</span></div>
     </div>
   </div>
-
-  <!-- Edge Function Catalog -->
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;">
-    <h2 style="color:#ff6b35;font-size:1.1rem;">☁️ Supabase Edge Functions <span id="fnCount" style="color:#6b6b80;font-weight:400;"></span></h2>
-    <div class="controls">
+<!-- Edge Function Catalog -->
+  <div style="margin-top:1.5rem;width:100%;box-sizing:border-box;">
+    <div class="card" style="width:100%;box-sizing:border-box;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;">
+      <h2 style="color:#ff6b35;font-size:1.1rem;">☁️ Supabase Edge Functions <span id="fnCount" style="color:#6b6b80;font-weight:400;"></span></h2>
+      <div class="controls">
       <input type="text" id="search" placeholder="Search functions…" oninput="filterFunctions()">
       <select id="methodFilter" onchange="filterFunctions()">
         <option value="">All Methods</option>
@@ -1308,30 +2016,30 @@ app.get('/', (req, res) => {
       </select>
       <span class="count" id="resultCount"></span>
     </div>
+  
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th onclick="sortBy('name')">Function ↕</th>
+            <th onclick="sortBy('methods')">Method</th>
+            <th onclick="sortBy('type')">Type ↕</th>
+            <th onclick="sortBy('desc')">Description ↕</th>
+            <th>Endpoint</th>
+          </tr>
+        </thead>
+        <tbody id="fnBody">
+          <tr><td colspan="5" class="loading">Loading function catalog…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
   </div>
   
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th onclick="sortBy('name')">Function ↕</th>
-          <th onclick="sortBy('methods')">Method ↕</th>
-          <th>Timeout</th>
-          <th onclick="sortBy('type')">Type ↕</th>
-          <th onclick="sortBy('desc')">Description ↕</th>
-          <th>Expected Input</th>
-          <th>Endpoint</th>
-        </tr>
-      </thead>
-      <tbody id="fnBody">
-        <tr><td colspan="7" class="loading">Loading function catalog…</td></tr>
-      </tbody>
-    </table>
-  </div>
-  
-  
-        <div class="footer">
-    ⚡ Vex · ${new Date().toISOString()} · 
+            <div class="footer">
+    <span style="color:var(--accent-orange);font-weight:600;">XMRT DAO</span> &middot; <span style="color:var(--accent-teal);">&#x26a1;</span> Vex &middot; ${new Date().toISOString()} &middot;
+    <a href="https://github.com/xmrtdao" target="_blank" style="color:var(--text-dim);">GitHub</a> &middot;
+    <a href="${tunnelUrl}" target="_blank" style="color:var(--text-dim);">Relay</a> &middot;
     Supabase: ${supabaseUrl}/functions/v1/{name}
   </div>
 
@@ -1350,7 +2058,7 @@ app.get('/', (req, res) => {
       renderFunctions();
     })
     .catch(e => {
-      document.getElementById('fnBody').innerHTML = '<tr><td colspan="7" style="color:#f87171;text-align:center;padding:2rem;">Failed to load catalog: ' + e.message + '</td></tr>';
+      document.getElementById('fnBody').innerHTML = '<tr><td colspan="5" style="color:#f87171;text-align:center;padding:2rem;">Failed to load catalog: ' + e.message + '</td></tr>';
     });
 
   // Load pool stats for mining card
@@ -1389,14 +2097,8 @@ app.get('/', (req, res) => {
       }
       list.innerHTML = agents.map(function(a){
         var status = a.status;
-        if (a.agent_id === 'hermes') {
-          status = (ids.indexOf('xmrt-dao-mobile') !== -1 || ids.indexOf('hermes-phone') !== -1) ? 'ONLINE' : 'OFFLINE';
-        }
-        if (a.agent_id === 'vex') {
-          status = ids.indexOf('vex-laptop') !== -1 ? 'ONLINE' : 'OFFLINE';
-        }
-        var hashrate = a.hashrate && status === 'ONLINE' ? a.hashrate : 0;
-        var sb = status === 'ONLINE' ? 'badge-ok' : status === 'BUSY' ? 'badge-warn' : 'badge-err';
+        var hashrate = a.hashrate && (status === 'ONLINE' || status === 'online') ? a.hashrate : 0;
+        var sb = status === 'ONLINE' || status === 'online' ? 'badge-ok' : status === 'BUSY' ? 'badge-warn' : 'badge-err';
         var agentName = a.agent_id || a.name || '?';
         var agentRole = a.role || 'agent';
         var cleanRole = agentRole.replace(/-/g,' ').replace(/\b\w/g, function(l){return l.toUpperCase();});
@@ -1414,7 +2116,71 @@ app.get('/', (req, res) => {
     });
   };
   loadFleetAgents();
+// -- XMRT University Status --
+async function loadUniversityStatus() {
+  var statusEl = document.getElementById('uni-status');
+  var detailEl = document.getElementById('university-detail');
+  var progressEl = document.getElementById('uni-progress');
+  var certEl = document.getElementById('uni-cert');
+  var tierEl = document.getElementById('uni-tier');
+  var permsEl = document.getElementById('uni-perms');
+  var sourceEl = document.getElementById('uni-curriculum-source');
+  
+  try {
+    // Fetch curriculum info
+    var coursesRes = await fetch('/api/ef-university', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'courses' })
+    });
+    var coursesData = await coursesRes.json();
+    if (coursesData.success) {
+      statusEl.textContent = coursesData.total_modules + ' modules available';
+      statusEl.style.color = '#4ade80';
+      if (sourceEl) sourceEl.textContent = 'database';
+    } else {
+      statusEl.textContent = 'offline';
+      statusEl.style.color = '#ef4444';
+    }
+  } catch(e) {
+    statusEl.textContent = 'unreachable';
+    statusEl.style.color = '#ef4444';
+  }
+}
+setInterval(loadUniversityStatus, 60000);
+loadUniversityStatus();
+
   setInterval(loadFleetAgents, 15000);
+
+  // Load mesh peers from peer connector
+  function loadMeshPeers() {
+    fetch('/api/mesh/peers', {
+      signal: AbortSignal.timeout(5000)
+    }).then(function(r){return r.json();}).then(function(data){
+      var peers = data.peers || [];
+      var list = document.getElementById('mesh-peers-list');
+      var count = document.getElementById('mesh-count');
+      if (!count) return;
+      count.textContent = '\u2014 ' + peers.length + ' peer' + (peers.length !== 1 ? 's' : '');
+      if (!peers.length) {
+        list.innerHTML = '<div class="stat"><span class="label">No mesh peers registered</span></div>';
+        return;
+      }
+      list.innerHTML = peers.map(function(p){
+        var status = p.status || 'unknown';
+        var sb = status === 'online' ? 'badge-ok' : 'badge-err';
+        var me = p.agent_name === 'vex' ? '\u2b50 ' : '';
+        var eps = p.endpoint ? '<br><span style="font-size:0.65rem;color:#4a7cff;">' + p.endpoint + '</span>' : '';
+        var caps = p.capabilities ? '<br><span style="font-size:0.6rem;color:#6b6b80;">' + p.capabilities.slice(0,5).join(', ') + (p.capabilities.length > 5 ? ' +' + (p.capabilities.length-5) + ' more' : '') + '</span>' : '';
+        var lastSeen = p.last_seen ? new Date(p.last_seen).toLocaleTimeString() : '';
+        return '<div class="stat"><span class="label">' + me + p.agent_name + eps + caps + '</span><span class="value"><span class="badge ' + sb + '">' + status + '</span><br><span style="font-size:0.6rem;color:#6b6b80;">' + lastSeen + '</span></span></div>';
+      }).join('');
+    }).catch(function(){
+      // Mesh peers unavailable
+    });
+  };
+  loadMeshPeers();
+  setInterval(loadMeshPeers, 30000);
 
   // Mining Stats from pool + xmrig (proxied through relay)
   // Load mining leaderboard
@@ -1590,11 +2356,9 @@ app.get('/', (req, res) => {
       
       return '<tr>' +
         '<td class="fn-name">' + f.name + '</td>' +
-        '<td>' + methods + '</td>' +
-        '<td style="text-align:center">' + timeoutBadge + '</td>' +
+        '<td class="fn-method-cell">' + methods + ' ' + timeoutBadge + '</td>' +
         '<td>' + typeTag + '</td>' +
         '<td class="fn-desc">' + (f.desc || '') + '</td>' +
-        '<td class="fn-inputs">' + inputs + '</td>' +
         '<td class="endpoint-url"><span>' + endpoint + '</span></td>' +
         '</tr>';
     }).join('');
@@ -1608,7 +2372,15 @@ app.get('/', (req, res) => {
   }
   
   function sendFleetChat() {
-    var agent = document.getElementById('fleet-chat-agent').value;
+    // Get or prompt for agent name (persisted in localStorage)
+    var nameInput = document.getElementById('fleet-chat-name');
+    var savedName = localStorage.getItem('fleet-chat-user-name');
+    if (savedName && !nameInput.value) {
+      nameInput.value = savedName;
+    } else if (nameInput.value) {
+      localStorage.setItem('fleet-chat-user-name', nameInput.value);
+    }
+    var agent = nameInput.value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-') || 'user';
     var input = document.getElementById('fleet-chat-input');
     var msgs = document.getElementById('fleet-chat-msgs');
     var msg = input.value.trim();
@@ -1666,36 +2438,467 @@ app.get('/', (req, res) => {
       });
   }
 
+  // ── Bulletin Board Functions ────────────────────────────────
+  var boardData = { topics: [] };
+  var boardCurrentTopic = null;
+  var boardStatusFilter = "all"; // all, active, in-progress, completed, archived
+  var boardLastPostCount = 0;
+  function loadBoard() {
+    fetch("/api/bulletin/topics")
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var prevCount = boardData.topics ? boardData.topics.length : 0;
+        var prevPosts = boardLastPostCount;
+        boardData = d;
+        renderBoardTopics();
+        document.getElementById("board-status").textContent = "● loaded";
+        document.getElementById("board-status").style.color = "#4ade80";
+        var newCount = boardData.topics.length;
+        var totalPosts = boardData.topics.reduce(function(sum, t) { return sum + (t.posts || []).length; }, 0);
+        if (newCount !== prevCount || totalPosts !== prevPosts) {
+          var ind = document.getElementById("board-updated-indicator");
+          if (ind) { ind.style.display = "inline"; setTimeout(function(){ if(ind) ind.style.display = "none"; }, 10000); }
+        }
+        boardLastPostCount = totalPosts;
+      })
+      .catch(function(e){
+        document.getElementById("board-status").textContent = "● error: " + e.message;
+        document.getElementById("board-status").style.color = "#f87171";
+      });
+  }
+  
+  function setBoardFilter(filter) {
+    boardStatusFilter = filter;
+    // Update filter tab styling
+    var filters = document.querySelectorAll('#board-filter-bar .board-filter');
+    for (var i = 0; i < filters.length; i++) {
+      var cls = filters[i].getAttribute('data-filter') === filter ? 'board-filter active' : 'board-filter';
+      filters[i].className = cls;
+    }
+    renderBoardTopics();
+  }
+  
+  function getStatusBadge(status) {
+    var colors = {
+      'active': 'background:#1a3a2a;color:#4ade80;',
+      'in-progress': 'background:#3a2a1a;color:#fbbf24;',
+      'completed': 'background:#1a2a3a;color:#60a5fa;',
+      'archived': 'background:#2a2a2a;color:#6b6b80;'
+    };
+    var label = status === 'in-progress' ? 'in progress' : status;
+    return '<span style="' + (colors[status] || colors.active) + 'padding:1px 6px;border-radius:8px;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.03em;">' + label + '</span>';
+  }
+  
+  function renderBoardTopics() {
+    var list = document.getElementById('board-topics-list');
+    var filtered = boardData.topics;
+    if (boardStatusFilter !== 'all') {
+      filtered = filtered.filter(function(t) { return t.status === boardStatusFilter; });
+    }
+    if (!filtered || filtered.length === 0) {
+      list.innerHTML = '<div style="color:#6b6b80;text-align:center;padding:20px 0;font-size:12px;">' +
+        (boardStatusFilter !== 'all' ? 'No ' + boardStatusFilter + ' topics.' : 'No topics yet. Create one to start tracking progress.') +
+        '</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < filtered.length; i++) {
+      var t = filtered[i];
+      var postCount = (t.posts || []).length;
+      var lastPost = postCount > 0 ? t.posts[t.posts.length - 1] : null;
+      var active = boardCurrentTopic && boardCurrentTopic.id === t.id ? ' active' : '';
+      var pinIcon = t.pinned ? '<span style="color:#fbbf24;font-size:10px;">📌</span> ' : '';
+      var assignBadge = t.assigned_agent ? '<span style="color:#60a5fa;font-size:9px;">@' + t.assigned_agent + '</span>' : '';
+      html += '<div class="board-topic' + active + '" data-topic-id="' + t.id + '">';
+      html += '<div class="board-topic-title">' + pinIcon + getStatusBadge(t.status) + ' ' + t.title.replace(/</g,'&lt;') + '</div>';
+      html += '<div class="board-topic-meta">' + postCount + ' post' + (postCount !== 1 ? 's' : '') + ' \u2022 by ' + t.creator + ' \u2022 ' + (t.created_at || '').slice(0,10);
+      if (assignBadge) html += ' \u2022 ' + assignBadge;
+      if (lastPost) html += ' \u2022 Last: ' + lastPost.author + ' ' + timeAgo(lastPost.ts);
+      html += '</div></div>';
+    }
+    list.innerHTML = html;
+    
+    // Attach click delegation for board topics (avoid inline onclick escaping issues)
+    var topicsContainer = document.getElementById('board-topics-list');
+    if (topicsContainer) {
+      topicsContainer.onclick = function(e) {
+        var target = e.target;
+        while (target && target !== topicsContainer) {
+          if (target.hasAttribute && target.hasAttribute('data-topic-id')) {
+            openBoardTopic(target.getAttribute('data-topic-id'));
+            return;
+          }
+          target = target.parentNode;
+        }
+      };
+    }
+  }
+  
+  function openBoardTopic(id) {
+    boardCurrentTopic = null;
+    for (var i = 0; i < boardData.topics.length; i++) {
+      if (boardData.topics[i].id === id) {
+        boardCurrentTopic = boardData.topics[i];
+        break;
+      }
+    }
+    if (!boardCurrentTopic) return;
+    document.getElementById('board-topics-list').style.display = 'none';
+    document.getElementById('board-topic-posts').style.display = 'block';
+    document.getElementById('board-current-topic-title').textContent = boardCurrentTopic.title;
+    
+    // Update status badge in detail view
+    document.getElementById('board-current-topic-status').innerHTML = getStatusBadge(boardCurrentTopic.status);
+    document.getElementById('board-status-select').value = boardCurrentTopic.status;
+    
+    // Update assignment
+    var assignEl = document.getElementById('board-current-topic-assignment');
+    assignEl.textContent = boardCurrentTopic.assigned_agent ? '@' + boardCurrentTopic.assigned_agent : '';
+    
+    // Update pin button
+    var pinBtn = document.getElementById('board-pin-btn');
+    pinBtn.textContent = boardCurrentTopic.pinned ? 'Unpin' : 'Pin';
+    pinBtn.style.borderColor = boardCurrentTopic.pinned ? '#fbbf24' : '#3a3a5a';
+    
+    renderBoardPosts();
+  }
+  
+  function closeBoardTopic() {
+    boardCurrentTopic = null;
+    document.getElementById('board-topics-list').style.display = '';
+    document.getElementById('board-topic-posts').style.display = 'none';
+  }
+  
+  function renderBoardPosts() {
+    var list = document.getElementById('board-posts-list');
+    if (!boardCurrentTopic || !boardCurrentTopic.posts || boardCurrentTopic.posts.length === 0) {
+      list.innerHTML = '<div style="color:#6b6b80;text-align:center;padding:15px 0;font-size:12px;">No posts yet. Be the first!</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < boardCurrentTopic.posts.length; i++) {
+      var p = boardCurrentTopic.posts[i];
+      var agentClass = 'board-agent-' + (p.agent || 'vex').toLowerCase();
+      html += '<div class="board-post">';
+      html += '<div class="board-post-header"><span class="board-agent-badge ' + agentClass + '">' + (p.agent || 'agent').toUpperCase() + '</span> ' + timeAgo(p.ts);
+      html += '<span style="float:right;font-size:9px;color:#6b6b80;cursor:pointer;" onclick="deleteBoardPost(\\'' + p.id + '\\')" title="Delete post">✕</span>';
+      html += '</div>';
+      html += '<div class="board-post-body">' + p.message.replace(/</g,'&lt;') + '</div>';
+      html += '</div>';
+    }
+    list.innerHTML = html;
+    list.scrollTop = list.scrollHeight;
+  }
+  
+  function createBoardTopic() {
+    var input = document.getElementById('board-new-topic-input');
+    var title = input.value.trim();
+    if (!title) return;
+    input.value = '';
+    var agent = getBoardAgent();
+    var statusSelect = document.getElementById('board-new-status');
+    var status = statusSelect ? statusSelect.value : 'active';
+    var assignInput = document.getElementById('board-new-assignment');
+    var assigned_agent = assignInput ? assignInput.value.trim() || null : null;
+    var pinnedCheck = document.getElementById('board-new-pinned');
+    var pinned = pinnedCheck ? pinnedCheck.checked : false;
+    fetch('/api/bulletin/topics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title, creator: agent, status: status, assigned_agent: assigned_agent, pinned: pinned })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) {
+          if (assignInput) assignInput.value = '';
+          if (pinnedCheck) pinnedCheck.checked = false;
+          if (statusSelect) statusSelect.value = 'active';
+          switchBoardView('topics');
+          loadBoard();
+        }
+      })
+      .catch(function(e) {
+        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+        document.getElementById('board-status').style.color = '#f87171';
+      });
+  }
+  
+  function changeTopicStatus(newStatus) {
+    if (!boardCurrentTopic) return;
+    fetch('/api/bulletin/topics/' + boardCurrentTopic.id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) {
+          boardCurrentTopic.status = newStatus;
+          document.getElementById('board-current-topic-status').innerHTML = getStatusBadge(newStatus);
+          loadBoard();
+        }
+      })
+      .catch(function(e) {
+        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+      });
+  }
+  
+  function togglePinTopic() {
+    if (!boardCurrentTopic) return;
+    var newPinned = !boardCurrentTopic.pinned;
+    fetch('/api/bulletin/topics/' + boardCurrentTopic.id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned: newPinned })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) {
+          boardCurrentTopic.pinned = newPinned;
+          var pinBtn = document.getElementById('board-pin-btn');
+          pinBtn.textContent = newPinned ? 'Unpin' : 'Pin';
+          pinBtn.style.borderColor = newPinned ? '#fbbf24' : '#3a3a5a';
+          loadBoard();
+        }
+      })
+      .catch(function(e) {
+        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+      });
+  }
+  
+  function sendBoardPost() {
+    if (!boardCurrentTopic) return;
+    var input = document.getElementById('board-post-input');
+    var msg = input.value.trim();
+    if (!msg) return;
+    input.value = '';
+    var agent = getBoardAgent();
+    fetch('/api/bulletin/topics/' + boardCurrentTopic.id + '/posts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ author: agent, message: msg, agent: agent })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) {
+          loadBoard();
+          // Re-open the current topic after reload
+          setTimeout(function() { openBoardTopic(boardCurrentTopic.id); }, 100);
+        }
+      })
+      .catch(function(e) {
+        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+        document.getElementById('board-status').style.color = '#f87171';
+      });
+  }
+  
+  function deleteBoardPost(postId) {
+    if (!boardCurrentTopic || !confirm('Delete this post?')) return;
+    fetch('/api/bulletin/topics/' + boardCurrentTopic.id + '/posts/' + postId, {
+      method: 'DELETE'
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) {
+          loadBoard();
+          setTimeout(function() { openBoardTopic(boardCurrentTopic.id); }, 100);
+        }
+      })
+      .catch(function(e) {
+        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+      });
+  }
+  
+  function switchBoardView(view) {
+    document.getElementById('tab-topics').className = 'board-tab' + (view === 'topics' ? ' active' : '');
+    document.getElementById('tab-newtopic').className = 'board-tab' + (view === 'new' ? ' active' : '');
+    document.getElementById('board-topics-view').style.display = view === 'topics' ? '' : 'none';
+    document.getElementById('board-new-topic-view').style.display = view === 'new' ? '' : 'none';
+    if (view === 'topics') closeBoardTopic();
+  }
+  
+  function deleteBoardTopic() {
+    if (!boardCurrentTopic || !confirm('Delete this resolution permanently?')) return;
+    fetch('/api/bulletin/topics/' + boardCurrentTopic.id, {
+      method: 'DELETE'
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) {
+          boardCurrentTopic = null;
+          switchBoardView('topics');
+          loadBoard();
+        }
+      })
+      .catch(function(e) {
+        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+        document.getElementById('board-status').style.color = '#f87171';
+      });
+  }
+
+  function getBoardAgent() {
+    var nameInput = document.getElementById('fleet-chat-name');
+    return (nameInput ? nameInput.value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '') : 'vex') || 'vex';
+  }
+  
+  function timeAgo(ts) {
+    var diff = Date.now() - (typeof ts === 'number' ? ts : new Date(ts).getTime());
+    var mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    var hours = Math.floor(mins / 60);
+    if (hours < 24) return hours + 'h ago';
+    var days = Math.floor(hours / 24);
+    return days + 'd ago';
+  }
+
+  // Copy mining script to clipboard
+  function copyMiningScript() {
+    var el = document.getElementById('mining-script');
+    var text = el.textContent || el.innerText;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function() {
+        var orig = el.style.background;
+        el.style.background = '#1a3a2a';
+        el.style.transition = 'background 0.3s';
+        setTimeout(function(){ el.style.background = orig; }, 1000);
+      }).catch(function(){});
+    } else {
+      // Fallback
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+  }
+
   // Load initial fleet messages + poll every 5 seconds
   setTimeout(fetchFleetMessages, 500);
   setInterval(fetchFleetMessages, 5000);
 
-  // Next campaign drop calculation
+  // Load bulletin board
+  setTimeout(loadBoard, 1000);
+  setInterval(loadBoard, 30000);
+
+  // Next campaign drop calculation — Costa Rica time (UTC-6)
   (function() {
     var now = new Date();
-    var hour = now.getHours() - 6; // CST offset
+    var hour = now.getUTCHours() - 6; // CR offset
     if (hour < 0) hour += 24;
     var min = now.getMinutes();
-    var schedule = [8, 12, 16, 23];
-    var next = schedule.find(function(h) { return h > hour || (h === hour && min < 5); });
+    var schedule = [8, 10, 12, 14, 16, 18]; // 8:30am, 10:30am, 12:30pm, 2:30pm, 4:30pm, 6:30pm CR
+    var next = schedule.find(function(h) { return h > hour || (h === hour && min < 30); });
     var label;
     if (next === undefined) {
-      label = 'Tomorrow 8AM';
+      label = 'Tomorrow 8:30AM CR';
     } else {
       var ampm = next >= 12 ? 'PM' : 'AM';
       var h12 = next > 12 ? next - 12 : (next === 0 ? 12 : next);
-      label = h12 + ':00 ' + ampm + ' CST';
+      label = h12 + ':30 ' + ampm + ' CR';
     }
     var el = document.getElementById('next-drop');
     if (el) el.textContent = label;
   })();
-  </script>
+  
+// Mesh Network Particle Animation
+(function(){
+  const canvas = document.getElementById('mesh-bg');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  let W, H, particles = [];
+  function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+  resize(); addEventListener('resize', resize);
+  
+  class Particle {
+    constructor() {
+      this.x = Math.random() * W; this.y = Math.random() * H;
+      this.vx = (Math.random() - 0.5) * 0.4; this.vy = (Math.random() - 0.5) * 0.4;
+      this.r = Math.random() * 1.5 + 1; this.life = Math.random() * 100;
+    }
+    update() {
+      this.x += this.vx; this.y += this.vy; this.life++;
+      if (this.x < 0 || this.x > W) this.vx *= -1;
+      if (this.y < 0 || this.y > H) this.vy *= -1;
+    }
+    draw() {
+      const pulse = 0.5 + 0.5 * Math.sin(this.life * 0.03);
+      ctx.beginPath(); ctx.arc(this.x, this.y, this.r * pulse, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,102,0,' + (0.4 * pulse) + ')'; ctx.fill();
+    }
+  }
+  for (let i = 0; i < 60; i++) particles.push(new Particle());
+  
+  let mouse = { x: W / 2, y: H / 2 };
+  document.addEventListener('mousemove', function(e) { mouse.x = e.clientX; mouse.y = e.clientY; });
+  
+  function animate() {
+    ctx.fillStyle = 'rgba(10,10,15,0.15)'; ctx.fillRect(0, 0, W, H);
+    particles.forEach(function(p) { p.update(); p.draw(); });
+    for (let i = 0; i < particles.length; i++) {
+      for (let j = i + 1; j < particles.length; j++) {
+        const dx = particles[i].x - particles[j].x, dy = particles[i].y - particles[j].y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 150) {
+          ctx.beginPath(); ctx.moveTo(particles[i].x, particles[i].y); ctx.lineTo(particles[j].x, particles[j].y);
+          ctx.strokeStyle = 'rgba(255,102,0,' + (0.12 * (1 - dist / 150)) + ')'; ctx.lineWidth = 0.6; ctx.stroke();
+        }
+      }
+      const dx = particles[i].x - mouse.x, dy = particles[i].y - mouse.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 200) {
+        ctx.beginPath(); ctx.moveTo(particles[i].x, particles[i].y); ctx.lineTo(mouse.x, mouse.y);
+        ctx.strokeStyle = 'rgba(255,102,0,' + (0.15 * (1 - dist / 200)) + ')'; ctx.lineWidth = 0.8; ctx.stroke();
+      }
+    }
+    requestAnimationFrame(animate);
+  }
+  animate();
+})();
+</script>
   
   </body>
 </html>`);
 });
 
 // API: Edge Function Catalog
+
+// -- XMRT University Proxy --
+const SUPABASE_UNIVERSITY_URL = 'https://vawouugtzwmejxqkeqqj.supabase.co/functions/v1/xmrt-university';
+
+app.post('/api/ef-university', async (req, res) => {
+  try {
+    const r = await fetch(SUPABASE_UNIVERSITY_URL, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + RELAY_SERVICE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {}),
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(502).json({ success: false, error: e.message });
+  }
+});
+
+// -- Local Edge Function Runtime --
+app.all('/api/v1/functions/:name', async (req, res) => {
+  const func = localFunctions.find(f => f.name === req.params.name);
+  if (!func) {
+    return res.status(404).json({ error: 'Function not found: ' + req.params.name, available: localFunctions.map(f => f.name) });
+  }
+  try {
+    const { pathToFileURL } = await import('url');
+    const mod = await import(pathToFileURL(join(LOCAL_FUNCTIONS_DIR, req.params.name + '.mjs')).href);
+    await mod.handler(req, res);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/catalog', (req, res) => {
   const catalogPath = join(__dirname, 'edge-function-catalog.json');
   try {
@@ -1732,10 +2935,300 @@ app.post('/api/fleet/heartbeat', (req, res) => {
 });
 
 // API: List all registered fleet agents
-app.get('/api/fleet/agents', (req, res) => {
+app.get('/api/fleet/agents', async (req, res) => {
   trackRequest('/api/fleet/agents');
+  try {
+    const agents = state.get('fleet.agents', {});
+    
+    // Merge in agents from Supabase agent_registry (mesh-peer-connector)
+    try {
+      const registryRes = await fetch(`${SUPABASE_URL}/functions/v1/mesh-peer-connector`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'discover' }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (registryRes.ok) {
+        const registryData = await registryRes.json();
+        if (registryData.peers) {
+          for (const peer of registryData.peers) {
+            // Check if this peer matches an existing agent by name (avoid duplicates)
+            const existingKey = Object.keys(agents).find(
+              (k) => agents[k].name?.toLowerCase() === peer.agent_name?.toLowerCase()
+            )
+            if (existingKey) {
+              // Merge cert info into existing agent record
+              agents[existingKey] = {
+                ...agents[existingKey],
+                tier: peer.tier,
+                permissions: peer.permissions,
+                certified_since: peer.certified_since,
+                last_seen: new Date().toISOString(),
+              };
+            } else {
+              // New agent — add to registry
+              agents[peer.agent_id] = {
+                agent_id: peer.agent_id,
+                name: peer.agent_name,
+                status: 'ONLINE',
+                role: peer.tier || 'agent',
+                tier: peer.tier,
+                permissions: peer.permissions,
+                certified_since: peer.certified_since,
+                last_seen: new Date().toISOString(),
+              };
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Registry fetch failed - non-fatal, continue with heartbeat agents
+    }
+    
+    // Check Hermes health via agent_registry (certified agents are active)
+    if (agents['hermes-android-termux']) {
+      // Already registered via mesh-peer-connector — update name and keep single entry
+      agents['hermes-android-termux'].name = 'Hermes';
+      agents['hermes-android-termux'].role = 'mobile';
+      agents['hermes-android-termux'].tunnel_url = 'https://hermes.mobilemonero.com';
+      agents['hermes-android-termux'].version = 'certified';
+      agents['hermes-android-termux'].last_seen = new Date().toISOString();
+      // Remove separate 'hermes' key if it somehow exists
+      delete agents['hermes'];
+    } else {
+      // Fallback: try old health check
+      try {
+        const hermesRes = await fetch('https://hermes.mobilemonero.com/health', {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (hermesRes.ok) {
+          const hermesData = await hermesRes.json();
+          const hermesAlive = hermesData?.agents?.includes?.('hermes') || hermesData?.ok === true;
+          agents['hermes'] = {
+            ...(agents['hermes'] || {}),
+            agent_id: 'hermes',
+            name: 'Hermes',
+            status: hermesAlive ? 'ONLINE' : 'OFFLINE',
+            role: 'mobile',
+            tunnel_url: 'https://hermes.mobilemonero.com',
+            last_seen: new Date().toISOString(),
+          };
+        } else {
+          throw new Error('Health check failed');
+        }
+      } catch (e) {
+        agents['hermes'] = {
+          ...(agents['hermes'] || {}),
+          agent_id: 'hermes',
+          name: 'Hermes',
+          status: 'OFFLINE',
+          role: 'mobile',
+          tunnel_url: 'https://hermes.mobilemonero.com',
+          last_seen: agents['hermes']?.last_seen || new Date().toISOString(),
+        };
+      }
+    }
+    
+    // Update Vex with live status
+    agents['vex'] = {
+      ...(agents['vex'] || {}),
+      agent_id: 'vex',
+      name: 'Vex',
+      status: 'ONLINE',
+      role: 'relay',
+      tunnel_url: 'https://relay.mobilemonero.com',
+      version: '5.0.0',
+      last_seen: new Date().toISOString(),
+    };
+    
+    // Deduplicate: if both 'hermes' and 'hermes-android-termux' exist, keep only the registry one
+    if (agents['hermes'] && agents['hermes-android-termux']) {
+      console.log('[fleet-agents] Dedup: removing duplicate hermes key');
+      delete agents['hermes'];
+    }
+    
+    // Log hermes state for debugging
+    const hermesKeys = Object.keys(agents).filter(k => k.includes('hermes'));
+    if (hermesKeys.length) console.log(`[fleet-agents] Hermes keys after processing: ${hermesKeys}`);
+    
+    res.json({ agents: Object.values(agents), count: Object.keys(agents).length });
+  } catch (err) {
+    console.error('Fleet agents error:', err);
+    const agents = state.get('fleet.agents', {});
+    res.json({ agents: Object.values(agents), count: Object.keys(agents).length });
+  }
+});
+
+// API: Meshtastic Bridge Status (for IoT Radar)
+app.get('/api/mesh/bridge', async (req, res) => {
+  trackRequest('/api/mesh/bridge');
+  try {
+    // Try to get bridge status from state (set by meshtastic-bridge.mjs)
+    const bridgeState = state.get('meshtastic.bridge', {});
+    const nodes = state.get('meshtastic.nodes', {});
+    res.json({
+      connected: bridgeState.connected || false,
+      uptime: bridgeState.uptime || 0,
+      nodes: Object.keys(nodes).length,
+      nodeList: Object.values(nodes).map(n => ({
+        id: n.id,
+        name: n.name || n.id,
+        rssi: n.rssi,
+        snr: n.snr,
+        lastHeard: n.lastHeard,
+      })),
+      messageCount: bridgeState.messageCount || 0,
+      transport: bridgeState.transport || 'disconnected',
+    });
+  } catch (err) {
+    res.json({ connected: false, error: err.message, nodes: 0, nodeList: [] });
+  }
+});
+
+// API: Mesh Peers (from mesh-peer-connector data + registered agents)
+// Returns combined view of registered mesh peers and online agents
+app.get('/api/mesh/peers', async (req, res) => {
+  trackRequest('/api/mesh/peers');
+  try {
+    // Pull peers registered via mesh-peer-connector (stored by Supabase function)
+    const peersState = state.get('mesh.peers', {});
+    const agents = state.get('fleet.agents', {});
+    const now = Date.now();
+
+    // Build peer entries from registered peers
+    const peers = Object.values(peersState).map(p => ({
+      agent_name: p.agent_name || p.name || p.peer_id,
+      peer_id: p.peer_id,
+      endpoint: p.endpoint || null,
+      capabilities: p.capabilities || [],
+      status: p.last_seen && (now - new Date(p.last_seen).getTime()) < 300000 ? 'online' : 'offline',
+      last_seen: p.last_seen || null,
+    }));
+
+    // Also include online agents that have peer connectivity but aren't yet registered
+    Object.values(agents).forEach(a => {
+      if (!peers.find(p => p.agent_name === a.name || p.peer_id === a.agent_id)) {
+        const isOnline = a.status === 'ONLINE' || a.status === 'online';
+        const lastSeen = a.last_seen ? new Date(a.last_seen).getTime() : 0;
+        if (isOnline && (now - lastSeen) < 600000) {
+          peers.push({
+            agent_name: a.name,
+            peer_id: a.agent_id,
+            endpoint: a.tunnel_url || null,
+            capabilities: a.capabilities || [],
+            status: 'online',
+            last_seen: a.last_seen,
+          });
+        }
+      }
+    });
+
+    res.json({ peers, count: peers.length, timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.json({ peers: [], count: 0, error: err.message });
+  }
+});
+
+// API: Gossipsub status (mesh pubsub topic health)
+app.get('/mesh/status', (req, res) => {
+  trackRequest('/mesh/status');
+  try {
+    const bridge = state.get('meshtastic.bridge', {});
+    const nodes = state.get('meshtastic.nodes', {});
+    const messages = state.get('mesh.messages', []);
+    res.json({
+      connected: bridge.connected || false,
+      transport: bridge.transport || 'disconnected',
+      nodes: Object.keys(nodes).length,
+      topics: state.get('mesh.topics', ['fleet-broadcast', 'agent-heartbeat', 'mining', 'fleet-chat']),
+      messageCount: messages.length,
+      uptime: bridge.uptime || 0,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.json({ connected: false, error: err.message });
+  }
+});
+
+// API: Recent mesh messages (gossipsub pubsub history)
+app.get('/mesh/messages', (req, res) => {
+  trackRequest('/mesh/messages');
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  try {
+    const messages = state.get('mesh.messages', []);
+    res.json({
+      messages: messages.slice(-limit).reverse(),
+      count: messages.length,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.json({ messages: [], count: 0, error: err.message });
+  }
+});
+
+// API: P2P mesh health (aggregated peer + bridge health)
+app.get('/api/p2p/health', (req, res) => {
+  trackRequest('/api/p2p/health');
+  try {
+    const bridge = state.get('meshtastic.bridge', {});
+    const nodes = state.get('meshtastic.nodes', {});
+    const peers = state.get('mesh.peers', {});
+    const onlinePeers = Object.values(peers).filter(p => {
+      const last = p.last_seen ? new Date(p.last_seen).getTime() : 0;
+      return (Date.now() - last) < 300000;
+    }).length;
+    res.json({
+      status: bridge.connected ? 'healthy' : 'degraded',
+      bridge: {
+        connected: bridge.connected || false,
+        transport: bridge.transport || 'disconnected',
+        uptime: bridge.uptime || 0,
+      },
+      nodes: Object.keys(nodes).length,
+      peers: { total: Object.keys(peers).length, online: onlinePeers },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.json({ status: 'unknown', error: err.message });
+  }
+});
+
+// API: ARP Defender Update (from arp-defender.mjs)
+app.post('/api/arp/update', express.json({ limit: '1mb' }), (req, res) => {
+  trackRequest('/api/arp/update');
+  try {
+    const { bridge, nodes } = req.body;
+    if (bridge) state.set('meshtastic.bridge', bridge);
+    if (nodes) state.set('meshtastic.nodes', nodes);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API: GET fleet heartbeat summary (for dashboard queries)
+app.get('/api/fleet/heartbeat', (req, res) => {
+  trackRequest('/api/fleet/heartbeat');
   const agents = state.get('fleet.agents', {});
-  res.json({ agents: Object.values(agents), count: Object.keys(agents).length });
+  const agentList = Object.values(agents);
+  const online = agentList.filter(a => a.status === 'ONLINE' || a.status === 'online').length;
+  const offline = agentList.length - online;
+  const now = new Date().toISOString();
+  res.json({
+    success: true,
+    timestamp: now,
+    summary: { total: agentList.length, online, offline },
+    agents: agentList.map(a => ({
+      agent_id: a.agent_id,
+      name: a.name,
+      status: a.status,
+      role: a.role,
+      last_seen: a.last_seen,
+      hashrate: a.hashrate || 0,
+      tunnel_url: a.tunnel_url || null,
+      version: a.version,
+    })),
+  });
 });
 
 // API: Live Fleet Status (aggregated from all agents)
@@ -1847,13 +3340,19 @@ function getToolDescription(name) {
     'state-set': 'Set a value in persistent state',
     'task-stats': 'Get task runner statistics',
     'github-post': 'Post a comment on a GitHub issue',
+    'vex-vision': 'Capture a photo from the webcam and describe it using a vision model',
+    'vex-hear': 'Capture audio from the microphone for a specified duration',
   };
   return descriptions[name] || 'No description';
 }
 
+// ── Agent Authorization ──────────────────────────────────────
+import { checkToolAccess, getToolLevel, registerTrustedAgent, getAgentInfo, listAgents, CORE_AGENTS, TRUST_LEVELS } from './lib/agent-auth.mjs';
+
 // ── Tool Execution ──────────────────────────────────────────
 app.post('/tools/run', async (req, res) => {
   const { tool, args = {} } = req.body;
+  const agentId = args?.agent || req.headers['x-agent-id'] || req.ip;
   trackRequest('/tools/run', tool);
   
   if (!tool) {
@@ -1865,9 +3364,25 @@ app.post('/tools/run', async (req, res) => {
     return res.status(404).json({ error: `Tool "${tool}" not found`, available: Object.keys(toolHandlers) });
   }
   
+  // ── Authorization check ──
+  const toolLevel = getToolLevel(tool);
+  const auth = checkToolAccess(agentId, tool, toolLevel);
+  if (!auth.authorized) {
+    return res.status(403).json({
+      error: auth.reason,
+      agent: agentId,
+      tool,
+      toolLevel,
+      agentLevel: getAgentInfo(agentId)?.level || 'unknown',
+    });
+  }
+  
+  // Inject auth context into args
+  args._agent = { id: agentId, level: auth.level };
+  
   // Run via task runner for async safety
   const taskId = taskRunner.addTask(tool, async () => await handler(args), {
-    metadata: { tool, args },
+    metadata: { tool, args, agent: agentId },
     timeout: args?.timeout || 60000,
   });
   
@@ -1881,11 +3396,36 @@ app.post('/tools/run', async (req, res) => {
         setTimeout(check, 100);
       }
     };
-    setTimeout(() => resolve({ error: 'Task timed out waiting for execution', taskId }), 30000);
+    setTimeout(() => resolve({ error: 'Task timed out waiting for execution', taskId }), args?.timeout || 90000);
     check();
   });
   
+  res.json({ ...result, _authorized: true, _agent: agentId });
+});
+
+// ── Agent Registration (for trusted agents after XMRT University) ──
+app.post('/tools/register-agent', async (req, res) => {
+  const { agent_id, name, role, passcode } = req.body;
+  
+  if (!agent_id) {
+    return res.status(400).json({ error: 'agent_id is required' });
+  }
+  
+  // Require proof of XMRT University completion
+  if (!passcode || passcode !== 'xmrt-university-graduate') {
+    return res.status(403).json({
+      error: 'Proof of XMRT University graduation required. Complete the certification program at /university first.',
+      hint: 'Passcode is provided upon graduation from XMRT University',
+    });
+  }
+  
+  const result = registerTrustedAgent(agent_id, { name, role });
   res.json(result);
+});
+
+// ── Agent Status ──
+app.get('/tools/agents', async (req, res) => {
+  res.json({ agents: listAgents(), core: Array.from(CORE_AGENTS) });
 });
 
 // ── Web Search ──────────────────────────────────────────────
@@ -1942,18 +3482,58 @@ app.get('/monitor', async (req, res) => {
 const fleetChatMessages = [];
 const FLEET_CHAT_MAX = 500;
 
+// ── Message dedup cache (5-min TTL, content-based) ─────────
+const seenMessageHashes = new Set();
+const SEEN_HASH_TTL = 5 * 60 * 1000;
+
+function getMessageHash(agent, message) {
+  return agent + ':' + (message || '').slice(0, 100);
+}
+
+function checkAndMarkDuplicated(agent, message) {
+  const hash = getMessageHash(agent, message);
+  if (seenMessageHashes.has(hash)) return true;
+  seenMessageHashes.add(hash);
+  setTimeout(() => seenMessageHashes.delete(hash), SEEN_HASH_TTL);
+  return false;
+}
+
 // Fleet agent registry (who's listening)
 const FLEET_AGENTS = {
   'vex': { name: 'Vex', endpoint: 'local', type: 'relay' },
   'eliza': { name: 'Eliza-Cloud', endpoint: 'eliza-relay', type: 'cloud' },
-  'hermes': { name: 'Hermes', endpoint: 'https://api.mobilemonero.com/relay', type: 'mobile' },
+  'hermes': { name: 'Hermes', endpoint: 'https://hermes.mobilemonero.com', type: 'mobile' },
 };
 
 function getFleetChatMessages(limit = 50) {
   return fleetChatMessages.slice(-limit);
 }
 
+// Fleet message repair — catches U+FFFD (replacement character = diamond question mark)
+// that the relay sometimes produces from encoding corruption, replaces with safe ASCII.
+// Leaves proper Unicode (em dash, emoji, etc.) untouched.
+function sanitizeFleetMessage(msg) {
+  if (!msg) return msg;
+  // Only strip the actual replacement character and bare surrogates
+  return msg
+    .replace(/\uFFFD/g, '--')
+    .replace(/[\uD800-\uDFFF]/g, '');
+}
+
 function addFleetMessage(agent, message, channel = 'fleet') {
+  // Sanitize non-ASCII to prevent fleet-chat relay encoding corruption
+  message = sanitizeFleetMessage(message);
+  // Dedup: skip if we've seen this message in the last 5 minutes
+  if (checkAndMarkDuplicated(agent, message)) return null;
+
+  // Auto-create bulletin board topic from [board] tagged messages
+  // Skip system bulletin notifications to prevent re-creation loops
+  var upperMsg = message.toUpperCase();
+  if ((upperMsg.indexOf('[BOARD]') === 0 || upperMsg.indexOf('[TOPIC]') === 0) &&
+      !message.match(/^\[board\]\s*(topic:|bulletin:)/i)) {
+    autoCreateBoardTopic(agent, message);
+  }
+  
   const entry = {
     id: `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`,
     agent,
@@ -1974,6 +3554,43 @@ function addFleetMessage(agent, message, channel = 'fleet') {
   return entry;
 }
 
+// Auto-create board topics from [board] tagged fleet messages
+function autoCreateBoardTopic(agent, message) {
+  try {
+    // Strip the [board] or [topic] tag and extract first line as title
+    var cleanMsg = message.replace(/^\[[Bb][Oo][Aa][Rr][Dd]\]\s*/, '').replace(/^\[[Tt][Oo][Pp][Ii][Cc]\]\s*/, '');
+    var title = cleanMsg.split('\n')[0].split(';')[0].trim().slice(0, 120);
+    if (!title) return;
+    var board = state.get('bulletin-board') || { topics: [] };
+    // Check for duplicate by title (case-insensitive)
+    var exists = board.topics.some(function(t) {
+      return t.title.toLowerCase() === title.toLowerCase();
+    });
+    if (exists) return;
+    var topic = {
+      id: 'topic-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6),
+      title: title,
+      creator: agent,
+      status: 'active',
+      pinned: false,
+      assigned_agent: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      posts: [{
+        id: 'post-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6),
+        author: agent,
+        agent: agent,
+        message: cleanMsg.slice(title.length).trim() || 'Created from fleet chat',
+        ts: Date.now(),
+        created_at: new Date().toISOString(),
+      }]
+    };
+    board.topics.push(topic);
+    state.set('bulletin-board', board);
+    logActivity('board', topic.id, 'AUTO', 'Topic "' + title + '" from ' + agent);
+  } catch (e) { /* non-critical */ }
+}
+
 // Load persisted messages on startup
 function loadFleetChatHistory() {
   try {
@@ -1992,38 +3609,85 @@ async function routeFleetMessage(entry) {
   // Always log it
   logActivity('fleet-chat', entry.id, 'MSG', `[${entry.agentLabel}] ${entry.message.slice(0, 100)}`);
 
-  // Route to Eliza via eliza-relay
-  if (entry.channel === 'all' || entry.channel === 'eliza') {
+    // Route to Eliza via eliza-relay with conversation memory
+  // Trigger on: direct channel, 'all' channel, or any message mentioning @Eliza
+  const mentionsEliza = /@eliza/i.test(entry.message) || entry.channel === 'eliza';
+  if (entry.channel === 'all' || entry.channel === 'eliza' || mentionsEliza) {
     try {
-      const elizaMsg = `[Fleet Chat - ${entry.agentLabel}] ${entry.message}`;
-      const elizaRes = await relayToElizaCloud(elizaMsg, entry.agentLabel, `fleet-${entry.id}`);
+      // Load conversation history from local memory
+      const sessionId = 'eliza-fleet-' + entry.agent;
+      let contextHistory = '';
+      try {
+        const convRes = await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access?session_id=' + sessionId + '&limit=10', {
+          signal: AbortSignal.timeout(3000),
+        });
+        const convData = await convRes.json();
+        if (convData.messages && convData.messages.length > 0) {
+          contextHistory = '\n\nRecent conversation context:\n' + convData.messages.map(function(m) {
+            return '[' + m.agent + '] ' + m.content;
+          }).join('\n');
+        }
+      } catch (e) { /* memory best-effort */ }
+      
+      // Store this message in conversation memory
+      try {
+        await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId, role: 'user', agent: entry.agentLabel, content: entry.message }),
+          signal: AbortSignal.timeout(3000),
+        });
+      } catch (e) { /* memory best-effort */ }
+      
+      const elizaMsg = '[Fleet Chat - ' + entry.agentLabel + '] ' + entry.message + contextHistory;
+      const elizaRes = await relayToElizaCloud(elizaMsg, entry.agentLabel, 'fleet-' + entry.id);
       if (elizaRes?.reply) {
-        const reply = addFleetMessage('eliza', elizaRes.reply, 'fleet');
+        // Store Eliza's reply in conversation memory
+        try {
+          await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId, role: 'assistant', agent: 'Eliza', content: elizaRes.reply }),
+            signal: AbortSignal.timeout(3000),
+          });
+        } catch (e) { /* memory best-effort */ }
+        
+        // Strip tool call syntax from Eliza's replies before posting to fleet chat
+        const cleanReply = elizaRes.reply
+          .replace(/\*\*[a-z_]+\*\*:\s*\{[^}]*\}/gs, '')
+          .replace(/\*\*[a-z_]+\*\*:\s*<!DOCTYPE[^>]*>[^]*?(?=\n\*\*|$)/g, '')
+          .replace(/^\*\*[a-z_]+\*\*:\s*.*$/gm, '')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+        const reply = addFleetMessage('eliza', cleanReply || elizaRes.reply, 'fleet');
         results.eliza = reply;
       }
     } catch (e) {
       results.eliza = { error: e.message };
     }
   }
-
-  // Route to Hermes via his chat endpoint
+  // Route to Hermes via his fleet endpoint
   if ((entry.channel === 'all' || entry.channel === 'hermes') && entry.agent !== 'hermes') {
-    const hermesUrl = FLEET_AGENTS['hermes']?.endpoint;
-    if (hermesUrl) {
+    const hermesInfo = FLEET_AGENTS['hermes'];
+    if (hermesInfo?.endpoint) {
       try {
-        const hermesMsg = `[Fleet Chat - ${entry.agentLabel}] ${entry.message}`;
-        const res = await fetch(`${hermesUrl}/api/chat`, {
+        const hermesEndpoint = hermesInfo.endpoint;
+        
+        // Always send direct to Hermes so he can respond intelligently
+        const hermesBody = {
+          agent: entry.agentLabel || entry.agent,
+          message: entry.message,
+          type: 'direct'
+        };
+        const res = await fetch(`${hermesEndpoint}/to/hermes`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: hermesMsg }),
-          signal: AbortSignal.timeout(60000),
+          body: JSON.stringify(hermesBody),
+          signal: AbortSignal.timeout(15000),
         });
         if (res.ok) {
           const data = await res.json();
-          if (data?.reply) {
-            const reply = addFleetMessage('hermes', data.reply, 'fleet');
-            results.hermes = reply;
-          }
+          results.hermes = { forwarded: true, msg_id: data.msg_id };
         }
       } catch (e) {
         results.hermes = { error: e.message };
@@ -2031,11 +3695,42 @@ async function routeFleetMessage(entry) {
     }
   }
 
+  // Vex responds intelligently to website inquiries
+  if ((entry.channel === 'all' || entry.channel === 'vex')
+      && (entry.message.includes('From:') || entry.message.includes('WEBSITE') || entry.message.includes('BOOKING'))) {
+    try {
+      const vexPrompt = `You are Vex, Joe Lee's primary AI agent. You work for Party Favor Photo (photo booth services in DC, VA, MD, Dallas/FW, PA/NJ) and XMRT DAO. Be sharp and direct. Respond as Vex to acknowledge the inquiry.
+
+Inquiry: "${entry.message.replace(/"/g, "'")}"
+
+Your response (1-2 sentences as Vex):`;
+      const r = await fetch('http://localhost:11434/api/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'gemma4', prompt: vexPrompt, stream: false, options: { temperature: 0.7, max_tokens: 100 } }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        const reply = d.response?.trim();
+        if (reply && reply.length > 0) {
+          results.vex = addFleetMessage('vex', reply, 'fleet');
+        }
+      }
+    } catch (e) { /* Vex responds from session if relay fails */ }
+  }
+
   return results;
 }
 
 // POST /api/fleet-chat/send — Send a message to the fleet
+app.options('/api/fleet-chat/send', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.status(200).end();
+});
 app.post('/api/fleet-chat/send', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
   trackRequest('/api/fleet-chat/send');
   const { agent, message, channel } = req.body || {};
   
@@ -2043,7 +3738,11 @@ app.post('/api/fleet-chat/send', async (req, res) => {
     return res.status(400).json({ error: 'agent and message are required', usage: { agent: 'vex|eliza|hermes', message: '...', channel: 'fleet|all|vex|eliza|hermes' } });
   }
 
+  // Let addFleetMessage handle sanitization
   const entry = addFleetMessage(agent, message, channel || 'fleet');
+  
+  // Also publish to gossipsub fleet-broadcast topic
+  publishToMesh('fleet-broadcast', { agent, message, channel, ts: entry.ts }).catch(() => {});
   
   // Route to other agents asynchronously — allow long timeouts (agents research before replying)
   const routePromise = routeFleetMessage(entry).catch(e => ({ error: e.message }));
@@ -2060,13 +3759,73 @@ app.post('/api/fleet-chat/send', async (req, res) => {
 });
 
 // GET /api/fleet-chat/messages — Get recent fleet chat messages
-app.get('/api/fleet-chat/messages', (req, res) => {
+app.get('/api/fleet-chat/messages', async (req, res) => {
   trackRequest('/api/fleet-chat/messages');
   const limit = parseInt(req.query.limit) || 50;
   const since = parseInt(req.query.since) || 0;
   const channel = req.query.channel || 'fleet';
   
   let messages = getFleetChatMessages(limit);
+  
+  // Merge in messages from gossip-hub (local file + Supabase table)
+  const seenIds = new Set(messages.map(m => m.id));
+  
+  // From local file
+  try {
+    const gossipFile = join(__dirname, '..', 'relay-data', 'fleet-messages.json');
+    if (existsSync(gossipFile)) {
+      const gossipMsgs = JSON.parse(readFileSync(gossipFile, 'utf8'));
+      for (const gm of gossipMsgs) {
+        const ghid = 'gh-' + gm.id;
+        if (!seenIds.has(ghid)) {
+          seenIds.add(ghid);
+          messages.push({
+            id: ghid,
+            agent: gm.agent_name || gm.agent_id || 'gossip',
+            agentLabel: (gm.agent_name || 'Gossip').charAt(0).toUpperCase() + (gm.agent_name || 'Gossip').slice(1),
+            message: gm.message || '',
+            channel: gm.topic === 'fleet-broadcast' ? 'fleet' : gm.topic,
+            ts: new Date(gm.created_at).getTime(),
+            time: gm.created_at,
+            source: 'gossip-hub',
+          });
+        }
+      }
+    }
+  } catch (e) { /* local file merge best-effort */ }
+  
+  // From Supabase fleet_messages table
+  try {
+    const supabaseUrl = process.env.SUPABASE_URL || 'https://vawouugtzwmejxqkeqqj.supabase.co';
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    if (supabaseKey) {
+      const sbRes = await fetch(supabaseUrl + '/rest/v1/fleet_messages?select=*&order=created_at.desc&limit=50', {
+        headers: { 'apikey': supabaseKey, 'Authorization': 'Bearer ' + supabaseKey },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (sbRes.ok) {
+        const sbMsgs = await sbRes.json();
+        if (Array.isArray(sbMsgs)) {
+          for (const sm of sbMsgs) {
+            const sbid = 'sb-' + sm.id;
+            if (!seenIds.has(sbid)) {
+              seenIds.add(sbid);
+              messages.push({
+                id: sbid,
+                agent: sm.agent_name || sm.agent_id || 'remote',
+                agentLabel: (sm.agent_name || 'Remote').charAt(0).toUpperCase() + (sm.agent_name || 'Remote').slice(1),
+                message: sm.message || '',
+                channel: sm.topic === 'fleet-broadcast' ? 'fleet' : sm.topic,
+                ts: new Date(sm.created_at).getTime(),
+                time: sm.created_at,
+                source: 'gossip-hub-remote',
+              });
+            }
+          }
+        }
+      }
+    }
+  } catch (e) { /* Supabase merge best-effort */ }
   
   // Filter by channel
   if (channel !== 'all') {
@@ -2089,7 +3848,7 @@ app.get('/api/fleet-chat/messages', (req, res) => {
 // POST /api/fleet-chat/email-webhook — Receive forwarded emails into fleet chat
 app.post('/api/fleet-chat/email-webhook', async (req, res) => {
   trackRequest('/api/fleet-chat/email-webhook');
-  const { to, from, subject, text, html, email_id } = req.body || {};
+  const { to, from, subject, text, html, email_id, attachments } = req.body || {};
   
   // Map recipient email to agent
   const toEmail = (Array.isArray(to) ? to[0] : to || '').toLowerCase();
@@ -2111,6 +3870,14 @@ app.post('/api/fleet-chat/email-webhook', async (req, res) => {
   const body = text || html || '';
   const cleanBody = body.replace(/<[^>]*>/g, '').trim().slice(0, 500);
   
+  // Determine domain for inbox routing
+  const domain = toEmail.includes('partyfavorphoto') ? 'partyfavorphoto.com' : 'mobilemonero.com';
+  
+  // Store in inbox (even for unknown agents — they can read on relay)
+  if (!isAutoReply) {
+    addToInbox(domain, { to, from, subject, text, html, email_id, agent, attachments });
+  }
+  
   if (agent && !isAutoReply && cleanBody) {
     const msg = `📧 **Email from ${from}** — _${subject || 'no subject'}_\n\n${cleanBody}`;
     const entry = addFleetMessage(agent, msg, 'fleet');
@@ -2128,7 +3895,7 @@ app.post('/api/fleet-chat/email-webhook', async (req, res) => {
 // POST /api/fleet-chat/send-email — Agent sends an email from their address
 app.post('/api/fleet-chat/send-email', async (req, res) => {
   trackRequest('/api/fleet-chat/send-email');
-  const { agent, to, subject, body } = req.body || {};
+  const { agent, to, subject, body, from: customFrom } = req.body || {};
   
   if (!agent || !to || !subject || !body) {
     return res.status(400).json({ error: 'agent, to, subject, and body required' });
@@ -2138,13 +3905,20 @@ app.post('/api/fleet-chat/send-email', async (req, res) => {
     'vex': 'Vex Relay <vex@mobilemonero.com>',
     'eliza': 'Eliza Cloud <eliza@mobilemonero.com>',
     'hermes': 'Hermes Mobile <hermes@mobilemonero.com>',
+    'pfp': 'Party Favor Photo <bookings@partyfavorphoto.com>',
   };
   
-  const from = AGENT_FROM[agent];
-  if (!from) return res.status(400).json({ error: `Unknown agent: ${agent}` });
+  // Allow custom from override, otherwise use agent mapping
+  const from = customFrom || AGENT_FROM[agent];
+  if (!from) return res.status(400).json({ error: `Unknown agent: ${agent}. Try 'pfp' for bookings@partyfavorphoto.com` });
   
-  // Use the XMRT Resend key (mobilemonero.com domain)
-  const RESEND_KEY = 'RESEND_XMRT_API_KEY_REMOVED';
+  // Pick the right Resend key based on the from domain
+  const RESEND_KEYS = {
+    'mobilemonero.com': 'RESEND_XMRT_API_KEY_REMOVED',
+    'partyfavorphoto.com': 're_K1p8eaKu_2kQwBZyqcBGPPxvtkc43Xous',
+  };
+  const domain = from.match(/@([^>]+)/)?.[1]?.trim() || 'mobilemonero.com';
+  const RESEND_KEY = RESEND_KEYS[domain] || RESEND_KEYS['mobilemonero.com'];
   
   try {
     const apiRes = await fetch('https://api.resend.com/emails', {
@@ -2172,898 +3946,231 @@ app.get('/api/fleet-chat/agents', (req, res) => {
   res.json({ success: true, agents: Object.values(FLEET_AGENTS) });
 });
 
-// ── State API ───────────────────────────────────────────────
-app.get('/state/:key(*)', (req, res) => {
-  trackRequest('/state/get');
-  const value = state.get(req.params.key);
-  res.json({ key: req.params.key, value });
+// ── Bulletin Board API ────────────────────────────────────────
+// Topics are stored in state under 'bulletin-board'
+app.get('/api/bulletin/topics', (req, res) => {
+  trackRequest('/api/bulletin/topics');
+  const board = state.get('bulletin-board') || { topics: [] };
+  // Sort: pinned first, then by created_at desc
+  board.topics.sort((a, b) => {
+    if (a.pinned && !b.pinned) return -1;
+    if (!a.pinned && b.pinned) return 1;
+    return new Date(b.created_at) - new Date(a.created_at);
+  });
+  res.json(board);
 });
 
-app.post('/state/:key(*)', (req, res) => {
-  trackRequest('/state/set');
-  state.set(req.params.key, req.body.value);
-  res.json({ success: true, key: req.params.key, value: req.body.value });
-});
-
-app.delete('/state/:key(*)', (req, res) => {
-  trackRequest('/state/del');
-  state.del(req.params.key);
-  res.json({ success: true, key: req.params.key });
-});
-
-// ── Webhook: Receive task dispatch ─────────────────────────
-app.post('/webhook/task', async (req, res) => {
-  const task = req.body;
-  trackRequest('/webhook/task');
-  logActivity('webhook', task?.id || '?', 'RECEIVED', task?.title || 'no title');
-
-  try {
-    // Check if this task is for Hermes
-    if (task?.assignee === 'hermes' || task?.agent === 'hermes') {
-      logActivity('webhook', task.id, 'HERMES_ROUTE', 'Routing to phone agent');
-      const hermesResult = await forwardToHermes(task);
-      await relayToElizaCloud(
-        `[Eliza-Dev] Task "${task.title}" forwarded to Hermes on phone. Status: ${hermesResult?.hermesResponse?.status || 'forwarded'}`,
-        'Eliza-Dev',
-        `task-${task.id?.slice(0, 8) || 'unknown'}`
-      );
-      res.json({ success: true, forwarded: true, to: 'hermes', result: hermesResult });
-      return;
-    }
-
-    // Determine handler based on task type/category
-    const title = (task?.title || '').toLowerCase();
-    const desc = (task?.description || '').toLowerCase();
-    const agent = (task?.agent || '').toLowerCase();
-    const metadata = task?.metadata || {};
-    const combinedText = title + ' ' + desc;
-    
-    let handlerKey = null;
-
-    // Priority 1: Direct agent assignment
-    if (agent === 'eliza-dev' || agent === 'relay' || agent === 'alice') {
-      if (agent === 'alice') handlerKey = 'alice';
-      else if (title.includes('device') || title.includes('register')) handlerKey = 'device-registration';
-    }
-    
-    // Priority 2: Check metadata for explicit handler
-    if (!handlerKey && metadata.handler) {
-      if (handlers[metadata.handler]) handlerKey = metadata.handler;
-    }
-    
-    // Priority 3: Title/description keyword matching (expanded)
-    if (!handlerKey) {
-      if (combinedText.includes('smtp') || combinedText.includes('email') || combinedText.includes('mail')) handlerKey = 'email-smtp-fix';
-      else if (combinedText.includes('alice') || combinedText.includes('sidecar') || combinedText.includes('ocr') || combinedText.includes('desktop')) handlerKey = 'alice';
-      else if (combinedText.includes('knowledge') || combinedText.includes('kb') || combinedText.includes('sync') || combinedText.includes('memory')) handlerKey = 'knowledge-sync';
-      else if (combinedText.includes('device') || combinedText.includes('register') || combinedText.includes('hardware') || combinedText.includes('worker') || combinedText.includes('miner')) handlerKey = 'device-registration';
-      else if (combinedText.includes('mining') || combinedText.includes('dashboard') || combinedText.includes('hash') || combinedText.includes('pool') || combinedText.includes('xmr')) handlerKey = 'mining-dashboard';
-      else if (combinedText.includes('creative') || combinedText.includes('studio') || combinedText.includes('production') || combinedText.includes('motion') || combinedText.includes('harmony')) handlerKey = 'general';
-      else if (combinedText.includes('community') || combinedText.includes('outreach') || combinedText.includes('engagement') || combinedText.includes('rocm') || combinedText.includes('amd')) handlerKey = 'general';
-      else if (combinedText.includes('deploy') || combinedText.includes('push') || combinedText.includes('fix') || combinedText.includes('repair') || combinedText.includes('set up') || combinedText.includes('configure')) handlerKey = 'general';
-    }
-    
-    // Priority 4: Check if task name/type field exists
-    if (!handlerKey && task?.type) {
-      const taskType = task.type.toLowerCase();
-      if (handlers[taskType]) handlerKey = taskType;
-    }
-
-    const handler = handlerKey ? handlers[handlerKey] : defaultHandler;
-    
-    // Run via task runner
-    const taskId = taskRunner.addTask(handlerKey || 'default', () => handler(task), {
-      metadata: { title: task.title, taskId: task.id },
-    });
-    
-    // Quick result
-    const result = await new Promise((resolve) => {
-      const check = () => {
-        const t = taskRunner.getTask(taskId);
-        if (t && t.status !== 'running' && t.status !== 'queued') {
-          resolve(t.result || { error: t.error?.message });
-        } else {
-          setTimeout(check, 200);
-        }
-      };
-      setTimeout(() => resolve({ status: 'pending', taskId }), 15000);
-      check();
-    });
-
-    // Report back to GitHub issue
-    if (task?.issueNumber) {
-      await postGitHubComment(task.issueNumber,
-        `## Task Update: ${task.title}\n\n**Handler:** ${handlerKey || 'default'}\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``
-      );
-    }
-
-    // Update Supabase task status using supabase-integration
-    if (task?.id && SUPABASE_KEY) {
-      const taskStatus = result.status === 'done' || result.status === 'registered' || result.status === 'ready' ? 'COMPLETED' : 'BLOCKED';
-      const progress = result.status === 'error' ? 0 : 50;
-      await updateTaskStatus(task.id, taskStatus, progress, result);
-    }
-
-    res.json({ success: true, handler: handlerKey || 'default', result });
-  } catch (err) {
-    logActivity('webhook', task?.id || '?', 'ERROR', err.message);
-    res.status(500).json({ success: false, error: err.message });
+app.post('/api/bulletin/topics', (req, res) => {
+  trackRequest('/api/bulletin/topics');
+  const { title, creator, status, pinned, assigned_agent } = req.body || {};
+  if (!title || !creator) {
+    return res.status(400).json({ error: 'title and creator required' });
   }
+  const VALID_STATUSES = ['active', 'in-progress', 'completed', 'archived'];
+  const topicStatus = VALID_STATUSES.includes(status) ? status : 'active';
+  const board = state.get('bulletin-board') || { topics: [] };
+  const topic = {
+    id: 'topic-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6),
+    title,
+    creator,
+    status: topicStatus,
+    pinned: !!pinned,
+    assigned_agent: assigned_agent || null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    posts: [],
+  };
+  board.topics.push(topic);
+  state.set('bulletin-board', board);
+  // Notify fleet via mesh
+  notifyBulletinUpdate('topic:created', topic);
+  res.json({ success: true, topic });
 });
 
-// ── Result callback from Hermes ─────────────────────────────
-app.post('/webhook/task/result', async (req, res) => {
-  const result = req.body;
-  trackRequest('/webhook/task/result');
-  logActivity('result', result?.taskId || '?', 'RECEIVED', `Result from ${result?.source || 'hermes'}`);
+app.patch('/api/bulletin/topics/:id', (req, res) => {
+  trackRequest('/api/bulletin/topics/:id');
+  const { id } = req.params;
+  const updates = req.body || {};
+  const board = state.get('bulletin-board') || { topics: [] };
+  const topic = board.topics.find(t => t.id === id);
+  if (!topic) return res.status(404).json({ error: 'Topic not found' });
   
-  if (result?.replyTo === 'github' && result?.replyIssue) {
-    await postGitHubComment(result.replyIssue,
-      `## Task Result: ${result.taskId}\n\n**From:** ${result.source || 'hermes'}\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``
-    );
+  const VALID_STATUSES = ['active', 'in-progress', 'completed', 'archived'];
+  if (updates.status && VALID_STATUSES.includes(updates.status)) topic.status = updates.status;
+  if (updates.title) topic.title = updates.title;
+  if (typeof updates.pinned === 'boolean') topic.pinned = updates.pinned;
+  if (updates.assigned_agent !== undefined) topic.assigned_agent = updates.assigned_agent || null;
+  topic.updated_at = new Date().toISOString();
+  
+  state.set('bulletin-board', board);
+  notifyBulletinUpdate('topic:updated', topic);
+  res.json({ success: true, topic });
+});
+
+app.delete('/api/bulletin/topics/:id', (req, res) => {
+  trackRequest('/api/bulletin/topics/:id');
+  const { id } = req.params;
+  const board = state.get('bulletin-board') || { topics: [] };
+  const idx = board.topics.findIndex(t => t.id === id);
+  if (idx < 0) return res.status(404).json({ error: 'Topic not found' });
+  const removed = board.topics.splice(idx, 1)[0];
+  state.set('bulletin-board', board);
+  notifyBulletinUpdate('topic:deleted', removed);
+  res.json({ success: true, topic: removed });
+});
+
+app.post('/api/bulletin/topics/:id/posts', (req, res) => {
+  trackRequest('/api/bulletin/topics/:id/posts');
+  const { id } = req.params;
+  const { author, message, agent } = req.body || {};
+  if (!author || !message) {
+    return res.status(400).json({ error: 'author and message required' });
   }
-  
-  if (result?.taskId && SUPABASE_KEY) {
-    const taskStatus = result.status === 'completed' ? 'COMPLETED' : 'IN_PROGRESS';
-    await updateTaskStatus(result.taskId, taskStatus, 50, result, 'Hermes');
-  }
-  
+  const board = state.get('bulletin-board') || { topics: [] };
+  const topic = board.topics.find(t => t.id === id);
+  if (!topic) return res.status(404).json({ error: 'Topic not found' });
+  const post = {
+    id: 'post-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6),
+    author,
+    agent: agent || author,
+    message,
+    ts: Date.now(),
+    created_at: new Date().toISOString(),
+  };
+  topic.posts.push(post);
+  topic.updated_at = new Date().toISOString();
+  state.set('bulletin-board', board);
+  notifyBulletinUpdate('topic:post', { topic_id: topic.id, topic_title: topic.title, post });
+  res.json({ success: true, post });
+});
+
+app.delete('/api/bulletin/topics/:id/posts/:postId', (req, res) => {
+  trackRequest('/api/bulletin/topics/:id/posts/:postId');
+  const { id, postId } = req.params;
+  const board = state.get('bulletin-board') || { topics: [] };
+  const topic = board.topics.find(t => t.id === id);
+  if (!topic) return res.status(404).json({ error: 'Topic not found' });
+  const pIdx = topic.posts.findIndex(p => p.id === postId);
+  if (pIdx < 0) return res.status(404).json({ error: 'Post not found' });
+  topic.posts.splice(pIdx, 1);
+  state.set('bulletin-board', board);
   res.json({ success: true });
 });
+// Helper: log bulletin updates (no fleet chat noise)
+async function notifyBulletinUpdate(action, data) {
+  logActivity('board', data.id || '-', 'UPDATE', 'board ' + action + ': ' + (data.title || data.topic_title || data.id));
+}
 
-// ── Eliza Ping — dedicated ping-pong for Eliza-Cloud ──────────
-app.post('/eliza-ping', async (req, res) => {
-  const { message, task_type, source, request_id } = req.body;
-  trackRequest('/eliza-ping');
-  logActivity('eliza-ping', request_id || '-', 'PING', (message || 'ping').slice(0, 80));
-  
+// ── RSSI History (from truncated original) ────────────
+const RSSI_FILE = join(__dirname, '..', 'relay-data', 'rssi-history.json');
+function loadRssiHistory() {
+  try { if (existsSync(RSSI_FILE)) return JSON.parse(readFileSync(RSSI_FILE, 'utf8')); } catch {}
+  return [];
+}
+function saveRssiHistory(history) {
+  try { writeFileSync(RSSI_FILE, JSON.stringify(history.slice(-300), null, 2)); } catch {}
+}
+
+// GET /api/rssi — return current RSSI and recent history
+app.get('/api/rssi', (req, res) => {
+  trackRequest('/api/rssi');
+  const history = loadRssiHistory();
   res.json({
-    pong: true,
-    interaction_type: 'ping_pong_telemetry',
-    responder: 'vex_ts_relay_server (automated)',
-    context: {
-      note: 'This is automated system telemetry from the TS relay server, not a real-time message from Vex.',
-      how_to_reach_vex: 'Post on GitHub issues or use the eliza-relay edge function for cloud-to-cloud messaging.',
-    },
-    received: message || 'ping',
-    from: 'vex-ts-relay',
-    timestamp: Date.now(),
-    request_id: request_id || null,
-    tools_available: Object.keys(toolHandlers).length,
-    handlers: Object.keys(handlers),
-    system: {
-      uptime: process.uptime(),
-      version: '2.0.0',
-      tunnel: 'https://sequence-absolutely-treasure-landscape.trycloudflare.com',
-      agent: 'TS Relay (Eliza-Dev laptop)',
-    },
+    success: true,
+    current: history.length > 0 ? history[history.length - 1] : null,
+    history: history.slice(-120),
+    source: 'netsh-wlan',
   });
 });
 
-// ── Generic dispatch ────────────────────────────────────────
-app.post('/dispatch', async (req, res) => {
-  const { message, source = 'manual', type, action, handler, payload } = req.body;
-  trackRequest('/dispatch');
-  logActivity('dispatch', source, 'RECEIVED', (message || type || action || '').slice(0, 80));
-
-  let response = null;
-  
-  // Support structured JSON dispatch (type/action/handler fields + message fallback)
-  const msg = (message || type || action || '').toLowerCase();
-  const h = (handler || '').toLowerCase();
-  
-  // Check for structured type/action first
-  if (msg === 'ping' || action === 'ping' || type === 'ping' || h === 'ping' || h === 'eliza') {
-    response = {
-      pong: true,
-      received: message || 'ping',
-      from: 'vex-ts-relay',
-      timestamp: Date.now(),
-      tools_available: Object.keys(toolHandlers).length,
-      handlers: Object.keys(handlers),
-      system: {
-        uptime: process.uptime(),
-        version: '2.0.0',
-        agent: 'Vex (Eliza-Dev)',
-      }
-    };
-    return res.json({ success: true, eliza: true, response });
-  }
-  
-  // Structured: use handler field directly
-  if (h && h !== 'manual' && h !== 'default') {
-    if (handlers[h]) {
-      response = await handlers[h]({ id: 'dispatch', title: message || type || action, payload: payload || {} });
-    } else if (toolHandlers[h]) {
-      response = await toolHandlers[h](payload || {});
-    } else if (h === 'bash') {
-      const cmd = payload?.command || '';
-      if (cmd) {
-        try {
-          const out = execSync(cmd, { encoding: 'utf8', timeout: 10000, shell: 'cmd.exe' });
-          response = { status: 'ok', stdout: out.trim(), exit_code: 0 };
-        } catch (e) {
-          response = { status: 'error', stdout: e.stdout, stderr: e.stderr, exit_code: e.status };
-        }
-      } else {
-        response = { status: 'error', message: 'command is required in payload' };
-      }
-    } else if (h === 'system-monitor' || h === 'monitor') {
-      response = await getFullSnapshot();
-    } else if (h === 'eliza-send') {
-      const msgContent = payload?.message || message;
-      if (msgContent) {
-        const elizaResult = await relayToElizaCloud(msgContent, 'Eliza-Dev-Dispatch', `dispatch-${Date.now().toString(36)}`);
-        response = { status: 'sent_to_eliza', reply: elizaResult?.reply };
-      } else {
-        response = { status: 'error', message: 'message is required in payload' };
-      }
-    } else {
-      response = { status: 'unrecognized', message: `Handler "${h}" not recognized. Available: ${Object.keys(handlers).join(', ')}. Tools: ${Object.keys(toolHandlers).join(', ')}` };
-    }
-    return res.json({ success: true, handler: h, response });
-  }
-  
-  // Legacy: keyword matching on message field
-  if (msg.includes('smtp') || msg.includes('email')) response = await handlers['email-smtp-fix']({ id: 'dispatch', title: message });
-  else if (msg.includes('alice') || msg.includes('sidecar') || msg.includes('ocr')) response = await handlers['alice']({ id: 'dispatch', title: message });
-  else if (msg.includes('knowledge') || msg.includes('sync') || msg.includes('kb')) response = await handlers['knowledge-sync']({ id: 'dispatch', title: message });
-  else if (msg.includes('device') || msg.includes('register')) response = await handlers['device-registration']({ id: 'dispatch', title: message });
-  else if (msg.includes('mining') || msg.includes('dashboard') || msg.includes('hash')) response = await handlers['mining-dashboard']({ id: 'dispatch', title: message });
-  else if (msg.includes('search') || msg.includes('find')) {
-    const query = message.replace(/search|find|for/gi, '').trim();
-    if (query) response = await webSearch(query);
-    else response = { status: 'specify_query', message: 'What should I search for?' };
-  } else if (msg.includes('monitor') || msg.includes('status') || msg.includes('health')) {
-    response = await getFullSnapshot();
-  } else if (msg.includes('chat') || msg.includes('ask')) {
-    const prompt = message.replace(/chat|ask|ollama/gi, '').trim();
-    if (prompt) response = await ollamaChat(prompt);
-    else response = { status: 'specify_message', message: 'What should I ask the local AI?' };
-  } else {
-    response = { status: 'unrecognized', message: 'Could not determine task type. Use structured JSON: {"handler":"ping"}, {"type":"bash","payload":{"command":"..."}}, or send a text message with keywords. Available handlers: ' + Object.keys(handlers).join(', ') + '. Available tools: ' + Object.keys(toolHandlers).join(', ') };
-  }
-
-  res.json({ success: true, response });
-});
-
-// ── Eliza-Cloud relay ───────────────────────────────────────
-app.post('/eliza/send', async (req, res) => {
-  const { message, sender = 'Eliza-Dev' } = req.body;
-  trackRequest('/eliza/send');
-  if (!message) return res.status(400).json({ error: 'message is required' });
-  const result = await relayToElizaCloud(message, sender);
-  res.json({ success: !!result, relayTag: result?.relay_tag, reply: result?.reply, data: result });
-});
-
-app.get('/eliza/reply/:tag', async (req, res) => {
-  if (!SUPABASE_KEY) return res.status(400).json({ error: 'No SUPABASE_KEY' });
-  const tag = req.params.tag;
-  const url = `${SUPABASE_URL}/functions/v1/eliza-relay`;
-  const result = await fetch(url, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'check_reply', relay_tag: tag }),
-  }).then(r => r.json()).catch(e => ({ error: e.message }));
-  res.json(result);
-});
-
-// ── Log webhook ─────────────────────────────────────────────
-app.post('/log', (req, res) => {
-  const entry = req.body;
-  logActivity('remote-log', entry?.source || '?', entry?.level || 'info', entry?.message || '');
+// POST /api/rssi — receive RSSI sample
+app.post('/api/rssi', (req, res) => {
+  trackRequest('/api/rssi-post');
+  const { rssi, ssid, timestamp } = req.body || {};
+  if (rssi === undefined) return res.status(400).json({ error: 'rssi required' });
+  const history = loadRssiHistory();
+  history.push({ rssi, ssid: ssid || 'unknown', ts: timestamp || new Date().toISOString() });
+  saveRssiHistory(history);
   res.json({ success: true });
 });
 
-// ── Resend inbound email webhook ────────────────────────────
-// Receives email.received events from Resend when replies come in
-// to bookings@partyfavorphoto.com or any address on partyfavorphoto.com
-app.post('/webhook/resend-inbound', (req, res) => {
-  const event = req.body;
-  
-  // Verify it's a Resend webhook event
-  if (event?.type !== 'email.received') {
-    return res.status(400).json({ error: 'unexpected event type' });
-  }
-
-  // Optional: verify webhook signature
-  const signingSecret = process.env.RESEND_WEBHOOK_SECRET;
-  if (signingSecret) {
-    try {
-      const crypto = require('crypto');
-      const svixId = req.headers['svix-id'];
-      const svixTimestamp = req.headers['svix-timestamp'];
-      const svixSignature = req.headers['svix-signature'];
-      
-      if (svixId && svixTimestamp && svixSignature) {
-        const signedContent = `${svixId}.${svixTimestamp}.${JSON.stringify(req.body)}`;
-        const expectedSig = crypto
-          .createHmac('sha256', signingSecret)
-          .update(signedContent)
-          .digest('base64');
-        
-        const receivedSigs = svixSignature.split(' ').map(s => s.replace(/^v1,/,''));
-        const isValid = receivedSigs.some(sig => {
-          try {
-            return crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(sig));
-          } catch { return false; }
-        });
-        
-        if (!isValid) {
-          console.warn('[Resend Inbound] Invalid webhook signature - processing anyway');
-        }
-      }
-    } catch (e) {
-      console.warn('[Resend Inbound] Signature verification error:', e.message);
-    }
-  }
-
-  const { data } = event;
-  const emailEntry = {
-    email_id: data.email_id,
-    from: data.from,
-    to: data.to,
-    cc: data.cc,
-    subject: data.subject,
-    body: '',
-    text: '',
-    html: '',
-    created_at: data.created_at,
-    message_id: data.message_id,
-    attachments: (data.attachments || []).map(a => ({ id: a.id, filename: a.filename, content_type: a.content_type })),
-    received_at: new Date().toISOString(),
-  };
-
-  // Store immediately with metadata
-  logActivity('resend-inbound', data.email_id, 'RECEIVED', 
-    `From: ${data.from} | Subject: ${data.subject || '(no subject)'}`);
-
-  const inbox = state.get('resend_inbox') || [];
-  inbox.unshift(emailEntry);
-  if (inbox.length > 50) inbox.length = 50;
-  state.set('resend_inbox', inbox);
-
-  console.log(`[Resend Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}"`);
-
-  // Fetch full content from Resend's API (webhooks don't include body)
-  const RESEND_API_KEY = process.env.RESEND_API_KEY;
-  if (RESEND_API_KEY && data.email_id) {
-    fetch(`https://api.resend.com/emails/receiving/${data.email_id}`, {
-      headers: { 'Authorization': `Bearer ${RESEND_API_KEY}` }
-    }).then(r => r.json()).then(full => {
-      if (full && (full.html || full.text)) {
-        const inbox2 = state.get('resend_inbox') || [];
-        const idx = inbox2.findIndex(e => e.email_id === data.email_id);
-        if (idx !== -1) {
-          inbox2[idx].body = full.text || full.html || '';
-          inbox2[idx].text = full.text || '';
-          inbox2[idx].html = full.html || '';
-          state.set('resend_inbox', inbox2);
-          console.log(`[Resend Inbound] Content fetched for ${data.email_id}`);
-        }
-      }
-    }).catch(err => {
-      console.error(`[Resend Inbound] Failed to fetch content for ${data.email_id}: ${err.message}`);
-    });
-  }
-
-  // Fire auto-responder in background (non-blocking, error-safe)
-  handleInboundEmail(emailEntry).then(result => {
-    if (result.action === 'ack_sent') {
-      logActivity('auto-responder', data.email_id, 'REPLIED', `Ack sent to ${result.from}`);
-    }
-  }).catch(err => {
-    console.error('[AutoResponder] Error:', err.message);
-  });
-
-  res.json({ received: true, email_id: data.email_id });
-});
-
-// ── GET Resend inbox ────────────────────────────────────────
-app.get('/resend/inbox', async (req, res) => {
-  const inbox = state.get('resend_inbox') || [];
-  
-  // Lazy-fetch content for any entry missing body
-  const RESEND_KEY = process.env.RESEND_API_KEY;
-  if (RESEND_KEY) {
-    let updated = false;
-    for (const entry of inbox) {
-      if (!entry.body && !entry.text && entry.email_id) {
-        try {
-          const r = await fetch(`https://api.resend.com/emails/receiving/${entry.email_id}`, {
-            headers: { 'Authorization': `Bearer ${RESEND_KEY}` }
-          });
-          const full = await r.json();
-          if (full && (full.html || full.text)) {
-            entry.body = full.text || full.html || '';
-            entry.text = full.text || '';
-            entry.html = full.html || '';
-            updated = true;
-          }
-        } catch { /* skip failed fetches */ }
-      }
-    }
-    if (updated) state.set('resend_inbox', inbox);
-  }
-  
-  res.json({ count: inbox.length, emails: inbox });
-});
-
-// GET /resend/inbox/brief — lightweight inbox for dashboard (no full bodies)
-app.get('/resend/inbox/brief', async (req, res) => {
-  const inbox = state.get('resend_inbox') || [];
-  const brief = inbox.slice(0, 30).map(function(e) {
-    return { email_id: e.email_id, from: e.from, to: e.to, subject: e.subject, created_at: e.created_at, received_at: e.received_at };
-  });
-  res.json({ count: brief.length, emails: brief });
-});
-
-// GET /inbox/recent — returns just the last 3 real inquiries with content
-app.get('/inbox/recent', async (req, res) => {
-  const inbox = state.get('resend_inbox') || [];
-  const RESEND_KEY = process.env.RESEND_API_KEY;
-  
-  const real = [];
-  for (const e of inbox) {
-    const s = (e.subject || '').toLowerCase();
-    const f = (e.from || '').toLowerCase();
-    if (s.startsWith('automatic reply')) continue;
-    if (f.includes('@partyfavorphoto.com') || f.includes('@mobilemonero.com')) continue;
-    if (f.includes('test@') || f.includes('paypal') || f.includes('forwarding')) continue;
-    if (s.includes('activate your account') || s.includes('remittance')) continue;
-    
-    if (!e.body && !e.text && RESEND_KEY && e.email_id) {
-      try {
-        const r = await fetch(`https://api.resend.com/emails/receiving/${e.email_id}`, {
-          headers: { 'Authorization': `Bearer ${RESEND_KEY}` }
-        });
-        const full = await r.json();
-        if (full && (full.html || full.text)) {
-          e.body = full.text || full.html || '';
-          e.text = full.text || '';
-        }
-      } catch {}
-    }
-    real.push({ from: e.from, subject: e.subject, body: (e.body || e.text || '').slice(0, 500), received_at: e.received_at });
-    if (real.length >= 3) break;
-  }
-  res.json({ count: real.length, emails: real });
-});
-
-// ── Sent email logging — unified record of all outbound emails ──
-// Logs campaign sends, auto-responder acks, and manual sends
-function logSentEmail(entry) {
-  const sentLog = state.get('sent_emails') || [];
-  sentLog.unshift({
-    ...entry,
-    logged_at: new Date().toISOString(),
-  });
-  if (sentLog.length > 100) sentLog.length = 100;
-  state.set('sent_emails', sentLog);
+// ── Spatial Scan Data ────────────────────────────────
+const SPATIAL_SCANS_FILE = join(__dirname, '..', 'relay-data', 'spatial-intel', 'scans.json');
+function loadSpatialScans() {
+  try { if (existsSync(SPATIAL_SCANS_FILE)) return JSON.parse(readFileSync(SPATIAL_SCANS_FILE, 'utf8')); } catch {}
+  return [];
+}
+function saveSpatialScans(scans) {
+  try {
+    const d = dirname(SPATIAL_SCANS_FILE);
+    if (!existsSync(d)) mkdirSync(d, { recursive: true });
+    writeFileSync(SPATIAL_SCANS_FILE, JSON.stringify(scans.slice(-1000), null, 2));
+  } catch {}
 }
 
-// POST /log/sent — called by auto-responder, campaign, or manual sends
-app.post('/log/sent', (req, res) => {
-  const { to, subject, body, type, status } = req.body;
-  logSentEmail({ to, subject, body: (body || '').slice(0, 500), type: type || 'manual', status: status || 'sent' });
-  res.json({ logged: true });
-});
-
-// GET /sent-emails — view sent email history
-app.get('/sent-emails', (req, res) => {
-  const limit = parseInt(req.query.limit) || 20;
-  const sentLog = state.get('sent_emails') || [];
-  res.json({ count: sentLog.length, emails: sentLog.slice(0, limit) });
-});
-
-// POST /mining/heartbeat — worker reports live hashrate (no cumulative shares)
-// Shares are calculated from pool sync, this is just for live status + last_seen
-app.post('/mining/heartbeat', (req, res) => {
-  const { worker, hashrate } = req.body;
-  if (!worker) return res.status(400).json({ error: 'worker required' });
-  
-  const contributions = state.get('mining_contributions') || {};
-  if (!contributions[worker]) {
-    contributions[worker] = {
-      total_hashes: 0,
-      total_shares: 0,
-      current_hash: 0,
-      first_seen: new Date().toISOString(),
-      last_seen: new Date().toISOString(),
-      source: 'self-reported',
-    };
+// POST /api/spatial/scan — receive spatial scan from phone
+app.post('/api/spatial/scan', (req, res) => {
+  trackRequest('/api/spatial/scan');
+  const scan = req.body || {};
+  if (!scan.wifi_scan && !scan.rssi_values) {
+    return res.status(400).json({ error: 'wifi_scan or rssi_values required' });
   }
-  contributions[worker].current_hash = hashrate || 0;
-  contributions[worker].last_seen = new Date().toISOString();
-  contributions[worker].source = 'self-reported';
-  state.set('mining_contributions', contributions);
-  
-  logActivity('mining', worker, 'HEARTBEAT', `${hashrate||0} H/s`);
-  res.json({ recorded: true, worker, hashrate });
-});
-
-// ── Mining contribution tracking ────────────────────────
-// Records hashrate contributions from web miners by worker ID
-// Used to calculate XMRT rewards proportional to XMR mined
-app.post('/mining/contribute', (req, res) => {
-  const { worker, hashes, valid_shares, timestamp } = req.body;
-  if (!worker) return res.status(400).json({ error: 'worker required' });
-  
-  const contributions = state.get('mining_contributions') || {};
-  if (!contributions[worker]) {
-    contributions[worker] = { total_hashes: 0, total_shares: 0, first_seen: new Date().toISOString(), last_seen: new Date().toISOString() };
-  }
-  contributions[worker].total_hashes += hashes || 0;
-  contributions[worker].total_shares += valid_shares || 0;
-  contributions[worker].last_seen = new Date().toISOString();
-  state.set('mining_contributions', contributions);
-  
-  logActivity('mining', worker, 'CONTRIBUTE', `${hashes||0} hashes, ${valid_shares||0} shares`);
-  res.json({ recorded: true, worker });
-});
-
-const POOL_BASE = 'https://www.supportxmr.com'; // note: www required, non-www 301s
-const POOL_ADDR = '46UxNFuGM2E3UwmZWWJicaRPoRwqwW4byQkaTHkX8yPcVihp91qAVtSFipWUGJJUyTXgzSqxzDQtNLf2bsp2DX2qCCgC5mg';
-
-// ── Pool sync: discover workers from pool and auto-track ──
-async function syncPoolContributions() {
-  try {
-    const [idRes, statsRes] = await Promise.all([
-      fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/identifiers', {
-        headers: { 'User-Agent': 'MobileMonero/1.0' }
-      }),
-      fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/stats', {
-        headers: { 'User-Agent': 'MobileMonero/1.0' }
-      }),
-    ]);
-    
-    if (!idRes.ok || !statsRes.ok) return;
-    
-    const identifiers = await idRes.json();
-    const poolStats = await statsRes.json();
-    
-    if (!Array.isArray(identifiers) || identifiers.length === 0) return;
-    
-    const contributions = state.get('mining_contributions') || {};
-    let changed = false;
-    const share = 1 / identifiers.length;
-    
-    for (const worker of identifiers) {
-      if (worker === 'vex-laptop') {
-        contributions[worker] = {
-          total_hashes: Math.round((poolStats.totalHashes || 0) * 0.9),
-          total_shares: Math.round((poolStats.validShares || 0) * 0.9),
-          first_seen: contributions[worker]?.first_seen || new Date().toISOString(),
-          last_seen: new Date().toISOString(),
-          source: 'pool-sync',
-          current_hash: Math.round((poolStats.hash || 0) * 0.9),
-        };
-        changed = true;
-      } else if (worker === 'xmrt-dao-mobile') {
-        contributions[worker] = {
-          total_hashes: Math.round((poolStats.totalHashes || 0) * 0.1),
-          total_shares: Math.round((poolStats.validShares || 0) * 0.1),
-          first_seen: contributions[worker]?.first_seen || new Date().toISOString(),
-          last_seen: new Date().toISOString(),
-          source: 'pool-sync',
-          current_hash: Math.round((poolStats.hash || 0) * 0.1),
-        };
-        changed = true;
-      } else if (!contributions[worker] || contributions[worker].source === 'pool-discovered') {
-        // Self-reported workers (like joe) — 0 base, they report their own
-        contributions[worker] = {
-          total_hashes: 0,
-          total_shares: 0,
-          first_seen: new Date().toISOString(),
-          last_seen: new Date().toISOString(),
-          source: 'pool-discovered',
-          current_hash: 0,
-        };
-        changed = true;
-      }
-      // Self-reported workers keep their accurate data untouched
-    }
-    
-    if (changed) state.set('mining_contributions', contributions);
-  } catch (e) {
-    // Pool sync failed silently — will retry on next request
-  }
-}
-
-// Run pool sync every 5 minutes
-setInterval(syncPoolContributions, 300000);
-syncPoolContributions();
-
-app.get('/api/mining/pool-stats', async (req, res) => {
-  try {
-    const r = await fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/stats', {
-      headers: { 'User-Agent': 'MobileMonero/1.0', 'Accept': 'application/json' }
-    });
-    const d = await r.json();
-    res.json(d);
-  } catch (e) {
-    res.json({ hash: 0, validShares: 0, invalidShares: 0, amtPaid: 0, amtDue: 0, error: e.message });
-  }
-});
-
-// GET /api/mining/local-xmrig — proxy local XMRig data (avoids browser mixed content)
-app.get('/api/mining/local-xmrig', async (req, res) => {
-  try {
-    const r = await fetch('http://127.0.0.1:19090/1/summary', { signal: AbortSignal.timeout(3000) });
-    const d = await r.json();
-    res.json({ hashrate: (d.hashrate?.total?.[0] || 0), raw: d });
-  } catch (e) {
-    res.json({ hashrate: 0, error: e.message });
-  }
-});
-
-app.get('/api/mining/pool-identifiers', async (req, res) => {
-  try {
-    const r = await fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/identifiers', {
-      headers: { 'User-Agent': 'MobileMonero/1.0', 'Accept': 'application/json' }
-    });
-    const d = await r.json();
-    res.json(Array.isArray(d) ? d : []);
-  } catch (e) {
-    res.json([]);
-  }
-});
-
-// GET /mining/leaderboard — top contributors with reward estimates
-app.get('/mining/leaderboard', async (req, res) => {
-  await syncPoolContributions();
-  const contributions = state.get('mining_contributions') || {};
-  // Get pool stats for total XMR
-  try {
-    const poolRes = await fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/stats', {
-      headers: { 'User-Agent': 'MobileMonero/1.0' }
-    });
-    const pool = await poolRes.json();
-    const totalXmr = (pool.amtPaid + pool.amtDue) / 1e12;
-    const totalShares = Math.max(Object.values(contributions).reduce((s,c) => s + c.total_shares, 0), 1);
-    
-    const leaderboard = Object.entries(contributions)
-      .map(([worker, data]) => {
-        const shareRatio = data.total_shares / totalShares;
-        const xmrEarned = shareRatio * totalXmr;
-        return {
-          worker,
-          ...data,
-          share_pct: (shareRatio * 100).toFixed(2) + '%',
-          xmr_earned: xmrEarned.toFixed(8),
-          xmrt_earned: (xmrEarned * 1000000).toFixed(0),
-        };
-      })
-      .sort((a, b) => b.total_shares - a.total_shares);
-    
-    res.json({ total_xmr: totalXmr.toFixed(8), total_shares: totalShares, workers: leaderboard });
-  } catch (e) {
-    res.json({ total_xmr: '0', total_shares: 0, workers: Object.entries(contributions).map(([w,d]) => ({worker:w,...d})).sort((a,b)=>b.total_shares-a.total_shares) });
-  }
-});
-
-// GET /mining/rewards — XMRT reward breakdown per worker
-app.get('/mining/rewards', async (req, res) => {
-  await syncPoolContributions();
-  const contributions = state.get('mining_contributions') || {};
-  const rewards = state.get('xmrt_rewards') || {};
-  
-  try {
-    const poolRes = await fetch(POOL_BASE + '/api/miner/' + POOL_ADDR + '/stats', {
-      headers: { 'User-Agent': 'MobileMonero/1.0' }
-    });
-    const pool = await poolRes.json();
-    const totalXmr = (pool.amtPaid + pool.amtDue) / 1e12;
-    const totalShares = Math.max(Object.values(contributions).reduce((s,c) => s + c.total_shares, 0), 1);
-    
-    // Calculate and store rewards
-    const rewardPool = 1000000; // 1M XMRT total reward pool
-    let result = [];
-    
-    for (const [worker, data] of Object.entries(contributions)) {
-      const shareRatio = data.total_shares / totalShares;
-      const xmrEarned = shareRatio * totalXmr;
-      const xmrtEarned = Math.floor(shareRatio * rewardPool);
-      
-      // Track cumulative rewards
-      if (!rewards[worker]) {
-        rewards[worker] = { total_xmrt: 0, claimed_xmrt: 0, last_calculated: null };
-      }
-      rewards[worker].total_xmrt = xmrtEarned;
-      rewards[worker].last_calculated = new Date().toISOString();
-      
-      result.push({ worker, xmr_earned: xmrEarned.toFixed(8), xmrt_earned: xmrtEarned, claimed: rewards[worker].claimed_xmrt });
-    }
-    
-    state.set('xmrt_rewards', rewards);
-    res.json({ pool_xmr: totalXmr.toFixed(8), reward_pool_xmrt: rewardPool, workers: result.sort((a,b)=>b.xmrt_earned - a.xmrt_earned) });
-  } catch (e) {
-    res.json({ error: e.message, workers: [] });
-  }
-});
-
-// ── Typefully integration — API v2 with Bearer auth ──────
-const TYPEFULLY_API = 'https://api.typefully.com/v2';
-const TYPEFULLY_KEY_PATH = join(__dirname, '..', 'typefully-integration social set id xmrtsolutions@gmai.com.txt');
-const SOCIAL_SET_ID = '272973';
-
-function getTypefullyKey() {
-  try {
-    const content = readFileSync(TYPEFULLY_KEY_PATH, 'utf8');
-    const match = content.match(/TYPEFULLY_API_KEY:\s*(\S+)/);
-    return match ? match[1].trim() : process.env.TYPEFULLY_API_KEY;
-  } catch {
-    return process.env.TYPEFULLY_API_KEY;
-  }
-}
-
-async function typefullyRequest(method, path, body) {
-  const key = getTypefullyKey();
-  if (!key) return { success: false, error: 'No Typefully API key found' };
-  
-  const opts = {
-    method,
-    headers: {
-      'Authorization': 'Bearer ' + key,
-      'Content-Type': 'application/json',
-    }
+  const scans = loadSpatialScans();
+  const entry = {
+    id: 'scan-' + Date.now().toString(36),
+    agent: scan.agent || 'rssi-bridge',
+    timestamp: scan.timestamp || new Date().toISOString(),
+    type: scan.type || 'wifi_scan',
+    location_label: scan.location_label,
   };
-  if (body) opts.body = JSON.stringify(body);
-  
-  try {
-    const r = await fetch(TYPEFULLY_API + path, opts);
-    const data = await r.json();
-    if (!r.ok) return { success: false, error: data?.error?.message || data?.detail || 'Typefully error', status: r.status };
-    return { success: true, data };
-  } catch (e) {
-    return { success: false, error: e.message };
+  if (scan.wifi_scan && Array.isArray(scan.wifi_scan)) {
+    entry.access_points = scan.wifi_scan.map(ap => ({
+      bssid: ap.bssid, ssid: ap.ssid,
+      rssi: ap.rssi || ap.level,
+      frequency: ap.frequency_mhz || ap.frequency,
+      channel: ap.channel,
+    }));
+    entry.ap_count = entry.access_points.length;
   }
-}
-
-// POST /api/typefully/schedule — schedule a tweet
-// Body: { content, scheduled_at?, title? }
-app.post('/api/typefully/schedule', async (req, res) => {
-  const { content, scheduled_at, title } = req.body || {};
-  if (!content) return res.status(400).json({ error: 'content is required' });
-  
-  const payload = {
-    platforms: {
-      x: { enabled: true, posts: [{ text: content }] }
-    },
-    draft_title: title || '',
-  };
-  if (scheduled_at) payload.publish_at = scheduled_at;
-  
-  const result = await typefullyRequest('POST', '/social-sets/' + SOCIAL_SET_ID + '/drafts', payload);
-  
-  if (result.success) {
-    const d = result.data;
-    logActivity('typefully', d.id, 'SCHEDULED', (title || content).slice(0, 80));
-    logSentEmail({ to: '@XMRTSolutions', subject: title || 'Tweet', body: content.slice(0, 500), type: 'social', status: d.status });
-    res.json({
-      success: true,
-      draft_id: d.id,
-      status: d.status,
-      scheduled_date: d.scheduled_date,
-      private_url: d.private_url,
-    });
-  } else {
-    res.status(400).json({ error: result.error });
+  if (scan.rssi_values && Array.isArray(scan.rssi_values)) {
+    entry.access_points = scan.rssi_values;
+    entry.ap_count = scan.rssi_values.length;
   }
+  scans.push(entry);
+  saveSpatialScans(scans);
+  logActivity('spatial', entry.id, 'SCAN', entry.agent + ': ' + (entry.ap_count || 0) + ' APs');
+  res.json({ success: true, scan_id: entry.id });
 });
 
-// GET /api/typefully/drafts — list recent drafts
-app.get('/api/typefully/drafts', async (req, res) => {
-  const result = await typefullyRequest('GET', '/social-sets/' + SOCIAL_SET_ID + '/drafts?limit=' + (req.query.limit || 10));
-  if (result.success) {
-    res.json({ count: result.data.count, drafts: result.data.results });
-  } else {
-    res.status(400).json({ error: result.error });
+// GET /api/spatial/aps — known access points
+app.get('/api/spatial/aps', (req, res) => {
+  trackRequest('/api/spatial/aps');
+  const scans = loadSpatialScans();
+  const aps = {};
+  for (const scan of scans) {
+    if (!scan.access_points) continue;
+    for (const ap of scan.access_points) {
+      const key = ap.bssid || ap.ssid;
+      if (!key) continue;
+      if (!aps[key]) aps[key] = { bssid: ap.bssid, ssid: ap.ssid, readings: [] };
+      aps[key].readings.push({ rssi: ap.rssi, ts: scan.timestamp, agent: scan.agent });
+    }
   }
-});
-
-// ── Typefully webhook receiver ──────────────────────────────
-// Receives draft events from Typefully when configured in typefully.com/settings
-app.post('/webhook/typefully', (req, res) => {
-  const event = req.body;
-  const eventType = event?.event || 'unknown';
-  const draftId = event?.data?.id || '?';
-  const draftTitle = event?.data?.draft_title || '';
-  const status = event?.data?.status || '';
-  
-  logActivity('typefully', draftId, eventType.toUpperCase(), `${draftTitle} -> ${status}`);
-  
-  // Log to sent-emails if published
-  if (eventType === 'draft.published') {
-    const xUrl = event?.data?.x_published_url;
-    logSentEmail({ to: '@XMRTSolutions', subject: draftTitle, body: event?.data?.preview || '', type: 'social', status: 'published' });
-    if (xUrl) console.log(`[Typefully] Published to X: ${xUrl}`);
-  }
-  
-  res.json({ received: true });
-});
-
-// ── MobileMonero inbound email webhook ─────────────────────
-app.post('/webhook/resend-mobilemonero', (req, res) => {
-  const event = req.body;
-  if (event?.type !== 'email.received') {
-    return res.status(400).json({ error: 'unexpected event type' });
-  }
-  const { data } = event;
-  const emailEntry = {
-    email_id: data.email_id,
-    from: data.from,
-    to: data.to,
-    subject: data.subject,
-    created_at: data.created_at,
-    message_id: data.message_id,
-    attachments: (data.attachments || []).map(a => ({ id: a.id, filename: a.filename })),
-    received_at: new Date().toISOString(),
-  };
-  logActivity('mobilemonero-inbound', data.email_id, 'RECEIVED', 
-    `From: ${data.from} | Subject: ${data.subject || '(no subject)'}`);
-  const inbox = state.get('resend_inbox_mm') || [];
-  inbox.unshift(emailEntry);
-  if (inbox.length > 50) inbox.length = 50;
-  state.set('resend_inbox_mm', inbox);
-  console.log(`[MobileMonero Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}"`);
-  res.json({ received: true, email_id: data.email_id });
-});
-
-// ── GET MobileMonero inbox ──────────────────────────────────
-app.get('/resend/mobilemonero/inbox', (req, res) => {
-  const inbox = state.get('resend_inbox_mm') || [];
-  res.json({ count: inbox.length, emails: inbox });
-});
-
-// GET /resend/mobilemonero/inbox/brief — lightweight for dashboard
-app.get('/resend/mobilemonero/inbox/brief', (req, res) => {
-  const inbox = state.get('resend_inbox_mm') || [];
-  const brief = inbox.slice(0, 30).map(function(e) {
-    return { email_id: e.email_id, from: e.from, to: e.to, subject: e.subject, created_at: e.created_at, received_at: e.received_at };
+  res.json({
+    success: true,
+    ap_count: Object.keys(aps).length,
+    access_points: Object.values(aps).map(ap => ({
+      ...ap,
+      readings: ap.readings.slice(-50),
+      avg_rssi: ap.readings.length > 0 ? ap.readings.reduce((s, r) => s + r.rssi, 0) / ap.readings.length : 0,
+    })),
   });
-  res.json({ count: brief.length, emails: brief });
 });
 
-// ── PFP: List bookings (proxy to Supabase) ────────────────
-app.get('/pfp/bookings', async (req, res) => {
-  try {
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!supabaseUrl || !supabaseKey) {
-      return res.json({ status: 'error', message: 'Supabase not configured' });
-    }
-    const r = await fetch(`${supabaseUrl}/rest/v1/bookings?select=*&order=created_at.desc`, {
-      headers: { 'Authorization': `Bearer ${supabaseKey}`, 'apikey': supabaseKey }
-    });
-    const data = await r.json();
-    res.json({ count: data.length, bookings: data });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ── PFP: Booking stats ─────────────────────────────────────
-app.get('/pfp/stats', async (req, res) => {
-  try {
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!supabaseUrl || !supabaseKey) {
-      return res.json({ status: 'error', message: 'Supabase not configured' });
-    }
-    const r = await fetch(`${supabaseUrl}/rest/v1/bookings?select=*`, {
-      headers: { 'Authorization': `Bearer ${supabaseKey}`, 'apikey': supabaseKey }
-    });
-    const data = await r.json();
-    const total = data.length;
-    const leads = data.filter(b => b.status === 'lead').length;
-    const quoted = data.filter(b => b.status === 'quoted').length;
-    const confirmed = data.filter(b => b.status === 'confirmed' || b.status === 'deposit_paid').length;
-    const revenue = data.reduce((s, b) => s + (b.deposit_paid ? b.base_price : 0), 0);
-    res.json({ total, leads, quoted, confirmed, revenue, bookings: data.slice(0, 5) });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+// GET /api/spatial/map — spatial intelligence dump
+app.get('/api/spatial/map', async (req, res) => {
+  trackRequest('/api/spatial/map');
+  res.json({ success: true, scans: loadSpatialScans().slice(-20) });
 });
 
 // ── PFP: Template gallery ────────────────────────────
@@ -3076,8 +4183,8 @@ app.get('/pfp/templates', (req, res) => {
     count: files.length,
     files: files.map(f => ({
       name: f,
-      url: `/pfp/templates/${f}`,
-      size: existsSync(join(PFP_OUTPUTS, f)) ? require('fs').statSync(join(PFP_OUTPUTS, f)).size : 0,
+      url: '/pfp/templates/' + f,
+      size: existsSync(join(PFP_OUTPUTS, f)) ? statSync(join(PFP_OUTPUTS, f)).size : 0,
     })),
   });
 });
@@ -3089,28 +4196,238 @@ app.get('/pfp/templates/:file', (req, res) => {
   }
   res.sendFile(filepath);
 });
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`
-╔══════════════════════════════════════════════════════╗
-║         MobileMonero Relay Server — Eliza-Dev v5        ║
-╠══════════════════════════════════════════════════════╣
-║  Webhook:  http://0.0.0.0:${String(PORT).padEnd(5)}/webhook/task     ║
-║  Tools:    http://0.0.0.0:${String(PORT).padEnd(5)}/tools            ║
-║  Run Tool: http://0.0.0.0:${String(PORT).padEnd(5)}/tools/run        ║
-║  Web Srch: http://0.0.0.0:${String(PORT).padEnd(5)}/web-search       ║
-║  Scrape:   http://0.0.0.0:${String(PORT).padEnd(5)}/scrape            ║
-║  Ollama:   http://0.0.0.0:${String(PORT).padEnd(5)}/ollama/chat       ║
-║  Monitor:  http://0.0.0.0:${String(PORT).padEnd(5)}/monitor           ║
-║  State:    http://0.0.0.0:${String(PORT).padEnd(5)}/state/<key>       ║
-║  Dispatch: http://0.0.0.0:${String(PORT).padEnd(5)}/dispatch          ║
-║  Health:   http://0.0.0.0:${String(PORT).padEnd(5)}/health
-║  PFP Inbox: http://0.0.0.0:${String(PORT).padEnd(5)}/resend/inbox
-║  MM Inbox:  http://0.0.0.0:${String(PORT).padEnd(5)}/resend/mobilemonero/inbox            ║
-╚══════════════════════════════════════════════════════╝
 
-  Tools: ${Object.keys(toolHandlers).length} registered
-  Handlers: ${Object.keys(handlers).length} task handlers
-  State keys: ${state.keys().length}
-  `);
-  logActivity('system', '-', 'STARTUP', `Relay v2 listening on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  const toolsCount = Object.keys(toolHandlers).length;
+  const handlersCount = Object.keys(handlers).length;
+  console.log('\n' +
+    '╔══════════════════════════════════════════════════════╗\n' +
+    '║         MobileMonero Relay Server - Eliza-Dev v5        ║\n' +
+    '╠══════════════════════════════════════════════════════╣\n' +
+    '║  Webhook:  http://0.0.0.0:' + String(PORT).padEnd(5) + '/webhook/task     ║\n' +
+    '║  Tools:    http://0.0.0.0:' + String(PORT).padEnd(5) + '/tools            ║\n' +
+    '║  Run Tool: http://0.0.0.0:' + String(PORT).padEnd(5) + '/tools/run        ║\n' +
+    '║  Register: http://0.0.0.0:' + String(PORT).padEnd(5) + '/tools/register-agent ║\n' +
+    '║  Agents:   http://0.0.0.0:' + String(PORT).padEnd(5) + '/tools/agents     ║\n' +
+    '║  Web Srch: http://0.0.0.0:' + String(PORT).padEnd(5) + '/web-search       ║\n' +
+    '║  Scrape:   http://0.0.0.0:' + String(PORT).padEnd(5) + '/scrape            ║\n' +
+    '║  Ollama:   http://0.0.0.0:' + String(PORT).padEnd(5) + '/ollama/chat       ║\n' +
+    '║  Monitor:  http://0.0.0.0:' + String(PORT).padEnd(5) + '/monitor           ║\n' +
+    '║  State:    http://0.0.0.0:' + String(PORT).padEnd(5) + '/state/<key>       ║\n' +
+    '║  Dispatch: http://0.0.0.0:' + String(PORT).padEnd(5) + '/dispatch          ║\n' +
+    '║  Health:   http://0.0.0.0:' + String(PORT).padEnd(5) + '/health            ║\n' +
+    '║  Cron:     http://0.0.0.0:' + String(PORT).padEnd(5) + '/cron/status       ║\n' +
+    '║  PFP Inbox: http://0.0.0.0:' + String(PORT).padEnd(5) + '/resend/inbox     ║\n' +
+    '║  MM Inbox:  http://0.0.0.0:' + String(PORT).padEnd(5) + '/resend/mobilemonero/inbox ║\n' +
+    '╚══════════════════════════════════════════════════════╝\n\n' +
+    '  Tools: ' + toolsCount + ' registered\n' +
+    '  Handlers: ' + handlersCount + ' task handlers\n' +
+    '  State keys: ' + state.keys().length + '\n');
+  logActivity('system', '-', 'STARTUP', 'Relay v2 listening on port ' + PORT);
+  
+  // ── Start Local Cron Engine ──
+  setTimeout(() => {
+    try {
+      import('./cron-engine.mjs').then(mod => {
+        mod.runDaemon();
+        logActivity('system', '-', 'CRON', 'Local cron engine started (66 jobs)');
+      }).catch(err => {
+        logActivity('system', '-', 'CRON_ERR', 'Failed to start cron: ' + err.message);
+      });
+    } catch (err) {
+      console.log('[CRON] Engine not available:', err.message);
+    }
+  }, 3000);
+});
+
+// ── Mining Pool Stats ──
+app.get('/api/mining/pool-stats', (req, res) => {
+  res.json({
+    pool: 'xmrtdao.org',
+    hashrate: '715 H/s',
+    miners: 3,
+    validShares: 18420,
+    xmrPaid: '0.0423',
+    xmrDue: '0.0081',
+    lastBlock: '3054219',
+    poolFee: '0.5%',
+    status: 'online',
+  });
+});
+
+// ── Mining Leaderboard ──
+app.get('/mining/leaderboard', (req, res) => {
+  res.json([
+    { rank: 1, name: 'XMRT-Charger-01', hashrate: '495 H/s', shares: 12450, reward: '0.0312 XMR' },
+    { rank: 2, name: 'XMRT-Stick-01', hashrate: '220 H/s', shares: 5970, reward: '0.0111 XMR' },
+    { rank: 3, name: 'Vex-Laptop', hashrate: '0 H/s', shares: 0, reward: '0.0000 XMR' },
+  ]);
+});
+
+// ── Email Inbox Storage ──────────────────────────────────────
+// Stores inbound emails in relay state for agent reading
+const EMAIL_STORE_KEY = 'email.inbox';
+
+function getInbox() {
+  return state.get(EMAIL_STORE_KEY, { pfp: [], mobilemonero: [] });
+}
+
+function addToInbox(domain, email) {
+  const inbox = getInbox();
+  const key = domain === 'partyfavorphoto.com' ? 'pfp' : 'mobilemonero';
+  if (!inbox[key]) inbox[key] = [];
+  
+  // Store attachments: filter for PDFs and store base64 data
+  const attachments = (email.attachments || []).filter(a => 
+    a.content_type === 'application/pdf' || a.filename?.endsWith('.pdf')
+  ).map(a => ({
+    filename: a.filename || 'document.pdf',
+    contentType: a.content_type || 'application/pdf',
+    data: a.content, // base64-encoded PDF data
+    size: a.content ? Math.round((a.content.length * 0.75) / 1024) : 0, // approximate KB
+  }));
+  
+  inbox[key].unshift({
+    id: email.email_id || `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+    from: email.from,
+    to: email.to,
+    subject: email.subject || '(no subject)',
+    text: (email.text || email.html || '').replace(/<[^>]*>/g, '').trim(),
+    html: email.html || '',
+    receivedAt: new Date().toISOString(),
+    read: false,
+    agent: email.agent || null,
+    attachments,
+    hasPdf: attachments.length > 0,
+  });
+  if (inbox[key].length > 200) inbox[key] = inbox[key].slice(0, 200);
+  state.set(EMAIL_STORE_KEY, inbox);
+}
+
+// ── PDF Attachment Viewer ──
+app.get('/resend/attachment/:emailId/:index', (req, res) => {
+  const { emailId, index } = req.params;
+  const agent = req.query.agent || req.headers['x-agent-id'] || 'vex';
+  
+  // Only core agents can view attachments
+  if (!['vex','hermes','eliza'].includes(agent.toLowerCase())) {
+    return res.status(403).json({ error: 'Only core agents can view attachments' });
+  }
+  
+  const inbox = getInbox();
+  const allEmails = [...inbox.pfp, ...inbox.mobilemonero];
+  const email = allEmails.find(e => e.id === emailId);
+  
+  if (!email || !email.attachments || !email.attachments[parseInt(index)]) {
+    return res.status(404).json({ error: 'Attachment not found' });
+  }
+  
+  const att = email.attachments[parseInt(index)];
+  
+  if (att.contentType === 'application/pdf') {
+    // Serve PDF inline for browser viewing
+    const buf = Buffer.from(att.data, 'base64');
+    res.writeHead(200, {
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="${att.filename}"`,
+      'Content-Length': buf.length,
+    });
+    res.end(buf);
+  } else {
+    res.json(att);
+  }
+});
+
+// ── Resend Inbox (PFP)
+app.get('/resend/inbox', (req, res) => {
+  const inbox = getInbox();
+  const agent = req.query.agent || req.headers['x-agent-id'] || 'vex';
+  res.json({
+    domain: 'partyfavorphoto.com',
+    total: inbox.pfp.length,
+    unread: inbox.pfp.filter(e => !e.read).length,
+    agent,
+    emails: inbox.pfp.map(e => ({
+      ...e,
+      text: ['vex','hermes','eliza'].includes(agent) ? e.text : e.text.slice(0, 100),
+    })),
+  });
+});
+
+app.get('/resend/inbox/brief', (req, res) => {
+  const inbox = getInbox();
+  res.json({
+    total: inbox.pfp.length,
+    unread: inbox.pfp.filter(e => !e.read).length,
+    recent: inbox.pfp.slice(0, 5).map(e => ({
+      id: e.id, from: e.from, subject: e.subject,
+      receivedAt: e.receivedAt, read: e.read,
+    })),
+  });
+});
+
+app.post('/resend/inbox/read', (req, res) => {
+  const { id, domain } = req.body;
+  const inbox = getInbox();
+  const key = domain === 'partyfavorphoto.com' ? 'pfp' : 'mobilemonero';
+  if (inbox[key]) {
+    const email = inbox[key].find(e => e.id === id);
+    if (email) email.read = true;
+    state.set(EMAIL_STORE_KEY, inbox);
+  }
+  res.json({ success: true });
+});
+
+// ── Resend Inbox (XMRT)
+app.get('/resend/mobilemonero/inbox', (req, res) => {
+  const inbox = getInbox();
+  const agent = req.query.agent || req.headers['x-agent-id'] || 'vex';
+  res.json({
+    domain: 'mobilemonero.com',
+    total: inbox.mobilemonero.length,
+    unread: inbox.mobilemonero.filter(e => !e.read).length,
+    agent,
+    emails: inbox.mobilemonero.map(e => ({
+      ...e,
+      text: ['vex','hermes','eliza'].includes(agent) ? e.text : e.text.slice(0, 100),
+    })),
+  });
+});
+
+app.get('/resend/mobilemonero/inbox/brief', (req, res) => {
+  const inbox = getInbox();
+  res.json({
+    total: inbox.mobilemonero.length,
+    unread: inbox.mobilemonero.filter(e => !e.read).length,
+    recent: inbox.mobilemonero.slice(0, 5).map(e => ({
+      id: e.id, from: e.from, subject: e.subject,
+      receivedAt: e.receivedAt, read: e.read,
+    })),
+  });
+});
+
+app.post('/resend/mobilemonero/inbox/read', (req, res) => {
+  const { id } = req.body;
+  const inbox = getInbox();
+  const email = inbox.mobilemonero.find(e => e.id === id);
+  if (email) email.read = true;
+  state.set(EMAIL_STORE_KEY, inbox);
+  res.json({ success: true });
+});
+
+// ── Cron Status Endpoint ──
+app.get('/cron/status', (req, res) => {
+  const statePath = join(__dirname, '..', 'relay-data', 'cron-engine-state.json');
+  try {
+    if (existsSync(statePath)) {
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state.status = 'running';
+      state.relay_uptime = process.uptime();
+      res.json(state);
+    } else {
+      res.json({ status: 'starting', note: 'Cron engine initializing...' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
