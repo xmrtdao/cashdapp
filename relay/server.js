@@ -4265,13 +4265,102 @@ app.get('/api/mining/pool-stats', (req, res) => {
   });
 });
 
+// ── Mining Worker Heartbeats ──
+// Workers POST { worker, hashrate } periodically; leaderboard reads from this store
+const MINING_STORE_KEY = 'mining.workers';
+
+function getMiningWorkers() {
+  return state.get(MINING_STORE_KEY, {});
+}
+
+app.post('/mining/heartbeat', express.json(), (req, res) => {
+  try {
+    const { worker, hashrate, shares, xmrt_earned } = req.body || {};
+    if (!worker) return res.status(400).json({ error: 'worker required' });
+    const workers = getMiningWorkers();
+    const prev = workers[worker] || {};
+    workers[worker] = {
+      worker,
+      current_hash: Math.max(0, Number(hashrate) || 0),
+      total_shares: Math.max(prev.total_shares || 0, Number(shares) || prev.total_shares || 0),
+      xmrt_earned: Number(xmrt_earned) || prev.xmrt_earned || 0,
+      last_seen: new Date().toISOString(),
+    };
+    state.set(MINING_STORE_KEY, workers);
+    res.json({ success: true, worker, hashrate: workers[worker].current_hash });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Local XMRig stats — returns 0s gracefully when xmrig isn't running
+app.get('/api/mining/local-xmrig', async (req, res) => {
+  try {
+    // Try to read from local xmrig API (default port 19090) with a short timeout
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 1500);
+    try {
+      const r = await fetch('http://127.0.0.1:19090/1/summary', { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const data = await r.json();
+        return res.json({
+          hashrate: data.hashrate?.total?.[0] || 0,
+          threads: data.threads || [],
+          uptime: data.uptime || 0,
+          source: 'xmrig',
+        });
+      }
+    } catch { /* xmrig not running */ }
+    clearTimeout(t);
+    // Fallback: derive from most recent local heartbeat
+    const workers = getMiningWorkers();
+    const local = workers['vex-laptop'] || workers['xmrt-laptop'] || null;
+    return res.json({
+      hashrate: local ? local.current_hash : 0,
+      last_seen: local ? local.last_seen : null,
+      source: 'heartbeat',
+    });
+  } catch (e) {
+    res.json({ hashrate: 0, source: 'none', error: e.message });
+  }
+});
+
 // ── Mining Leaderboard ──
+// Combines live worker heartbeats with a static seed list so the card
+// is never empty during boot/demo. Workers seen in the last 24h are kept.
 app.get('/mining/leaderboard', (req, res) => {
-  res.json([
-    { rank: 1, name: 'XMRT-Charger-01', hashrate: '495 H/s', shares: 12450, reward: '0.0312 XMR' },
-    { rank: 2, name: 'XMRT-Stick-01', hashrate: '220 H/s', shares: 5970, reward: '0.0111 XMR' },
-    { rank: 3, name: 'Vex-Laptop', hashrate: '0 H/s', shares: 0, reward: '0.0000 XMR' },
-  ]);
+  const liveWorkers = getMiningWorkers();
+  const now = Date.now();
+  const cutoff = 24 * 60 * 60 * 1000;
+
+  // Live entries from heartbeats
+  const live = Object.values(liveWorkers)
+    .filter(w => w.last_seen && (now - new Date(w.last_seen).getTime()) < cutoff)
+    .map(w => ({
+      worker: w.worker,
+      current_hash: w.current_hash || 0,
+      total_shares: w.total_shares || 0,
+      xmrt_earned: w.xmrt_earned || 0,
+      last_seen: w.last_seen,
+      source: 'live',
+    }));
+
+  // Static seed (so the card is never empty)
+  const seed = [
+    { worker: 'XMRT-Charger-01', current_hash: 495, total_shares: 12450, xmrt_earned: 0.0312, last_seen: new Date(now - 60_000).toISOString(), source: 'seed' },
+    { worker: 'XMRT-Stick-01',   current_hash: 220, total_shares: 5970,  xmrt_earned: 0.0111, last_seen: new Date(now - 120_000).toISOString(), source: 'seed' },
+  ];
+
+  // Merge: live entries override seed by worker name
+  const merged = new Map();
+  for (const w of seed) merged.set(w.worker, w);
+  for (const w of live) merged.set(w.worker, w);
+
+  const workers = Array.from(merged.values())
+    .sort((a, b) => (b.current_hash || 0) - (a.current_hash || 0));
+
+  res.json({ workers, count: workers.length, timestamp: new Date().toISOString() });
 });
 
 // ── Email Inbox Storage ──────────────────────────────────────
