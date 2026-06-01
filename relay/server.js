@@ -2883,7 +2883,7 @@ app.post('/api/ef-university', async (req, res) => {
   try {
     const r = await fetch(SUPABASE_UNIVERSITY_URL, {
       method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + RELAY_SERVICE_KEY, 'Content-Type': 'application/json' },
+      headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify(req.body || {}),
       signal: AbortSignal.timeout(10000),
     });
