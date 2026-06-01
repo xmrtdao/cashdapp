@@ -2894,6 +2894,74 @@ app.post('/api/ef-university', async (req, res) => {
   }
 });
 
+// POST /api/xmrt-university/ingest — Ingest a freshly-issued XMRT University cert into relay state.
+// Accepts either the raw cert payload or just the JWT (we'll verify against Supabase).
+// No agent-level ACL — JWT is the credential. Bypasses the local /tools/run agent ACL so the
+// local relay can persist the cert on its own behalf.
+app.post('/api/xmrt-university/ingest', express.json({ limit: '64kb' }), async (req, res) => {
+  trackRequest('/api/xmrt-university/ingest');
+  const body = req.body || {};
+  const cert = body.certificate || body;
+  const jwt = body.jwt || cert.jwt_token || cert.jwt;
+  const certId = cert.certificate_id || cert.cert_id;
+
+  if (!certId) {
+    return res.status(400).json({ success: false, error: 'certificate_id is required' });
+  }
+
+  // Verify against Supabase so we don't accept self-issued garbage
+  let verified = null;
+  try {
+    const verifyRes = await fetch(SUPABASE_UNIVERSITY_URL, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'verify', agent_id: cert.agent_id }),
+      signal: AbortSignal.timeout(8000),
+    });
+    verified = await verifyRes.json();
+    if (!verified?.valid) {
+      return res.status(403).json({ success: false, error: 'certificate not valid in Supabase', verify: verified });
+    }
+  } catch (e) {
+    return res.status(502).json({ success: false, error: 'verify failed: ' + e.message });
+  }
+
+  // Persist cert + a per-agent map for quick lookup
+  const stored = {
+    cert_id: verified.certificate.certificate_id,
+    agent_id: verified.certificate.agent_id,
+    agent_name: verified.certificate.agent_name,
+    tier: verified.certificate.tier,
+    permissions: verified.certificate.permissions,
+    issued_at: verified.certificate.issued_at,
+    expires_at: verified.certificate.expires_at,
+    jwt: jwt || null,
+    ingested_at: new Date().toISOString(),
+    source: 'xmrt-university/ingest',
+  };
+  state.set('xmrt-university-cert', stored);
+  const byId = state.get('xmrt-university-certs') || {};
+  byId[stored.cert_id] = { agent_id: stored.agent_id, agent_name: stored.agent_name, tier: stored.tier, permissions: stored.permissions, issued_at: stored.issued_at, expires_at: stored.expires_at };
+  state.set('xmrt-university-certs', byId);
+
+  // Update fleet agents registration so dashboard / peers see this agent as certified
+  const agents = state.get('fleet.agents') || {};
+  agents[stored.agent_id] = {
+    ...(agents[stored.agent_id] || {}),
+    name: stored.agent_name,
+    cert_id: stored.cert_id,
+    cert_tier: stored.tier,
+    cert_permissions: stored.permissions,
+    cert_expires_at: stored.expires_at,
+    last_heartbeat: new Date().toISOString(),
+  };
+  state.set('fleet.agents', agents);
+
+  logActivity('xmrt-university', stored.cert_id, 'INGESTED', `${stored.agent_name} -> ${stored.tier} (${stored.permissions.join(',')})`);
+
+  res.json({ success: true, cert: stored, verify: verified });
+});
+
 // -- Local Edge Function Runtime --
 app.all('/api/v1/functions/:name', async (req, res) => {
   const func = localFunctions.find(f => f.name === req.params.name);
