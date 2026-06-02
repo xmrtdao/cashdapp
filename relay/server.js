@@ -1467,6 +1467,43 @@ app.get('/', (req, res) => {
     .board-post { padding: 6px 8px; border-radius: 6px; background: #0d0d15; margin-bottom: 4px; }
     .board-post-header { color: #6b6b80; font-size: 10px; display: flex; gap: 8px; }
     .board-post-body { color: var(--text-secondary); font-size: 12px; margin-top: 2px; line-height: 1.4; }
+    .board-post-body p { margin: 0 0 6px 0; }
+    .board-post-body p:last-child { margin-bottom: 0; }
+    .board-post-body h1, .board-post-body h2, .board-post-body h3, .board-post-body h4 { color: var(--text-primary); margin: 8px 0 4px 0; font-weight: 600; }
+    .board-post-body h1 { font-size: 14px; }
+    .board-post-body h2 { font-size: 13px; }
+    .board-post-body h3 { font-size: 12px; }
+    .board-post-body h4 { font-size: 12px; color: var(--text-secondary); }
+    .board-post-body ul, .board-post-body ol { margin: 4px 0 6px 0; padding-left: 18px; }
+    .board-post-body li { margin: 2px 0; }
+    .board-post-body code { background: #1a1a25; color: #e0e0f0; padding: 1px 4px; border-radius: 3px; font-family: monospace; font-size: 11px; }
+    .board-post-body pre { background: #0a0a12; color: #c0c0d0; padding: 6px 8px; border-radius: 4px; overflow-x: auto; margin: 4px 0; }
+    .board-post-body pre code { background: transparent; padding: 0; }
+    .board-post-body blockquote { border-left: 3px solid var(--accent-orange); padding-left: 8px; margin: 4px 0; color: var(--text-secondary); font-style: italic; }
+    .board-post-body hr { border: none; border-top: 1px solid #2a2a3a; margin: 8px 0; }
+    .board-post-body table { border-collapse: collapse; margin: 4px 0; font-size: 11px; width: 100%; }
+    .board-post-body th, .board-post-body td { border: 1px solid #2a2a3a; padding: 3px 6px; text-align: left; }
+    .board-post-body th { background: #1a1a25; color: var(--text-primary); font-weight: 600; }
+    .board-post-body a { color: var(--accent-teal); text-decoration: underline; }
+    .board-post-body strong { color: var(--text-primary); font-weight: 600; }
+    .board-post-body em { color: var(--text-primary); font-style: italic; }
+    .board-post-body br { line-height: 1.4; }
+    .board-post-body del { color: #6b6b80; }
+    .fleet-msg-body { color: #e0e0f0; font-size: 12px; line-height: 1.4; }
+    .fleet-msg-body p { margin: 0 0 4px 0; }
+    .fleet-msg-body p:last-child { margin-bottom: 0; }
+    .fleet-msg-body h1, .fleet-msg-body h2, .fleet-msg-body h3 { color: #ffffff; margin: 6px 0 3px 0; font-weight: 600; }
+    .fleet-msg-body h1 { font-size: 13px; }
+    .fleet-msg-body h2 { font-size: 12px; }
+    .fleet-msg-body h3 { font-size: 12px; color: #c0c0d0; }
+    .fleet-msg-body ul, .fleet-msg-body ol { margin: 3px 0 4px 0; padding-left: 16px; }
+    .fleet-msg-body li { margin: 1px 0; }
+    .fleet-msg-body code { background: rgba(255,255,255,0.08); padding: 0 3px; border-radius: 2px; font-family: monospace; font-size: 11px; }
+    .fleet-msg-body pre { background: rgba(0,0,0,0.3); padding: 4px 6px; border-radius: 3px; margin: 3px 0; overflow-x: auto; }
+    .fleet-msg-body pre code { background: transparent; padding: 0; }
+    .fleet-msg-body strong { color: #ffffff; font-weight: 600; }
+    .fleet-msg-body a { color: #4ade80; text-decoration: underline; }
+    .fleet-msg-body br { line-height: 1.4; }
     .board-agent-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 9px; font-weight: 600; }
     .board-agent-vex { background: rgba(255,107,53,0.15); color: var(--accent-orange); }
     .board-agent-eliza { background: rgba(74,222,128,0.15); color: var(--accent-teal); }
@@ -1609,12 +1646,13 @@ app.get('/', (req, res) => {
         <!-- Selected topic posts -->
         <div id="board-topic-posts" style="display:none;">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;min-width:0;">
               <span id="board-current-topic-title" style="font-size:13px;font-weight:600;color:var(--text-primary);"></span>
               <span id="board-current-topic-status"></span>
               <span id="board-current-topic-assignment" style="font-size:10px;color:#6b6b80;"></span>
             </div>
-            <div style="display:flex;gap:4px;">
+            <div style="display:flex;gap:4px;flex-shrink:0;">
+              <button onclick="renameBoardTopic()" id="board-rename-btn" style="padding:2px 8px;border-radius:4px;border:1px solid #3a3a5a;background:transparent;color:#8b8ba0;cursor:pointer;font-size:10px;" title="Rename topic">Rename</button>
               <select id="board-status-select" onchange="changeTopicStatus(this.value)" style="padding:2px 4px;border-radius:4px;border:1px solid #3a3a5a;background:#12121a;color:#c0c0d0;font-size:10px;">
                 <option value="active">Active</option>
                 <option value="in-progress">In Progress</option>
@@ -2573,7 +2611,7 @@ loadUniversityStatus();
             var div = document.createElement('div');
             div.style.marginBottom = '6px';
             div.setAttribute('data-id', m.id);
-            div.innerHTML = '<span style="color:#8b8ba0;font-size:10px;display:block;">' + label + '</span><span style="background:' + color + ';color:#e0e0f0;padding:6px 10px;border-radius:6px;display:inline-block;font-size:13px;">' + (m.message||'').replace(/</g,'&lt;') + '</span>';
+            div.innerHTML = '<span style="color:#8b8ba0;font-size:10px;display:block;">' + label + '</span><span class="fleet-msg-body" style="background:' + color + ';color:#e0e0f0;padding:6px 10px;border-radius:6px;display:inline-block;font-size:13px;max-width:100%;">' + renderMarkdown(m.message || '') + '</span>';
             msgs.appendChild(div);
             lastFleetTs = Math.max(lastFleetTs, m.ts);
           }
@@ -2585,6 +2623,136 @@ loadUniversityStatus();
         document.getElementById('fleet-chat-status').textContent = '● polling error';
         document.getElementById('fleet-chat-status').style.color = '#f87171';
       });
+  }
+
+  // ── Markdown Renderer ───────────────────────────────────────
+  // Dependency-free, XSS-safe. Escapes HTML first, then applies markdown transforms on the escaped text.
+  // Used by bulletin posts and fleet chat messages.
+  // Supports: **bold**, *italic*, ~~strike~~, [apostrophe]code[apostrophe], fenced code, [text](url), # h1-h4,
+  // - bullets, 1. numbered lists, > blockquote, --- hr, | tables |, paragraphs, line breaks.
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+  function renderInline(escaped) {
+    // 1) inline code: [apostrophe]text[apostrophe] (do first so contents are not reformatted)
+    escaped = escaped.replace(/\x60([^\x60\n]+)\x60/g, function(_, c) { return '<code>' + c + '</code>'; });
+    // 2) links: [text](url) - only http(s) and mailto
+    escaped = escaped.replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/g, function(_, t, u) {
+      return '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + t + '</a>';
+    });
+    // 3) bold: **text** or __text__
+    escaped = escaped.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    escaped = escaped.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+    // 4) strike: ~~text~~
+    escaped = escaped.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+    // 5) italic: *text* or _text_ (must not match ** patterns already consumed)
+    escaped = escaped.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+    escaped = escaped.replace(/(^|[^_\w])_([^_\n]+)_(?!\w)/g, '$1<em>$2</em>');
+    return escaped;
+  }
+  function renderMarkdown(src) {
+    if (src == null) return '';
+    var text = String(src);
+    // Extract fenced code blocks first so other rules don't touch them.
+    var codeBlocks = [];
+    text = text.replace(/\x60\x60\x60([\s\S]*?)\x60\x60\x60/g, function(_, code) {
+      var i = codeBlocks.length;
+      codeBlocks.push(escapeHtml(code.replace(/^\n|\n$/g, '')));
+      return '\u0000CODEBLOCK' + i + '\u0000';
+    });
+    // Extract horizontal rules and tables into a shared stash.
+    var stash = [];
+    text = text.replace(/^\s*---\s*$/gm, function() {
+      var i = stash.length;
+      stash.push('<hr>');
+      return '\u0000STASH' + i + '\u0000';
+    });
+    // Tables: group of pipe rows including a separator line.
+    text = text.replace(/((?:^\|.+\|\s*\n)+^\|[\s:|-]+\|\s*\n(?:^\|.+\|\s*\n?)+)/gm, function(block) {
+      var lines = block.trim().split('\n');
+      if (lines.length < 2) return block;
+      var headerCells = lines[0].split('|').slice(1, -1).map(function(c){ return c.trim(); });
+      var bodyRows = lines.slice(2).map(function(row) {
+        return row.split('|').slice(1, -1).map(function(c){ return c.trim(); });
+      });
+      var tableHtml = '<table><thead><tr>';
+      for (var i = 0; i < headerCells.length; i++) tableHtml += '<th>' + renderInline(escapeHtml(headerCells[i])) + '</th>';
+      tableHtml += '</tr></thead><tbody>';
+      for (var r = 0; r < bodyRows.length; r++) {
+        tableHtml += '<tr>';
+        for (var c = 0; c < bodyRows[r].length; c++) tableHtml += '<td>' + renderInline(escapeHtml(bodyRows[r][c])) + '</td>';
+        tableHtml += '</tr>';
+      }
+      tableHtml += '</tbody></table>';
+      var idx = stash.length;
+      stash.push(tableHtml);
+      return '\u0000STASH' + idx + '\u0000';
+    });
+    // Split into blocks by blank lines.
+    var blocks = text.split(/\n\s*\n/);
+    var html = '';
+    for (var b = 0; b < blocks.length; b++) {
+      var block = blocks[b];
+      if (!block.trim()) continue;
+      // Restore stashed placeholders for inline use within a paragraph.
+      var restoreInline = function(s) {
+        return s.replace(/\u0000STASH(\d+)\u0000/g, function(_, i2) { return stash[parseInt(i2, 10)]; });
+      };
+      // Fenced code block (single block): if the only content is a CODEBLOCK placeholder.
+      var onlyCb = block.match(/^\u0000CODEBLOCK(\d+)\u0000$/);
+      if (onlyCb) {
+        html += '<pre><code>' + codeBlocks[parseInt(onlyCb[1], 10)] + '</code></pre>';
+        continue;
+      }
+      // Heading (single line starting with #)
+      var hMatch = block.match(/^(#{1,4})\s+(.+)$/);
+      if (hMatch && block.split('\n').length === 1) {
+        var level = hMatch[1].length;
+        html += '<h' + level + '>' + renderInline(escapeHtml(hMatch[2])) + '</h' + level + '>';
+        continue;
+      }
+      // Blockquote
+      if (/^>\s/.test(block)) {
+        var q = block.split('\n').map(function(l){ return l.replace(/^>\s?/, ''); }).join(' ');
+        html += '<blockquote>' + renderInline(escapeHtml(q)) + '</blockquote>';
+        continue;
+      }
+      // Unordered list
+      if (/^\s*[-*]\s+/.test(block)) {
+        var items = block.split('\n').filter(function(l){ return /^\s*[-*]\s+/.test(l); }).map(function(l){
+          return '<li>' + renderInline(escapeHtml(l.replace(/^\s*[-*]\s+/, ''))) + '</li>';
+        });
+        html += '<ul>' + items.join('') + '</ul>';
+        continue;
+      }
+      // Ordered list
+      if (/^\s*\d+\.\s+/.test(block)) {
+        var items2 = block.split('\n').filter(function(l){ return /^\s*\d+\.\s+/.test(l); }).map(function(l){
+          return '<li>' + renderInline(escapeHtml(l.replace(/^\s*\d+\.\s+/, ''))) + '</li>';
+        });
+        html += '<ol>' + items2.join('') + '</ol>';
+        continue;
+      }
+      // Paragraph: process each line through renderInline, then collapse <br>.
+      var hasBlockStash = /\u0000STASH\d+\u0000/.test(block);
+      var para = block.split('\n').map(function(l){
+        return renderInline(escapeHtml(l));
+      }).join('<br>');
+      // Restore stash markers (HRs, tables) inside the paragraph.
+      para = restoreInline(para);
+      if (hasBlockStash) {
+        // Tables/HRs are block-level — do not wrap them in <p> (invalid HTML).
+        html += para;
+      } else {
+        html += '<p>' + para + '</p>';
+      }
+    }
+    return html;
   }
 
   // ── Bulletin Board Functions ────────────────────────────────
@@ -2732,7 +2900,7 @@ loadUniversityStatus();
       html += '<div class="board-post-header"><span class="board-agent-badge ' + agentClass + '">' + (p.agent || 'agent').toUpperCase() + '</span> ' + timeAgo(p.ts);
       html += '<span style="float:right;font-size:9px;color:#6b6b80;cursor:pointer;" onclick="deleteBoardPost(\\'' + p.id + '\\')" title="Delete post">✕</span>';
       html += '</div>';
-      html += '<div class="board-post-body">' + p.message.replace(/</g,'&lt;') + '</div>';
+      html += '<div class="board-post-body">' + renderMarkdown(p.message) + '</div>';
       html += '</div>';
     }
     list.innerHTML = html;
@@ -2791,7 +2959,45 @@ loadUniversityStatus();
         document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
       });
   }
-  
+
+  // Rename current topic. Works for both humans (prompt) and agents (PATCH /api/bulletin/topics/:id with {title}).
+  // The endpoint accepts arbitrary field updates so a single PATCH can set title + status + assigned_agent + pinned in one call.
+  function renameBoardTopic() {
+    if (!boardCurrentTopic) return;
+    var current = boardCurrentTopic.title || '';
+    var next = prompt('Rename topic:', current);
+    if (next === null) return;
+    next = next.trim();
+    if (!next) { alert('Title cannot be empty.'); return; }
+    if (next === current) return;
+    fetch('/api/bulletin/topics/' + boardCurrentTopic.id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: next })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.success) {
+          boardCurrentTopic.title = d.topic.title;
+          document.getElementById('board-current-topic-title').textContent = d.topic.title;
+          // Also update the in-memory list so the sidebar shows the new title after re-render
+          for (var i = 0; i < boardData.topics.length; i++) {
+            if (boardData.topics[i].id === d.topic.id) boardData.topics[i].title = d.topic.title;
+          }
+          loadBoard();
+          document.getElementById('board-status').textContent = '\u2713 renamed';
+          document.getElementById('board-status').style.color = '#4ade80';
+        } else {
+          document.getElementById('board-status').textContent = '\u2716 rename failed: ' + (d.error || 'unknown');
+          document.getElementById('board-status').style.color = '#f87171';
+        }
+      })
+      .catch(function(e) {
+        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+        document.getElementById('board-status').style.color = '#f87171';
+      });
+  }
+
   function togglePinTopic() {
     if (!boardCurrentTopic) return;
     var newPinned = !boardCurrentTopic.pinned;
