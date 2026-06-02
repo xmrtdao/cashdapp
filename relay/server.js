@@ -4579,18 +4579,91 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 
 // ── Mining Pool Stats ──
-app.get('/api/mining/pool-stats', (req, res) => {
-  res.json({
-    pool: 'xmrtdao.org',
-    hashrate: '715 H/s',
-    miners: 3,
-    validShares: 18420,
-    xmrPaid: '0.0423',
-    xmrDue: '0.0081',
-    lastBlock: '3054219',
-    poolFee: '0.5%',
-    status: 'online',
-  });
+// XMRT-DAO fleet pool wallet (must match mmlauncher/scripts/mobile-signup.py)
+const XMRT_POOL_WALLET = '46UxNFuGM2E3UwmZWWJicaRPoRwqwW4byQkaTHkX8yPcVihp91qAVtSFipWUGJJUyTXgzSqxzDQtNLf2bsp2DX2qCCgC5mg';
+const XMRT_POOL_URL = 'https://www.supportxmr.com/api/miner';
+// Cache live pool stats for 60s to avoid hammering SupportXMR
+const POOL_CACHE_KEY = 'mining.pool.cache';
+const POOL_CACHE_TTL = 60_000;
+async function fetchSupportXMRStats() {
+  const cached = state.get(POOL_CACHE_KEY);
+  if (cached && (Date.now() - cached.ts) < POOL_CACHE_TTL) return cached;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    const r = await fetch(`${XMRT_POOL_URL}/${XMRT_POOL_WALLET}/stats`, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) throw new Error('supportxmr http ' + r.status);
+    const data = await r.json();
+    // data.amtPaid / data.amtDue are in atomic units (1e12 = 1 XMR)
+    const out = {
+      pool: 'supportxmr.com',
+      wallet: XMRT_POOL_WALLET,
+      hashrate: data.hash || 0,
+      miners: data.workers ? data.workers.length : 0,
+      active_workers: data.active_workers || 0,
+      total_registered_workers: data.total_registered_workers || 0,
+      validShares: data.validShares || 0,
+      invalidShares: data.invalidShares || 0,
+      totalHashes: data.totalHashes || 0,
+      lastHash: data.lastHash || 0,
+      txnCount: data.txnCount || 0,
+      // Atomic units (12-decimal) — the dashboard JS divides these by 1e12
+      amtPaid: data.amtPaid || 0,
+      amtDue: data.amtDue || 0,
+      amountPaid: data.amtPaid || 0,
+      amountDue: data.amtDue || 0,
+      // Convenience: pre-converted XMR
+      amtPaidXMR: (data.amtPaid || 0) / 1e12,
+      amtDueXMR: (data.amtDue || 0) / 1e12,
+      lastBlock: data.lastHash || 0,
+      poolFee: '0.5%',
+      status: 'online',
+      source: 'supportxmr',
+      fetchedAt: new Date().toISOString(),
+    };
+    state.set(POOL_CACHE_KEY, { ...out, ts: Date.now() });
+    return out;
+  } catch (e) {
+    clearTimeout(t);
+    return { pool: 'supportxmr.com', wallet: XMRT_POOL_WALLET, status: 'unreachable', error: e.message, hashrate: 0, amtPaid: 0, amtDue: 0 };
+  }
+}
+// ── Pool Identifiers (active worker list) ───────────────────
+const POOL_IDS_CACHE_KEY = 'mining.pool.identifiers';
+const POOL_IDS_CACHE_TTL = 120_000;
+async function fetchSupportXMRIdentifiers() {
+  const cached = state.get(POOL_IDS_CACHE_KEY);
+  if (cached && (Date.now() - cached.ts) < POOL_IDS_CACHE_TTL) return cached;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    const r = await fetch(`${XMRT_POOL_URL}/${XMRT_POOL_WALLET}/identifiers`, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) throw new Error('supportxmr http ' + r.status);
+    const ids = await r.json();
+    const out = Array.isArray(ids) ? ids : (ids.identifiers || []);
+    state.set(POOL_IDS_CACHE_KEY, { identifiers: out, ts: Date.now() });
+    return { identifiers: out, ts: Date.now() };
+  } catch (e) {
+    clearTimeout(t);
+    return { identifiers: [], error: e.message };
+  }
+}
+
+// Public read endpoint — returns the live pool stats for the XMRT-DAO wallet
+app.get('/api/mining/pool-stats', async (req, res) => {
+  const stats = await fetchSupportXMRStats();
+  res.json(stats);
+});
+app.get('/api/mining/pool-identifiers', async (req, res) => {
+  const out = await fetchSupportXMRIdentifiers();
+  res.json(out.identifiers || []);
+});
+// Alias: dashboard JS sometimes uses /api/dao/mining — funnel it through the same fetcher
+app.get('/api/dao/mining', async (req, res) => {
+  const stats = await fetchSupportXMRStats();
+  res.json({ success: true, stats, ts: new Date().toISOString() });
 });
 
 // ── Mining Worker Heartbeats ──
@@ -4657,7 +4730,7 @@ app.get('/api/mining/local-xmrig', async (req, res) => {
 // ── Mining Leaderboard ──
 // Combines live worker heartbeats with a static seed list so the card
 // is never empty during boot/demo. Workers seen in the last 24h are kept.
-app.get('/mining/leaderboard', (req, res) => {
+app.get('/mining/leaderboard', async (req, res) => {
   const liveWorkers = getMiningWorkers();
   const now = Date.now();
   const cutoff = 24 * 60 * 60 * 1000;
@@ -4688,7 +4761,27 @@ app.get('/mining/leaderboard', (req, res) => {
   const workers = Array.from(merged.values())
     .sort((a, b) => (b.current_hash || 0) - (a.current_hash || 0));
 
-  res.json({ workers, count: workers.length, timestamp: new Date().toISOString() });
+  // Pull live fleet totals from SupportXMR for the wallet summary header
+  let fleet = null;
+  try { fleet = await fetchSupportXMRStats(); } catch (_) { /* offline */ }
+
+  res.json({
+    workers, count: workers.length,
+    fleet: fleet ? {
+      hashrate: fleet.hashrate,
+      active_workers: fleet.active_workers,
+      total_registered_workers: fleet.total_registered_workers,
+      validShares: fleet.validShares,
+      amtPaid: fleet.amtPaid,        // atomic units (12-decimal)
+      amtDue: fleet.amtDue,          // atomic units
+      amtPaidXMR: fleet.amtPaidXMR,  // pre-converted for human display
+      amtDueXMR: fleet.amtDueXMR,
+      lastHash: fleet.lastHash,
+      status: fleet.status,
+      source: fleet.source,
+    } : null,
+    timestamp: new Date().toISOString()
+  });
 });
 
 // ── Email Inbox Storage ──────────────────────────────────────
