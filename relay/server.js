@@ -2029,15 +2029,27 @@ app.get('/api/dao/gossip', async (req, res) => {
   const HERMES_TOKEN_SECRET = 'bd1957d8b424199966fc6e6ab639373ab5c1fbc3f76535846ba2b0ce20bbd908';
   
   try {
-    const historyRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/history`, {
-      method: 'POST',
+    // Try GET method first (some edge functions support both)
+    let historyRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/history?topic=${encodeURIComponent(topic)}&limit=${limit}`, {
+      method: 'GET',
       headers: {
-        'Content-Type': 'application/json',
         'x-certificate-id': 'XMRT-CERT-RMJTYENN',
       },
-      body: JSON.stringify({ topic, limit }),
       signal: AbortSignal.timeout(10000),
     });
+    
+    // If GET fails with "message or payload required", try POST
+    if (!historyRes.ok) {
+      historyRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/history`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-certificate-id': 'XMRT-CERT-RMJTYENN',
+        },
+        body: JSON.stringify({ topic, limit }),
+        signal: AbortSignal.timeout(10000),
+      });
+    }
     
     const messages = historyRes.ok ? await historyRes.json() : { error: 'unavailable' };
     
@@ -2060,15 +2072,27 @@ app.get('/api/fleet-chat/messages', async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   
   try {
-    const historyRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/history`, {
-      method: 'POST',
+    // Try GET method first (supports query params directly)
+    let historyRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/history?topic=${encodeURIComponent(topic)}&limit=${limit}`, {
+      method: 'GET',
       headers: {
-        'Content-Type': 'application/json',
         'x-certificate-id': 'XMRT-CERT-RMJTYENN',
       },
-      body: JSON.stringify({ topic, limit }),
       signal: AbortSignal.timeout(10000),
     });
+    
+    // If GET fails with "message or payload required", try POST
+    if (!historyRes.ok) {
+      historyRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/history`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-certificate-id': 'XMRT-CERT-RMJTYENN',
+        },
+        body: JSON.stringify({ topic, limit }),
+        signal: AbortSignal.timeout(10000),
+      });
+    }
     
     const messages = historyRes.ok ? await historyRes.json() : { error: 'unavailable' };
     
