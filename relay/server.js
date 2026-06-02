@@ -58,7 +58,6 @@ import { getFullSnapshot, getSystemResources, checkExternalServices } from './to
 import * as state from './lib/state.mjs';
 import { createTaskRunner } from './lib/task-runner.mjs';
 import { handleInboundEmail } from './lib/auto-responder.mjs';
-import * as minimax from './tools/minimax-pipeline.mjs';
 
 // ── Config ──────────────────────────────────────────────────
 const PORT = parseInt(process.env.RELAY_PORT || '8080');
@@ -1243,12 +1242,19 @@ app.get('/', (req, res) => {
     </div>
 
     <div class="card">
-      <h3 style="color:#60a5fa;">Social Publishing</h3>
-      <div class="stat"><span class="label">Last Tweet</span><span class="value" style="color:#4ade80;">✅ Published</span></div>
-      <div class="stat"><span class="label">Content</span><span class="value" style="font-size:0.7rem;">DAO Economy Article Promotion</span></div>
-      <div class="stat"><span class="label">Account</span><span class="value"><a href="https://x.com/XMRTSolutions" target="_blank" style="color:#60a5fa;text-decoration:none;">@XMRTSolutions</a></span></div>
-      <div class="stat"><span class="label">Pipeline</span><span class="value" style="font-size:0.7rem;">Paragraph -> Typefully -> X</span></div>
-      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">Next tweet TBD — add content to Typefully queue</div>
+      <h3 style="color:#60a5fa;">XMRT DAO Health</h3>
+      <div class="stat"><span class="label">Supabase</span><span class="value" id="dao-health-status">checking...</span></div>
+      <div class="stat"><span class="label">Edge Functions</span><span class="value" id="dao-fn-count">-</span></div>
+      <div class="stat"><span class="label">Agents</span><span class="value" id="dao-agent-count">-</span></div>
+      <div class="stat"><span class="label">Gossip Hub</span><span class="value" id="dao-gossip-status">-</span></div>
+      <div style="margin-top:8px;font-size:11px;color:#6b6b80;">Live from system-health endpoint</div>
+    </div>
+
+    <div class="card">
+      <h3 style="color:#fbbf24;">GitHub Activity</h3>
+      <div class="stat"><span class="label">Total Repos</span><span class="value" id="gh-repo-count">-</span></div>
+      <div class="stat"><span class="label">Last Commit</span><span class="value" id="gh-last-commit" style="font-size:0.7rem;">-</span></div>
+      <div style="margin-top:8px;font-size:11px;color:#6b6b80;" id="gh-recent-commits"></div>
     </div>
 
     <div class="card" id="pfp-card">
@@ -1536,6 +1542,98 @@ app.get('/', (req, res) => {
   }
   loadMmInbox();
   setInterval(loadMmInbox, 15000);
+
+  // XMRT DAO Health — dynamic data from Supabase
+  function loadDaoHealth() {
+    fetch('/api/dao/health', { signal: AbortSignal.timeout(8000) })
+      .then(function(r){return r.json();})
+      .then(function(d){
+        var statusEl = document.getElementById('dao-health-status');
+        var fnEl = document.getElementById('dao-fn-count');
+        var agentEl = document.getElementById('dao-agent-count');
+        var gossipEl = document.getElementById('dao-gossip-status');
+        
+        if (d.health && d.health.overall_health) {
+          var score = d.health.overall_health.score || 0;
+          var status = d.health.overall_health.status || 'unknown';
+          var badgeClass = score >= 80 ? 'badge-ok' : score >= 50 ? 'badge-warn' : 'badge-err';
+          if (statusEl) statusEl.innerHTML = '<span class="badge ' + badgeClass + '">' + status.toUpperCase() + ' (' + score + '/100)</span>';
+        } else {
+          if (statusEl) statusEl.textContent = 'unavailable';
+        }
+        
+        if (d.health && d.health.components && d.health.components.edge_functions) {
+          if (fnEl) fnEl.textContent = d.health.components.edge_functions.deployed || '-';
+        }
+        
+        if (d.health && d.health.components && d.health.components.agents) {
+          var agents = d.health.components.agents;
+          var total = (agents.IDLE || 0) + (agents.BUSY || 0) + (agents.OFFLINE || 0);
+          if (agentEl) agentEl.textContent = total + ' agents';
+        }
+        
+        // Check gossip hub separately
+        fetch('/api/dao/gossip?topic=fleet-broadcast&limit=1', { signal: AbortSignal.timeout(5000) })
+          .then(function(r){return r.json();})
+          .then(function(g){
+            if (gossipEl) {
+              if (g.success && g.messages && g.messages.length > 0) {
+                var lastMsg = g.messages[0];
+                var minsAgo = Math.round((Date.now() - new Date(lastMsg.timestamp).getTime()) / 60000);
+                gossipEl.innerHTML = '<span class="badge badge-ok">' + (minsAgo < 5 ? 'active' : minsAgo + 'm ago') + '</span>';
+              } else {
+                gossipEl.innerHTML = '<span class="badge badge-warn">quiet</span>';
+              }
+            }
+          })
+          .catch(function(){
+            if (gossipEl) gossipEl.innerHTML = '<span class="badge badge-err">offline</span>';
+          });
+      })
+      .catch(function(){
+        var statusEl = document.getElementById('dao-health-status');
+        if (statusEl) statusEl.textContent = 'offline';
+      });
+  }
+  loadDaoHealth();
+  setInterval(loadDaoHealth, 30000);
+
+  // GitHub Activity — dynamic data from GitHub API
+  function loadGithubActivity() {
+    fetch('/api/dao/github', { signal: AbortSignal.timeout(8000) })
+      .then(function(r){return r.json();})
+      .then(function(d){
+        var repoEl = document.getElementById('gh-repo-count');
+        var commitEl = document.getElementById('gh-last-commit');
+        var recentEl = document.getElementById('gh-recent-commits');
+        
+        if (d.total_repos) {
+          if (repoEl) repoEl.textContent = d.total_repos + ' repos';
+        }
+        
+        if (d.recent_commits && d.recent_commits.length > 0) {
+          var last = d.recent_commits[0];
+          var msg = (last.commit && last.commit.message) ? last.commit.message.split('\n')[0].slice(0, 35) : 'recent commit';
+          var when = new Date(last.commit.author.date).toLocaleDateString();
+          if (commitEl) commitEl.textContent = msg + ' (' + when + ')';
+          
+          // Show last 3 commits
+          if (recentEl) {
+            recentEl.innerHTML = d.recent_commits.slice(0,3).map(function(c){
+              var m = (c.commit && c.commit.message) ? c.commit.message.split('\n')[0].slice(0, 28) : '?';
+              var d = new Date(c.commit.author.date).toLocaleDateString();
+              return '<div style="font-size:0.65rem;color:#a0a0b0;margin:2px 0;">' + m + ' <span style="color:#6b6b80;">(' + d + ')</span></div>';
+            }).join('');
+          }
+        }
+      })
+      .catch(function(){
+        var repoEl = document.getElementById('gh-repo-count');
+        if (repoEl) repoEl.textContent = 'unavailable';
+      });
+  }
+  loadGithubActivity();
+  setInterval(loadGithubActivity, 60000);
 
   function renderFunctions() {
     const search = document.getElementById('search').value.toLowerCase();
@@ -1887,6 +1985,133 @@ app.post('/tools/run', async (req, res) => {
   
   res.json(result);
 });
+
+// ── XMRT DAO Dynamic Data Endpoints ─────────────────────────
+
+// GET /api/dao/health — Supabase system health & status
+app.get('/api/dao/health', async (req, res) => {
+  trackRequest('/api/dao/health');
+  try {
+    const [healthRes, statusRes] = await Promise.all([
+      fetch(`${SUPABASE_URL}/functions/v1/system-health`, {
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}` },
+        signal: AbortSignal.timeout(10000),
+      }),
+      fetch(`${SUPABASE_URL}/functions/v1/system-status`, {
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}` },
+        signal: AbortSignal.timeout(10000),
+      }),
+    ]);
+    
+    const health = healthRes.ok ? await healthRes.json() : { error: 'unavailable' };
+    const status = statusRes.ok ? await statusRes.json() : { error: 'unavailable' };
+    
+    res.json({
+      success: true,
+      supabase_project: 'vawouugtzwmejxqkeqqj',
+      health,
+      status,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// GET /api/dao/gossip — Gossip hub fleet messages
+app.get('/api/dao/gossip', async (req, res) => {
+  trackRequest('/api/dao/gossip');
+  const topic = req.query.topic || 'fleet-broadcast';
+  const limit = parseInt(req.query.limit) || 20;
+  
+  // Use Hermes service token for gossip hub auth
+  const HERMES_TOKEN_ID = '7c861c60-103c-4d26-b191-e48af2e23c37';
+  const HERMES_TOKEN_SECRET = 'bd1957d8b424199966fc6e6ab639373ab5c1fbc3f76535846ba2b0ce20bbd908';
+  
+  try {
+    const historyRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/history`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-certificate-id': 'XMRT-CERT-RMJTYENN',
+      },
+      body: JSON.stringify({ topic, limit }),
+      signal: AbortSignal.timeout(10000),
+    });
+    
+    const messages = historyRes.ok ? await historyRes.json() : { error: 'unavailable' };
+    
+    res.json({
+      success: historyRes.ok,
+      topic,
+      messages: messages.messages || [],
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message, topic });
+  }
+});
+
+// GET /api/dao/github — GitHub org activity
+app.get('/api/dao/github', async (req, res) => {
+  trackRequest('/api/dao/github');
+  const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+  
+  try {
+    // Search repos in org
+    const reposRes = await fetch('https://api.github.com/search/repositories?q=org:xmrtdao&sort=updated&per_page=10', {
+      headers: GITHUB_TOKEN ? { 'Authorization': `token ${GITHUB_TOKEN}` } : {},
+      signal: AbortSignal.timeout(10000),
+    });
+    
+    const repos = reposRes.ok ? await reposRes.json() : { items: [] };
+    
+    // Get recent commits from mobilemonero
+    const commitsRes = await fetch('https://api.github.com/repos/xmrtdao/mobilemonero/commits?per_page=5', {
+      headers: GITHUB_TOKEN ? { 'Authorization': `token ${GITHUB_TOKEN}` } : {},
+      signal: AbortSignal.timeout(10000),
+    });
+    
+    const commits = commitsRes.ok ? await commitsRes.json() : [];
+    
+    res.json({
+      success: true,
+      repos: repos.items?.slice(0, 10) || [],
+      total_repos: repos.total_count || 0,
+      recent_commits: commits.slice(0, 5) || [],
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// GET /api/dao/mining — Mining pool stats
+app.get('/api/dao/mining', async (req, res) => {
+  trackRequest('/api/dao/mining');
+  try {
+    const statsRes = await fetch(`${SUPABASE_URL}/functions/v1/mining-proxy`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ action: 'get_stats', wallet: 'global' }),
+      signal: AbortSignal.timeout(10000),
+    });
+    
+    const stats = statsRes.ok ? await statsRes.json() : { error: 'unavailable' };
+    
+    res.json({
+      success: statsRes.ok,
+      stats,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
 
 // ── Web Search ──────────────────────────────────────────────
 app.post('/web-search', async (req, res) => {
