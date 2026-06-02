@@ -2052,6 +2052,96 @@ app.get('/api/dao/gossip', async (req, res) => {
   }
 });
 
+// ── Fleet Chat Routes ───────────────────────────────────────
+// GET /api/fleet-chat/messages — Get fleet chat messages
+app.get('/api/fleet-chat/messages', async (req, res) => {
+  trackRequest('/api/fleet-chat/messages');
+  const topic = req.query.topic || 'fleet-chat';
+  const limit = parseInt(req.query.limit) || 50;
+  
+  try {
+    const historyRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/history`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-certificate-id': 'XMRT-CERT-RMJTYENN',
+      },
+      body: JSON.stringify({ topic, limit }),
+      signal: AbortSignal.timeout(10000),
+    });
+    
+    const messages = historyRes.ok ? await historyRes.json() : { error: 'unavailable' };
+    
+    res.json({
+      success: historyRes.ok,
+      topic,
+      messages: messages.messages || [],
+      count: messages.messages?.length || 0,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message, topic });
+  }
+});
+
+// POST /api/fleet-chat/messages — Send fleet chat message
+app.post('/api/fleet-chat/messages', async (req, res) => {
+  trackRequest('/api/fleet-chat/messages');
+  const { topic = 'fleet-chat', content, sender_id, sender_name, metadata } = req.body || {};
+  
+  if (!content) {
+    return res.status(400).json({ error: 'content is required' });
+  }
+  
+  try {
+    const broadcastRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/broadcast`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-certificate-id': 'XMRT-CERT-RMJTYENN',
+      },
+      body: JSON.stringify({
+        topic,
+        content,
+        sender_id: sender_id || 'relay',
+        sender_name: sender_name || 'Vex Relay',
+        metadata: metadata || {},
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    
+    const result = broadcastRes.ok ? await broadcastRes.json() : { error: 'broadcast failed' };
+    
+    res.json({
+      success: broadcastRes.ok,
+      message: result.message || { topic, content, sender_id, sender_name },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// GET /api/fleet-chat/active — Get active chat participants
+app.get('/api/fleet-chat/active', async (req, res) => {
+  trackRequest('/api/fleet-chat/active');
+  
+  const agents = state.get('fleet.agents', {});
+  const activeAgents = Object.values(agents).filter(a => {
+    const lastSeen = new Date(a.last_seen || 0);
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000);
+    return lastSeen > fiveMinAgo;
+  });
+  
+  res.json({
+    success: true,
+    active_agents: activeAgents,
+    count: activeAgents.length,
+    total_registered: Object.keys(agents).length,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // GET /api/dao/github — GitHub org activity
 app.get('/api/dao/github', async (req, res) => {
   trackRequest('/api/dao/github');
