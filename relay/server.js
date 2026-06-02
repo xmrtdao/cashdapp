@@ -1933,8 +1933,10 @@ app.get('/', (req, res) => {
 <div class="card">
       <h3 style="color:#60a5fa;">XMRT DAO Health</h3>
       <div class="stat"><span class="label">Supabase</span><span class="value" id="dao-health-status">checking...</span></div>
+      <div class="stat"><span class="label">Health Score</span><span class="value" id="dao-health-score">-</span></div>
       <div class="stat"><span class="label">Edge Functions</span><span class="value" id="dao-fn-count">-</span></div>
       <div class="stat"><span class="label">Agents</span><span class="value" id="dao-agent-count">-</span></div>
+      <div class="stat"><span class="label">Tasks</span><span class="value" id="dao-task-count">-</span></div>
       <div class="stat"><span class="label">Gossip Hub</span><span class="value" id="dao-gossip-status">-</span></div>
       <div style="margin-top:8px;font-size:11px;color:#6b6b80;">Live from system-health endpoint</div>
     </div>
@@ -2327,25 +2329,60 @@ loadUniversityStatus();
         var statusEl = document.getElementById('dao-health-status');
         var fnEl = document.getElementById('dao-fn-count');
         var agentEl = document.getElementById('dao-agent-count');
+        var taskEl = document.getElementById('dao-task-count');
         var gossipEl = document.getElementById('dao-gossip-status');
+        var scoreEl = document.getElementById('dao-health-score');
 
-        if (d.health && d.health.overall_health) {
-          var score = d.health.overall_health.score || 0;
-          var status = d.health.overall_health.status || 'unknown';
-          var badgeClass = score >= 80 ? 'badge-ok' : score >= 50 ? 'badge-warn' : 'badge-err';
-          if (statusEl) statusEl.innerHTML = '<span class="badge ' + badgeClass + '">' + status.toUpperCase() + ' (' + score + '/100)</span>';
-        } else {
+        // The /api/dao/health endpoint returns: { health: <system-health>, status: <system-status> }
+        // Each of those has its own nested structure: system-health returns { health: { overall_health: {...} } }
+        // and system-status returns { status: { overall_status: '...', components: {...} } }.
+        // The wrapper endpoint preserves those keys, so we end up with d.health.health.overall_health
+        // and d.status.status.components. Tolerant code below handles both nesting depths.
+        var h = (d.health && d.health.overall_health) ? d.health
+             : (d.health && d.health.health)        ? d.health.health
+             : null;
+        var s = (d.status && d.status.components) ? d.status
+             : (d.status && d.status.status)      ? d.status.status
+             : null;
+        if (!h && !s) {
           if (statusEl) statusEl.textContent = 'unavailable';
         }
 
-        if (d.health && d.health.components && d.health.components.edge_functions) {
-          if (fnEl) fnEl.textContent = d.health.components.edge_functions.deployed || '-';
+        if (h && h.overall_health) {
+          var score = h.overall_health.score || 0;
+          var status = h.overall_health.status || 'unknown';
+          var badgeClass = score >= 80 ? 'badge-ok' : score >= 50 ? 'badge-warn' : 'badge-err';
+          if (statusEl) statusEl.innerHTML = '<span class="badge ' + badgeClass + '">' + status.toUpperCase() + ' (' + score + '/100)</span>';
+          if (scoreEl) scoreEl.textContent = score + ' / 100 (' + status + ')';
+        } else if (s && (s.overall_status || s.health_score !== undefined)) {
+          var score2 = s.health_score || 0;
+          var status2 = s.overall_status || 'unknown';
+          var badgeClass2 = score2 >= 80 ? 'badge-ok' : score2 >= 50 ? 'badge-warn' : 'badge-err';
+          if (statusEl) statusEl.innerHTML = '<span class="badge ' + badgeClass2 + '">' + status2.toUpperCase() + ' (' + score2 + '/100)</span>';
+          if (scoreEl) scoreEl.textContent = score2 + ' / 100 (' + status2 + ')';
         }
 
-        if (d.health && d.health.components && d.health.components.agents) {
-          var agents = d.health.components.agents;
-          var total = (agents.IDLE || 0) + (agents.BUSY || 0) + (agents.OFFLINE || 0);
-          if (agentEl) agentEl.textContent = total + ' agents';
+        if (h && h.components) {
+          if (fnEl && h.components.edge_functions && h.components.edge_functions.deployed) {
+            fnEl.textContent = h.components.edge_functions.deployed + ' deployed';
+          } else if (fnEl && s && s.components && s.components.edge_functions) {
+            fnEl.textContent = (s.components.edge_functions.total_calls_24h || 0) + ' calls / 24h';
+          }
+          if (agentEl && h.components.agents) {
+            var agents = h.components.agents;
+            var total = (agents.IDLE || 0) + (agents.BUSY || 0) + (agents.OFFLINE || 0);
+            agentEl.textContent = total + ' (' + (agents.BUSY || 0) + ' busy)';
+          } else if (agentEl && s && s.components && s.components.agents && s.components.agents.stats) {
+            var a2 = s.components.agents.stats;
+            agentEl.textContent = (a2.total || 0) + ' (' + (a2.busy || 0) + ' busy)';
+          }
+          if (taskEl && s && s.components && s.components.tasks && s.components.tasks.stats) {
+            var t = s.components.tasks.stats;
+            taskEl.textContent = (t.total || 0) + ' (' + (t.completed || 0) + ' done)';
+          } else if (taskEl && h.components.tasks) {
+            var tt = h.components.tasks;
+            taskEl.textContent = (tt.total || 0) + ' (' + (tt.COMPLETED || 0) + ' done)';
+          }
         }
 
         // Check gossip hub separately
@@ -2389,14 +2426,18 @@ loadUniversityStatus();
 
         if (d.recent_commits && d.recent_commits.length > 0) {
           var last = d.recent_commits[0];
-          var msg = (last.commit && last.commit.message) ? last.commit.message.split('\n')[0].slice(0, 35) : 'recent commit';
+          // Note: split('\\n') in source becomes a real newline in the served HTML
+          // (because the whole dashboard is a template literal that interprets escapes).
+          // Use String.fromCharCode(10) to get a newline at runtime in the browser.
+          var NL = String.fromCharCode(10);
+          var msg = (last.commit && last.commit.message) ? last.commit.message.split(NL)[0].slice(0, 35) : 'recent commit';
           var when = new Date(last.commit.author.date).toLocaleDateString();
           if (commitEl) commitEl.textContent = msg + ' (' + when + ')';
 
           // Show last 3 commits
           if (recentEl) {
             recentEl.innerHTML = d.recent_commits.slice(0,3).map(function(c){
-              var m = (c.commit && c.commit.message) ? c.commit.message.split('\n')[0].slice(0, 28) : '?';
+              var m = (c.commit && c.commit.message) ? c.commit.message.split(NL)[0].slice(0, 28) : '?';
               var dd = new Date(c.commit.author.date).toLocaleDateString();
               return '<div style="font-size:0.65rem;color:#a0a0b0;margin:2px 0;">' + m + ' <span style="color:#6b6b80;">(' + dd + ')</span></div>';
             }).join('');
