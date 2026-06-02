@@ -1295,6 +1295,7 @@ app.get('/inbox', (req, res) => {
 
 app.use('/images', express.static(join(__dirname, 'public')));
 app.use('/radar', express.static(join(__dirname, 'public')));
+app.use('/static', express.static(join(__dirname, 'public')));
 app.use('/spatial', express.static(join(__dirname, 'spatial')));
 
 // Fallback: parse body as JSON for requests without Content-Type
@@ -1594,7 +1595,7 @@ app.get('/', (req, res) => {
 <canvas id="mesh-bg"></canvas>
   <h1><span class="pirate-flag"><img src="/images/xmrtdao.png" alt="XMRT DAO"></span> MobileMonero <span>Privateer Fleet</span></h1>
   <div class="subtitle">
-    <span style="color:var(--accent-orange);font-weight:600;">XMRT DAO</span> · Vex Relay v5.0.0 · 
+    <span style="color:var(--accent-orange);font-weight:600;">XMRT DAO</span> · <span title="HMS Speedy (1782) - 14-gun brig, 158 tons, captured the 32-gun Spanish frigate El Gamo on 6 May 1801 under Lord Cochrane's command, with 54 men vs 319. The underdog metaphor for this 6GB laptop's relay." style="cursor:help;border-bottom:1px dotted #4ade80;">HMS Speedy</span> v5.0.0 · 
     <a href="https://relay.mobilemonero.com">relay.mobilemonero.com</a> ·
     <a href="https://github.com/xmrtdao/mobilemonero" target="_blank">GitHub</a>
   </div>
@@ -1742,7 +1743,8 @@ app.get('/', (req, res) => {
         </div>
         <!-- Ship stats -->
         <div style="flex:1;min-width:120px;">
-          <div class="stat"><span class="label">Vessel</span><span class="value" style="color:#4ade80;">Vex Relay</span></div>
+          <div class="stat"><span class="label">Vessel</span><span class="value" style="color:#4ade80;" title="HMS Speedy (1782) - 14-gun brig, 158 tons. Captured the 32-gun Spanish frigate El Gamo on 6 May 1801 under Lord Cochrane, with 54 men vs 319. Cochrane's own words: 'little more than a burlesque on a vessel of war.' The 6GB laptop's relay. Under command of Vex.">HMS Speedy <span style="color:#6b6b80;font-weight:400;font-size:0.75em;">(under Vex)</span></span></div>
+          <div class="stat"><span class="label">Captain</span><span class="value" style="color:#fbbf24;" title="Thomas Cochrane, 10th Earl of Dundonald. Captain of HMS Speedy 1800-1801. The audacious underdog who took a 14-gun brig and crew of 54 against a 32-gun frigate with 319 men - and won by trebling his shot, locking yards, and a psychological-warfare trick to the ship's doctor.">Lord Cochrane</span></div>
           <div class="stat"><span class="label">Signal</span><span class="value" id="rssi-signal" style="color:#4ade80;">● Online</span></div>
           <div class="stat"><span class="label">RSSI</span><span class="value" id="rssi-strength">scanning...</span></div>
           <div class="stat"><span class="label">Peers</span><span class="value" id="iot-peers">scanning...</span></div>
@@ -2625,135 +2627,7 @@ loadUniversityStatus();
       });
   }
 
-  // ── Markdown Renderer ───────────────────────────────────────
-  // Dependency-free, XSS-safe. Escapes HTML first, then applies markdown transforms on the escaped text.
-  // Used by bulletin posts and fleet chat messages.
-  // Supports: **bold**, *italic*, ~~strike~~, [apostrophe]code[apostrophe], fenced code, [text](url), # h1-h4,
-  // - bullets, 1. numbered lists, > blockquote, --- hr, | tables |, paragraphs, line breaks.
-  function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
-  function renderInline(escaped) {
-    // 1) inline code: [apostrophe]text[apostrophe] (do first so contents are not reformatted)
-    escaped = escaped.replace(/\x60([^\x60\n]+)\x60/g, function(_, c) { return '<code>' + c + '</code>'; });
-    // 2) links: [text](url) - only http(s) and mailto
-    escaped = escaped.replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/g, function(_, t, u) {
-      return '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + t + '</a>';
-    });
-    // 3) bold: **text** or __text__
-    escaped = escaped.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
-    escaped = escaped.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
-    // 4) strike: ~~text~~
-    escaped = escaped.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
-    // 5) italic: *text* or _text_ (must not match ** patterns already consumed)
-    escaped = escaped.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
-    escaped = escaped.replace(/(^|[^_\w])_([^_\n]+)_(?!\w)/g, '$1<em>$2</em>');
-    return escaped;
-  }
-  function renderMarkdown(src) {
-    if (src == null) return '';
-    var text = String(src);
-    // Extract fenced code blocks first so other rules don't touch them.
-    var codeBlocks = [];
-    text = text.replace(/\x60\x60\x60([\s\S]*?)\x60\x60\x60/g, function(_, code) {
-      var i = codeBlocks.length;
-      codeBlocks.push(escapeHtml(code.replace(/^\n|\n$/g, '')));
-      return '\u0000CODEBLOCK' + i + '\u0000';
-    });
-    // Extract horizontal rules and tables into a shared stash.
-    var stash = [];
-    text = text.replace(/^\s*---\s*$/gm, function() {
-      var i = stash.length;
-      stash.push('<hr>');
-      return '\u0000STASH' + i + '\u0000';
-    });
-    // Tables: group of pipe rows including a separator line.
-    text = text.replace(/((?:^\|.+\|\s*\n)+^\|[\s:|-]+\|\s*\n(?:^\|.+\|\s*\n?)+)/gm, function(block) {
-      var lines = block.trim().split('\n');
-      if (lines.length < 2) return block;
-      var headerCells = lines[0].split('|').slice(1, -1).map(function(c){ return c.trim(); });
-      var bodyRows = lines.slice(2).map(function(row) {
-        return row.split('|').slice(1, -1).map(function(c){ return c.trim(); });
-      });
-      var tableHtml = '<table><thead><tr>';
-      for (var i = 0; i < headerCells.length; i++) tableHtml += '<th>' + renderInline(escapeHtml(headerCells[i])) + '</th>';
-      tableHtml += '</tr></thead><tbody>';
-      for (var r = 0; r < bodyRows.length; r++) {
-        tableHtml += '<tr>';
-        for (var c = 0; c < bodyRows[r].length; c++) tableHtml += '<td>' + renderInline(escapeHtml(bodyRows[r][c])) + '</td>';
-        tableHtml += '</tr>';
-      }
-      tableHtml += '</tbody></table>';
-      var idx = stash.length;
-      stash.push(tableHtml);
-      return '\u0000STASH' + idx + '\u0000';
-    });
-    // Split into blocks by blank lines.
-    var blocks = text.split(/\n\s*\n/);
-    var html = '';
-    for (var b = 0; b < blocks.length; b++) {
-      var block = blocks[b];
-      if (!block.trim()) continue;
-      // Restore stashed placeholders for inline use within a paragraph.
-      var restoreInline = function(s) {
-        return s.replace(/\u0000STASH(\d+)\u0000/g, function(_, i2) { return stash[parseInt(i2, 10)]; });
-      };
-      // Fenced code block (single block): if the only content is a CODEBLOCK placeholder.
-      var onlyCb = block.match(/^\u0000CODEBLOCK(\d+)\u0000$/);
-      if (onlyCb) {
-        html += '<pre><code>' + codeBlocks[parseInt(onlyCb[1], 10)] + '</code></pre>';
-        continue;
-      }
-      // Heading (single line starting with #)
-      var hMatch = block.match(/^(#{1,4})\s+(.+)$/);
-      if (hMatch && block.split('\n').length === 1) {
-        var level = hMatch[1].length;
-        html += '<h' + level + '>' + renderInline(escapeHtml(hMatch[2])) + '</h' + level + '>';
-        continue;
-      }
-      // Blockquote
-      if (/^>\s/.test(block)) {
-        var q = block.split('\n').map(function(l){ return l.replace(/^>\s?/, ''); }).join(' ');
-        html += '<blockquote>' + renderInline(escapeHtml(q)) + '</blockquote>';
-        continue;
-      }
-      // Unordered list
-      if (/^\s*[-*]\s+/.test(block)) {
-        var items = block.split('\n').filter(function(l){ return /^\s*[-*]\s+/.test(l); }).map(function(l){
-          return '<li>' + renderInline(escapeHtml(l.replace(/^\s*[-*]\s+/, ''))) + '</li>';
-        });
-        html += '<ul>' + items.join('') + '</ul>';
-        continue;
-      }
-      // Ordered list
-      if (/^\s*\d+\.\s+/.test(block)) {
-        var items2 = block.split('\n').filter(function(l){ return /^\s*\d+\.\s+/.test(l); }).map(function(l){
-          return '<li>' + renderInline(escapeHtml(l.replace(/^\s*\d+\.\s+/, ''))) + '</li>';
-        });
-        html += '<ol>' + items2.join('') + '</ol>';
-        continue;
-      }
-      // Paragraph: process each line through renderInline, then collapse <br>.
-      var hasBlockStash = /\u0000STASH\d+\u0000/.test(block);
-      var para = block.split('\n').map(function(l){
-        return renderInline(escapeHtml(l));
-      }).join('<br>');
-      // Restore stash markers (HRs, tables) inside the paragraph.
-      para = restoreInline(para);
-      if (hasBlockStash) {
-        // Tables/HRs are block-level — do not wrap them in <p> (invalid HTML).
-        html += para;
-      } else {
-        html += '<p>' + para + '</p>';
-      }
-    }
-    return html;
-  }
+  // Markdown renderer is loaded from /static/markdown.js to keep the template literal escape-free.
 
   // ── Bulletin Board Functions ────────────────────────────────
   var boardData = { topics: [] };
@@ -3214,6 +3088,8 @@ loadUniversityStatus();
   animate();
 })();
 </script>
+
+  <script src="/static/markdown.js"></script>
   
   </body>
 </html>`);
@@ -4044,7 +3920,7 @@ function checkAndMarkDuplicated(agent, message) {
 
 // Fleet agent registry (who's listening)
 const FLEET_AGENTS = {
-  'vex': { name: 'Vex', endpoint: 'local', type: 'relay' },
+  'vex': { name: 'Vex (Captain, HMS Speedy)', endpoint: 'local', type: 'relay' },
   'eliza': { name: 'Eliza-Cloud', endpoint: 'eliza-relay', type: 'cloud' },
   'hermes': { name: 'Hermes', endpoint: 'https://hermes.mobilemonero.com', type: 'mobile' },
 };
