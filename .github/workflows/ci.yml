@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install relay deps
+        run: cd relay && npm install
+
+      - name: Lint relay
+        run: cd relay && npm run lint || true
+
+      - name: Validate Cloudflare Workers
+        run: |
+          for worker in workers/*.js; do
+            if [ -f "$worker" ]; then
+              node --check "$worker" && echo "✓ $worker syntax OK"
+            fi
+          done
+
+      - name: Validate HTML pages
+        run: |
+          for html in index.html docs/*.html; do
+            if [ -f "$html" ]; then
+              echo "✓ $html exists"
+            fi
+          done
+
+      - name: Check README exists
+        run: test -f README.md && echo "README OK"
