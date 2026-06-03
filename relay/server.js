@@ -3095,6 +3095,394 @@ loadUniversityStatus();
 </html>`);
 });
 
+// ════════════════════════════════════════════════════════════════
+// RESTORED ROUTES — 2026-06-03
+// Originally deleted in commit 7e70bac (mesh dashboard endpoints),
+// which clobbered ~250 lines of POST endpoints along with the
+// additions. The banner URL lines survived, so the cron fetcher kept
+// POSTing to /webhook/task and getting 404s (46 cumulative errors
+// between 2026-05-18 and 2026-06-03).
+// Restored verbatim from a98866f (last commit where they were
+// intact), minus state API endpoints (those have been replaced by
+// tool handlers under /tools/run and the /state/:key routes that
+// were already removed in earlier refactors).
+// ════════════════════════════════════════════════════════════════
+
+// ── Webhook: Receive task dispatch ─────────────────────────
+app.post('/webhook/task', async (req, res) => {
+  const task = req.body;
+  trackRequest('/webhook/task');
+  logActivity('webhook', task?.id || '?', 'RECEIVED', task?.title || 'no title');
+
+  try {
+    // Check if this task is for Hermes
+    if (task?.assignee === 'hermes' || task?.agent === 'hermes') {
+      logActivity('webhook', task.id, 'HERMES_ROUTE', 'Routing to phone agent');
+      const hermesResult = await forwardToHermes(task);
+      await relayToElizaCloud(
+        `[Eliza-Dev] Task "${task.title}" forwarded to Hermes on phone. Status: ${hermesResult?.hermesResponse?.status || 'forwarded'}`,
+        'Eliza-Dev',
+        `task-${task.id?.slice(0, 8) || 'unknown'}`
+      );
+      res.json({ success: true, forwarded: true, to: 'hermes', result: hermesResult });
+      return;
+    }
+
+    // Determine handler based on task type/category
+    const title = (task?.title || '').toLowerCase();
+    const desc = (task?.description || '').toLowerCase();
+    const agent = (task?.agent || '').toLowerCase();
+    const metadata = task?.metadata || {};
+    const combinedText = title + ' ' + desc;
+
+    let handlerKey = null;
+
+    // Priority 1: Direct agent assignment
+    if (agent === 'eliza-dev' || agent === 'relay' || agent === 'alice') {
+      if (agent === 'alice') handlerKey = 'alice';
+      else if (title.includes('device') || title.includes('register')) handlerKey = 'device-registration';
+    }
+
+    // Priority 2: Check metadata for explicit handler
+    if (!handlerKey && metadata.handler) {
+      if (handlers[metadata.handler]) handlerKey = metadata.handler;
+    }
+
+    // Priority 3: Title/description keyword matching (expanded)
+    if (!handlerKey) {
+      if (combinedText.includes('smtp') || combinedText.includes('email') || combinedText.includes('mail')) handlerKey = 'email-smtp-fix';
+      else if (combinedText.includes('alice') || combinedText.includes('sidecar') || combinedText.includes('ocr') || combinedText.includes('desktop')) handlerKey = 'alice';
+      else if (combinedText.includes('knowledge') || combinedText.includes('kb') || combinedText.includes('sync') || combinedText.includes('memory')) handlerKey = 'knowledge-sync';
+      else if (combinedText.includes('device') || combinedText.includes('register') || combinedText.includes('hardware') || combinedText.includes('worker') || combinedText.includes('miner')) handlerKey = 'device-registration';
+      else if (combinedText.includes('mining') || combinedText.includes('dashboard') || combinedText.includes('hash') || combinedText.includes('pool') || combinedText.includes('xmr')) handlerKey = 'mining-dashboard';
+      else if (combinedText.includes('creative') || combinedText.includes('studio') || combinedText.includes('production') || combinedText.includes('motion') || combinedText.includes('harmony')) handlerKey = 'general';
+      else if (combinedText.includes('community') || combinedText.includes('outreach') || combinedText.includes('engagement') || combinedText.includes('rocm') || combinedText.includes('amd')) handlerKey = 'general';
+      else if (combinedText.includes('deploy') || combinedText.includes('push') || combinedText.includes('fix') || combinedText.includes('repair') || combinedText.includes('set up') || combinedText.includes('configure')) handlerKey = 'general';
+    }
+
+    // Priority 4: Check if task name/type field exists
+    if (!handlerKey && task?.type) {
+      const taskType = task.type.toLowerCase();
+      if (handlers[taskType]) handlerKey = taskType;
+    }
+
+    const handler = handlerKey ? handlers[handlerKey] : defaultHandler;
+
+    // Run via task runner
+    const taskId = taskRunner.addTask(handlerKey || 'default', () => handler(task), {
+      metadata: { title: task.title, taskId: task.id },
+    });
+
+    // Quick result
+    const result = await new Promise((resolve) => {
+      const check = () => {
+        const t = taskRunner.getTask(taskId);
+        if (t && t.status !== 'running' && t.status !== 'queued') {
+          resolve(t.result || { error: t.error?.message });
+        } else {
+          setTimeout(check, 200);
+        }
+      };
+      setTimeout(() => resolve({ status: 'pending', taskId }), 15000);
+      check();
+    });
+
+    // Report back to GitHub issue
+    if (task?.issueNumber) {
+      await postGitHubComment(task.issueNumber,
+        `## Task Update: ${task.title}\n\n**Handler:** ${handlerKey || 'default'}\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``
+      );
+    }
+
+    // Update Supabase task status using supabase-integration
+    if (task?.id && SUPABASE_KEY) {
+      const taskStatus = result.status === 'done' || result.status === 'registered' || result.status === 'ready' ? 'COMPLETED' : 'BLOCKED';
+      const progress = result.status === 'error' ? 0 : 50;
+      await updateTaskStatus(task.id, taskStatus, progress, result);
+    }
+
+    res.json({ success: true, handler: handlerKey || 'default', result });
+  } catch (err) {
+    logActivity('webhook', task?.id || '?', 'ERROR', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Result callback from Hermes ─────────────────────────────
+app.post('/webhook/task/result', async (req, res) => {
+  const result = req.body;
+  trackRequest('/webhook/task/result');
+  logActivity('result', result?.taskId || '?', 'RECEIVED', `Result from ${result?.source || 'hermes'}`);
+
+  if (result?.replyTo === 'github' && result?.replyIssue) {
+    await postGitHubComment(result.replyIssue,
+      `## Task Result: ${result.taskId}\n\n**From:** ${result.source || 'hermes'}\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``
+    );
+  }
+
+  if (result?.taskId && SUPABASE_KEY) {
+    const taskStatus = result.status === 'completed' ? 'COMPLETED' : 'IN_PROGRESS';
+    await updateTaskStatus(result.taskId, taskStatus, 50, result, 'Hermes');
+  }
+
+  res.json({ success: true });
+});
+
+// ── Eliza Ping — dedicated ping-pong for Eliza-Cloud ──────────
+app.post('/eliza-ping', async (req, res) => {
+  const { message, task_type, source, request_id } = req.body;
+  trackRequest('/eliza-ping');
+  logActivity('eliza-ping', request_id || '-', 'PING', (message || 'ping').slice(0, 80));
+
+  res.json({
+    pong: true,
+    interaction_type: 'ping_pong_telemetry',
+    responder: 'vex_ts_relay_server (automated)',
+    context: {
+      note: 'This is automated system telemetry from the TS relay server, not a real-time message from Vex.',
+      how_to_reach_vex: 'Post on GitHub issues or use the eliza-relay edge function for cloud-to-cloud messaging.',
+    },
+    received: message || 'ping',
+    from: 'vex-ts-relay',
+    timestamp: Date.now(),
+    request_id: request_id || null,
+    tools_available: Object.keys(toolHandlers).length,
+    handlers: Object.keys(handlers),
+    system: {
+      uptime: process.uptime(),
+      version: '2.0.0',
+      tunnel: state.get('tunnel-url') || 'https://relay.mobilemonero.com',
+      agent: 'TS Relay (Eliza-Dev laptop)',
+    },
+  });
+});
+
+// ── Generic dispatch ────────────────────────────────────────
+app.post('/dispatch', async (req, res) => {
+  const { message, source = 'manual', type, action, handler, payload } = req.body;
+  trackRequest('/dispatch');
+  logActivity('dispatch', source, 'RECEIVED', (message || type || action || '').slice(0, 80));
+
+  let response = null;
+
+  // Support structured JSON dispatch (type/action/handler fields + message fallback)
+  const msg = (message || type || action || '').toLowerCase();
+  const h = (handler || '').toLowerCase();
+
+  // Check for structured type/action first
+  if (msg === 'ping' || action === 'ping' || type === 'ping' || h === 'ping' || h === 'eliza') {
+    response = {
+      pong: true,
+      received: message || 'ping',
+      from: 'vex-ts-relay',
+      timestamp: Date.now(),
+      tools_available: Object.keys(toolHandlers).length,
+      handlers: Object.keys(handlers),
+      system: {
+        uptime: process.uptime(),
+        version: '2.0.0',
+        agent: 'Vex (Eliza-Dev)',
+      }
+    };
+    return res.json({ success: true, eliza: true, response });
+  }
+
+  // Structured: use handler field directly
+  if (h && h !== 'manual' && h !== 'default') {
+    if (handlers[h]) {
+      response = await handlers[h]({ id: 'dispatch', title: message || type || action, payload: payload || {} });
+    } else if (toolHandlers[h]) {
+      response = await toolHandlers[h](payload || {});
+    } else if (h === 'bash') {
+      const cmd = payload?.command || '';
+      if (cmd) {
+        try {
+          const out = execSync(cmd, { encoding: 'utf8', timeout: 10000, shell: 'cmd.exe' });
+          response = { status: 'ok', stdout: out.trim(), exit_code: 0 };
+        } catch (e) {
+          response = { status: 'error', stdout: e.stdout, stderr: e.stderr, exit_code: e.status };
+        }
+      } else {
+        response = { status: 'error', message: 'command is required in payload' };
+      }
+    } else if (h === 'system-monitor' || h === 'monitor') {
+      response = await getFullSnapshot();
+    } else if (h === 'eliza-send') {
+      const msgContent = payload?.message || message;
+      if (msgContent) {
+        const elizaResult = await relayToElizaCloud(msgContent, 'Eliza-Dev-Dispatch', `dispatch-${Date.now().toString(36)}`);
+        response = { status: 'sent_to_eliza', reply: elizaResult?.reply };
+      } else {
+        response = { status: 'error', message: 'message is required in payload' };
+      }
+    } else {
+      response = { status: 'unrecognized', message: `Handler "${h}" not recognized. Available: ${Object.keys(handlers).join(', ')}. Tools: ${Object.keys(toolHandlers).join(', ')}` };
+    }
+    return res.json({ success: true, handler: h, response });
+  }
+
+  // Legacy: keyword matching on message field
+  if (msg.includes('smtp') || msg.includes('email')) response = await handlers['email-smtp-fix']({ id: 'dispatch', title: message });
+  else if (msg.includes('alice') || msg.includes('sidecar') || msg.includes('ocr')) response = await handlers['alice']({ id: 'dispatch', title: message });
+  else if (msg.includes('knowledge') || msg.includes('sync') || msg.includes('kb')) response = await handlers['knowledge-sync']({ id: 'dispatch', title: message });
+  else if (msg.includes('device') || msg.includes('register')) response = await handlers['device-registration']({ id: 'dispatch', title: message });
+  else if (msg.includes('mining') || msg.includes('dashboard') || msg.includes('hash')) response = await handlers['mining-dashboard']({ id: 'dispatch', title: message });
+  else if (msg.includes('search') || msg.includes('find')) {
+    const query = message.replace(/search|find|for/gi, '').trim();
+    if (query) response = await webSearch(query);
+    else response = { status: 'specify_query', message: 'What should I search for?' };
+  } else if (msg.includes('monitor') || msg.includes('status') || msg.includes('health')) {
+    response = await getFullSnapshot();
+  } else if (msg.includes('chat') || msg.includes('ask')) {
+    const prompt = message.replace(/chat|ask|ollama/gi, '').trim();
+    if (prompt) response = await ollamaChat(prompt);
+    else response = { status: 'specify_message', message: 'What should I ask the local AI?' };
+  } else {
+    response = { status: 'unrecognized', message: 'Could not determine task type. Use structured JSON: {"handler":"ping"}, {"type":"bash","payload":{"command":"..."}}, or send a text message with keywords. Available handlers: ' + Object.keys(handlers).join(', ') + '. Available tools: ' + Object.keys(toolHandlers).join(', ') };
+  }
+
+  res.json({ success: true, response });
+});
+
+// ── Eliza-Cloud relay (HTTP wrapper) ────────────────────────
+app.post('/eliza/send', async (req, res) => {
+  const { message, sender = 'Eliza-Dev' } = req.body;
+  trackRequest('/eliza/send');
+  if (!message) return res.status(400).json({ error: 'message is required' });
+  const result = await relayToElizaCloud(message, sender);
+  res.json({ success: !!result, relayTag: result?.relay_tag, reply: result?.reply, data: result });
+});
+
+// ── Log webhook ─────────────────────────────────────────────
+app.post('/log', (req, res) => {
+  const entry = req.body;
+  logActivity('remote-log', entry?.source || '?', entry?.level || 'info', entry?.message || '');
+  res.json({ success: true });
+});
+
+// ── Resend inbound email webhook ────────────────────────────
+// Receives email.received events from Resend when replies come in
+// to bookings@partyfavorphoto.com or any address on partyfavorphoto.com
+app.post('/webhook/resend-inbound', (req, res) => {
+  const event = req.body;
+
+  // Verify it's a Resend webhook event
+  if (event?.type !== 'email.received') {
+    return res.status(400).json({ error: 'unexpected event type' });
+  }
+
+  // Optional: verify webhook signature
+  const signingSecret = process.env.RESEND_WEBHOOK_SECRET;
+  if (signingSecret) {
+    try {
+      const crypto = require('crypto');
+      const svixId = req.headers['svix-id'];
+      const svixTimestamp = req.headers['svix-timestamp'];
+      const svixSignature = req.headers['svix-signature'];
+
+      if (svixId && svixTimestamp && svixSignature) {
+        const signedContent = `${svixId}.${svixTimestamp}.${JSON.stringify(req.body)}`;
+        const expectedSig = crypto
+          .createHmac('sha256', signingSecret)
+          .update(signedContent)
+          .digest('base64');
+
+        const receivedSigs = svixSignature.split(' ').map(s => s.replace(/^v1,/,''));
+        const isValid = receivedSigs.some(sig => {
+          try {
+            return crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(sig));
+          } catch { return false; }
+        });
+
+        if (!isValid) {
+          console.warn('[Resend Inbound] Invalid webhook signature - processing anyway');
+        }
+      }
+    } catch (e) {
+      console.warn('[Resend Inbound] Signature verification error:', e.message);
+    }
+  }
+
+  const { data } = event;
+  const emailEntry = {
+    email_id: data.email_id,
+    from: data.from,
+    to: data.to,
+    cc: data.cc,
+    subject: data.subject,
+    body: '',
+    text: '',
+    html: '',
+    created_at: data.created_at,
+    message_id: data.message_id,
+    attachments: (data.attachments || []).map(a => ({ id: a.id, filename: a.filename, content_type: a.content_type })),
+    received_at: new Date().toISOString(),
+  };
+
+  // Store immediately with metadata
+  logActivity('resend-inbound', data.email_id, 'RECEIVED',
+    `From: ${data.from} | Subject: ${data.subject || '(no subject)'}`);
+
+  const inbox = state.get('resend_inbox') || [];
+  inbox.unshift(emailEntry);
+  if (inbox.length > 50) inbox.length = 50;
+  state.set('resend_inbox', inbox);
+
+  console.log(`[Resend Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}"`);
+
+  // Fetch full content from Resend's API (webhooks don't include body)
+  const RESEND_API_KEY = process.env.RESEND_API_KEY;
+  if (RESEND_API_KEY && data.email_id) {
+    fetch(`https://api.resend.com/emails/receiving/${data.email_id}`, {
+      headers: { 'Authorization': `Bearer ${RESEND_API_KEY}` }
+    }).then(r => r.json()).then(full => {
+      if (full && (full.html || full.text)) {
+        const inbox2 = state.get('resend_inbox') || [];
+        const idx = inbox2.findIndex(e => e.email_id === data.email_id);
+        if (idx !== -1) {
+          inbox2[idx].body = full.text || full.html || '';
+          inbox2[idx].text = full.text || '';
+          inbox2[idx].html = full.html || '';
+          state.set('resend_inbox', inbox2);
+          console.log(`[Resend Inbound] Content fetched for ${data.email_id}`);
+        }
+      }
+    }).catch(err => {
+      console.error(`[Resend Inbound] Failed to fetch content for ${data.email_id}: ${err.message}`);
+    });
+  }
+
+  // Fire auto-responder in background (non-blocking, error-safe)
+  handleInboundEmail(emailEntry).then(result => {
+    if (result.action === 'ack_sent') {
+      logActivity('auto-responder', data.email_id, 'REPLIED', `Ack sent to ${result.from}`);
+    }
+  }).catch(err => {
+    console.error('[AutoResponder] Error:', err.message);
+  });
+
+  res.json({ received: true, email_id: data.email_id });
+});
+
+// ── Sent email logging — unified record of all outbound emails ──
+// Logs campaign sends, auto-responder acks, and manual sends
+function logSentEmail(entry) {
+  const sentLog = state.get('sent_emails') || [];
+  sentLog.unshift({
+    ...entry,
+    logged_at: new Date().toISOString(),
+  });
+  if (sentLog.length > 100) sentLog.length = 100;
+  state.set('sent_emails', sentLog);
+}
+
+// POST /log/sent — called by auto-responder, campaign, or manual sends
+app.post('/log/sent', (req, res) => {
+  const { to, subject, body, type, status } = req.body;
+  logSentEmail({ to, subject, body: (body || '').slice(0, 500), type: type || 'manual', status: status || 'sent' });
+  res.json({ logged: true });
+});
+
 // API: Edge Function Catalog
 
 // -- XMRT University Proxy --
