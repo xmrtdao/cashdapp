@@ -5368,6 +5368,28 @@ app.post('/resend/inbox/read', (req, res) => {
   res.json({ success: true });
 });
 
+// POST /resend/inbox/parsed — mark a relay email as parsed by Alice
+// Stores classification + extraction alongside the read flag so we
+// can skip re-parsing on subsequent cycles. Body:
+//   { id, domain, classification: {category, priority, is_automated, confidence},
+//     extracted: {phone, date_mentioned, guest_count, address, event_type, ...} }
+app.post('/resend/inbox/parsed', (req, res) => {
+  const { id, domain, classification, extracted } = req.body || {};
+  if (!id || !domain) return res.status(400).json({ error: 'id and domain required' });
+  const inbox = getInbox();
+  const key = domain === 'partyfavorphoto.com' ? 'pfp' : 'mobilemonero';
+  if (!inbox[key]) return res.status(404).json({ error: 'no inbox for domain' });
+  const email = inbox[key].find(e => e.id === id);
+  if (!email) return res.status(404).json({ error: 'email not found' });
+  email.read = (classification?.priority || 0) <= 4; // low-priority = auto-read
+  email.parsed_by = 'alice-sidecar';
+  email.parsed_at = new Date().toISOString();
+  email.classification = classification || null;
+  email.extracted = extracted || null;
+  state.set(EMAIL_STORE_KEY, inbox);
+  res.json({ success: true });
+});
+
 // ── Resend Inbox (XMRT)
 app.get('/resend/mobilemonero/inbox', (req, res) => {
   const inbox = getInbox();
