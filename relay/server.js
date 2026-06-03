@@ -3404,8 +3404,9 @@ app.post('/webhook/resend-inbound', (req, res) => {
   }
 
   const { data } = event;
+  const emailId = data.id || data.email_id;
   const emailEntry = {
-    email_id: data.email_id,
+    email_id: emailId,
     from: data.from,
     to: data.to,
     cc: data.cc,
@@ -3420,35 +3421,76 @@ app.post('/webhook/resend-inbound', (req, res) => {
   };
 
   // Store immediately with metadata
-  logActivity('resend-inbound', data.email_id, 'RECEIVED',
+  logActivity('resend-inbound', emailId, 'RECEIVED',
     `From: ${data.from} | Subject: ${data.subject || '(no subject)'}`);
 
+  // Store in BOTH the legacy resend_inbox state (for backward compat with
+  // auto-responder) AND the unified email.inbox state (for /resend/inbox
+  // GET routes and Alice's parser).
   const inbox = state.get('resend_inbox') || [];
   inbox.unshift(emailEntry);
   if (inbox.length > 50) inbox.length = 50;
   state.set('resend_inbox', inbox);
 
-  console.log(`[Resend Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}"`);
+  // Also store in the unified email.inbox state so GET /resend/inbox
+  // returns it and Alice's parser picks it up.
+  const toArr = Array.isArray(data.to) ? data.to : (data.to ? [data.to] : []);
+  const toDomain = toArr[0]?.includes('partyfavorphoto') ? 'partyfavorphoto.com'
+                  : toArr[0]?.includes('mobilemonero') ? 'mobilemonero.com'
+                  : 'partyfavorphoto.com';
+  try {
+    addToInbox(toDomain, {
+      to: data.to,
+      from: data.from,
+      subject: data.subject,
+      text: '',  // will be filled below
+      html: '',
+      email_id: emailId,
+      attachments: data.attachments,
+    });
+  } catch (e) {
+    console.error('[Resend Inbound] addToInbox failed:', e.message);
+  }
+
+  console.log(`[Resend Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}" -> ${toDomain}`);
 
   // Fetch full content from Resend's API (webhooks don't include body)
-  const RESEND_API_KEY = process.env.RESEND_API_KEY;
-  if (RESEND_API_KEY && data.email_id) {
-    fetch(`https://api.resend.com/emails/receiving/${data.email_id}`, {
+  // Determine which Resend key to use based on recipient domain
+  const RESEND_KEYS = {
+    'partyfavorphoto.com': process.env.RESEND_API_KEY,
+    'mobilemonero.com': process.env.RESEND_XMRT_API_KEY,
+  };
+  const RESEND_API_KEY = RESEND_KEYS[toDomain] || process.env.RESEND_API_KEY;
+  if (RESEND_API_KEY && emailId) {
+    fetch(`https://api.resend.com/emails/receiving/${emailId}`, {
       headers: { 'Authorization': `Bearer ${RESEND_API_KEY}` }
     }).then(r => r.json()).then(full => {
       if (full && (full.html || full.text)) {
+        // Update legacy resend_inbox
         const inbox2 = state.get('resend_inbox') || [];
-        const idx = inbox2.findIndex(e => e.email_id === data.email_id);
+        const idx = inbox2.findIndex(e => e.email_id === emailId);
         if (idx !== -1) {
           inbox2[idx].body = full.text || full.html || '';
           inbox2[idx].text = full.text || '';
           inbox2[idx].html = full.html || '';
           state.set('resend_inbox', inbox2);
-          console.log(`[Resend Inbound] Content fetched for ${data.email_id}`);
+          console.log(`[Resend Inbound] Content fetched for ${emailId}`);
+        }
+        // Update unified email.inbox so /resend/inbox and Alice's parser see it
+        const unified = getInbox();
+        const unifiedKey = toDomain === 'partyfavorphoto.com' ? 'pfp' : 'mobilemonero';
+        if (unified[unifiedKey]) {
+          const u = unified[unifiedKey].find(e => e.id === emailId);
+          if (u) {
+            u.text = full.text || '';
+            u.html = full.html || '';
+            state.set(EMAIL_STORE_KEY, unified);
+            console.log(`[Resend Inbound] Content stored in email.inbox for ${emailId}`);
+          }
         }
       }
     }).catch(err => {
-      console.error(`[Resend Inbound] Failed to fetch content for ${data.email_id}: ${err.message}`);
+      console.error(`[Resend Inbound] Failed to fetch content for ${emailId}: ${err.message}`);
     });
   }
 
@@ -3461,7 +3503,7 @@ app.post('/webhook/resend-inbound', (req, res) => {
     console.error('[AutoResponder] Error:', err.message);
   });
 
-  res.json({ received: true, email_id: data.email_id });
+  res.json({ received: true, email_id: emailId });
 });
 
 // ── Sent email logging — unified record of all outbound emails ──
