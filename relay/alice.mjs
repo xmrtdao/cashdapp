@@ -52,7 +52,11 @@ function loadEnv() {
 }
 loadEnv();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://vawouugtzwmejxqkeqqj.supabase.co';
+const SUPABASE_URL = process.env.SUPABASE_URL;
+if (!SUPABASE_URL) {
+  console.error('[FATAL] SUPABASE_URL is not set in env. Refusing to start — would otherwise fall back to a dead cloud endpoint.');
+  process.exit(1);
+}
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const RESEND_KEY = process.env.RESEND_API_KEY || '';
 const RESEND_XMRT_KEY = process.env.RESEND_XMRT_API_KEY || '';
@@ -519,18 +523,91 @@ async function daemonLoop() {
     
     // Check for @alice mentions in fleet chat
     await checkFleetMentions();
-    
-    // Post completion summary to fleet chat (every 3rd cycle, or on errors)
-    if (cycle % 3 === 0) {
-      const ok = services.filter(s => s.status === 'ok').length;
-      const total = services.length;
+
+    // Per-cycle: persist structured observations to shared memory
+    // (app.fleet_memory) and ask local Ollama to synthesize a terse
+    // 1-2 line digest for fleet chat. Operational tone, no essays.
+    try {
+      const { writeMemoryBatch, readRecent, readOpenQuestions } = await import('./lib/fleet-memory.mjs');
+      const { synthesizeAndPost, postServiceTransitions, diffServices } = await import('./lib/fleet-firehose.mjs');
+
+      // 1. Write observations: service transitions, email parse summary, and
+      //    any open questions/contradictions we noticed.
+      const prevState = loadState();
+      const transitions = diffServices(prevState.lastServices || [], services);
+      const observations = [];
+
+      for (const t of transitions) {
+        observations.push({
+          agent_id: 'alice-sidecar',
+          agent_role: 'synthesizer',
+          memory_type: 'event',
+          scope: `service:${t.service}`,
+          title: `${t.service}: ${t.from} -> ${t.to}`,
+          body: `Service ${t.service} transitioned from ${t.from} to ${t.to}.${t.detail ? ' Detail: ' + t.detail.slice(0, 200) : ''}`,
+          payload: { service: t.service, from: t.from, to: t.to, detail: t.detail || null },
+          refs: [{ kind: 'cycle', id: `cycle-${cycle}`, ts: new Date().toISOString() }],
+          confidence: 1.0,
+          ttl_hours: 168,
+        });
+      }
+
       const bad = services.filter(s => s.status !== 'ok');
-      const lastEmail = loadState().lastEmailParse;
-      const emailPart = lastEmail ? ` | Emails: ${lastEmail.parsed} parsed, ${lastEmail.inquiries} inquiries` : '';
-      const msg = 'Alice cycle ' + cycle + ' complete. ' + ok + '/' + total + ' services ok' + emailPart + (bad.length ? '. Issues: ' + bad.map(s => s.service + ' (' + s.status + ')').join(', ') : '. All clear.');
-      await postToFleetChat(msg);
+      if (bad.length > 0) {
+        observations.push({
+          agent_id: 'alice-sidecar',
+          agent_role: 'observer',
+          memory_type: 'observation',
+          scope: 'fleet',
+          title: `Cycle ${cycle}: ${bad.length} service(s) degraded`,
+          body: bad.map(s => `${s.service}=${s.status}`).join('; '),
+          payload: { cycle, services: bad },
+          confidence: 1.0,
+          ttl_hours: 72,
+        });
+      }
+
+      const lastEmail2 = prevState.lastEmailParse;
+      if (lastEmail2) {
+        observations.push({
+          agent_id: 'alice-sidecar',
+          agent_role: 'observer',
+          memory_type: 'observation',
+          scope: 'fleet',
+          title: `Cycle ${cycle}: email parse — ${lastEmail2.parsed} parsed, ${lastEmail2.errors} errors`,
+          body: `Inquiries: ${lastEmail2.inquiries || 0}. Total parsed: ${lastEmail2.parsed}. Errors: ${lastEmail2.errors}.`,
+          payload: lastEmail2,
+          confidence: 1.0,
+          ttl_hours: 72,
+        });
+      }
+
+      if (observations.length > 0) {
+        const w = await writeMemoryBatch(observations);
+        log(`[MEMORY] Wrote ${w.written} observation(s) to app.fleet_memory`);
+      }
+
+      // 2. Every 3rd cycle (or when transitions happen) ask Ollama to
+      //    synthesize a terse digest. Falls back to template if Ollama
+      //    is unreachable or slow.
+      const shouldSynthesize = (cycle % 3 === 0) || transitions.length > 0 || bad.length > 0;
+      if (shouldSynthesize) {
+        const [recentMem, openQ] = await Promise.all([
+          readRecent({ hours: 24, limit: 12 }),
+          readOpenQuestions({ limit: 5 }),
+        ]);
+        const result = await synthesizeAndPost({
+          memoryRows: recentMem,
+          services,
+          openQuestions: openQ,
+          prefix: `Alice cycle ${cycle}`,
+        });
+        log(`[SYNTH] posted=${result.posted} msg="${result.message.slice(0, 100)}"`);
+      }
+    } catch (e) {
+      log('[LOOP] Error: ' + e.message);
     }
-    
+
     log(`[CYCLE ${cycle}] Complete. Next in 60 minutes.`);
   };
   
@@ -572,19 +649,34 @@ async function printStatus() {
 // ── Main ──────────────────────────────────────────────────
 async function main() {
   const args = process.argv.slice(2);
-  
+
   if (args.includes('--status')) {
     await printStatus();
   } else if (args.includes('--daemon')) {
-    // Acquire lock
+    // Acquire lock. We use a PID file and verify the PID is actually
+    // running. This avoids the stale-lock race that bit us when the
+    // supervisor kills alice with Stop-Process -Force: the process
+    // exits without running its 'exit' handler, so the mtime-based
+    // check would block the next start for 10 minutes.
     if (fs.existsSync(LOCK_FILE)) {
-      const age = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
-      if (age < 600000) { console.log('Alice already running'); process.exit(0); }
-      fs.unlinkSync(LOCK_FILE);
+      try {
+        const prevPid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8').trim(), 10);
+        if (prevPid && prevPid !== process.pid) {
+          // Check if that PID is still alive
+          try {
+            process.kill(prevPid, 0); // throws ESRCH if no such process
+            console.log('Alice already running (pid ' + prevPid + ')');
+            process.exit(0);
+          } catch (e) {
+            if (e.code !== 'ESRCH') throw e;
+            // Stale lock; PID is gone. Fall through and take over.
+          }
+        }
+      } catch {}
     }
-    fs.writeFileSync(LOCK_FILE, String(Date.now()));
+    fs.writeFileSync(LOCK_FILE, String(process.pid));
     process.on('exit', () => { try { fs.unlinkSync(LOCK_FILE); } catch {} });
-    
+
     await daemonLoop();
   } else {
     // One-shot: check services, print status

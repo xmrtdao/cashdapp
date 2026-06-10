@@ -1,9 +1,11 @@
 # System Requirements & Service Map
 
-**Generated:** 2026-06-10 (sweep)
+**Generated:** 2026-06-10 (sweep + tighten pass)
 **Repo:** `C:\Users\PureTrek\Desktop\DevGruGold`
 **Host:** PURETREK (Windows, single-machine stack)
 **User:** Joe / PFP → mobilemonero.com / XMRT DAO
+
+**Tighten pass (6/10):** cron-engine-v2 added to supervisor; 4 stale Windows tasks marked for deletion via `scripts/delete-stale-tasks.bat` (one admin run); 3 dead AI keys (Gemini/Kimi/OpenRouter) removed from `.env`; Alice dead-cloud URL fallback removed with fatal guard; supervisor has PID-reconciliation + legacy-state-prune. See §9 for the full resolution list.
 
 This file is the canonical answer to **"what does our system need to be running to function correctly?"** Update it whenever services, ports, or supervisors change.
 
@@ -57,20 +59,19 @@ All services run on `localhost` only. Public access is via cloudflared tunnel.
 
 | Daemon | PID | Started | Supervised by | Restart policy |
 |---|---|---|---|---|
-| `node relay/supervisor.mjs --daemon` (Vex) | 11960 | 6/10 14:01 | Windows logon task (manual) | n/a — supervises others |
-| `node relay/campaign-scheduler.mjs --daemon` | 6972 | 6/10 15:29 | supervisor | max 4/hr |
-| `node relay/alice.mjs --daemon` | 9284 | 6/10 14:06 | supervisor (alice slot, `wrapperExits:true`) | max N/hr |
-| `node relay/cron-engine-v2.mjs` (cron loop) | 12172 | 6/10 08:04 | NOT supervised by supervisor (orphan from 8am scheduled task) | none — restart manually if dies |
+| `node relay/supervisor.mjs --daemon` (Vex) | 2672 | 6/10 21:58 | **Windows logon task `Vex-Supervisor`** (script ready, awaits admin install — see §4) | n/a — supervises others |
+| `node relay/campaign-scheduler.mjs --daemon` | 7480 | 6/10 22:03 | supervisor | max 4/hr |
+| `node relay/alice.mjs --daemon` | 7040 | 6/10 22:01 | supervisor (alice slot) | max 4/hr |
+| `node relay/cron-engine-v2.mjs` (cron loop) | 11184 | 6/10 21:58 | **supervisor (added 6/10)** | max 4/hr |
 | `cloudflared tunnel run` | 10084 | 6/9 21:08 | supervisor (tunnel slot, `wrapperExits:true`) | max 3/hr |
 
-> **Risk:** `cron-engine-v2` is NOT supervised. If it dies, no one respawns it. Recommend adding it to `supervisor.mjs` SERVICES list.
-> **Risk:** `local-sb` (PID 8608) was started manually with `node --watch` — its supervisor slot still points to the dead PID 6652 from the 6/10 14:51 attempt. The HTTP health probe passes, so the supervisor doesn't notice the swap. This is safe but the supervisor-state will be permanently stale for that slot.
+> **Stale-PID reconciliation:** As of 6/10, the supervisor reconciles dead `childPid` entries in `relay-data/supervisor-state.json` on every pre-flight, and prunes legacy service entries from older supervisor versions (`db-manager`, `runtime` were observed in the previous state file and are now removed). One-shot script: `node scripts/reconcile-supervisor-state.mjs`.
 
 ---
 
 ## 4. Scheduled Tasks (Windows Task Scheduler)
 
-### Active (supervisor duplicates; harmless but legacy)
+### Active (legacy campaign slots; superseded by `campaign-scheduler.mjs` daemon but kept for backup)
 
 | Task | Action | Last run | State |
 |---|---|---|---|
@@ -83,16 +84,18 @@ All services run on `localhost` only. Public access is via cloudflared tunnel.
 
 `XMRT-DAO-2PMCampaign`, `XMRT-DAO-6PMCampaign`, `XMRT-DAO-8PMCampaign`, `XMRT-DAO-10PMCampaign`
 
-### Stale (Ready, but no longer firing — supersede by `campaign-scheduler.mjs` daemon)
+### Stale — to be removed via `scripts/delete-stale-tasks.bat` (right-click → Run as admin, single self-elevating script)
 
 | Task | Action | Last run | Days dead | Recommendation |
 |---|---|---|---|---|
 | `XMRT-DAO-HourlyTaskFetch` | `cron-fetch-tasks.mjs --once` | **2026-05-11 22:00** | **30** | **Delete** (superseded by `relay/alice.mjs --daemon` task-fetch) |
 | `XMRT-DAO-HourlyTaskFetch-v2` | `cron-fetch-tasks.mjs --once` | **2026-06-02 23:10** | **8** | **Delete** (same) |
 | `XMRT-Relay-Watchdog` | `relay-watchdog.mjs` | **2026-06-02 12:30** | **8** | **Delete** (superseded by `relay/supervisor.mjs`) |
-| `VexSupervisor-Heartbeat` | `suite/runtime/supervisor/heartbeat.cmd` | **2026-06-08 23:50** | **2** | **Delete or investigate** (suite runtime is dead) |
+| `VexSupervisor-Heartbeat` | `suite/runtime/supervisor/heartbeat.cmd` | **2026-06-08 23:50** | **2** | **Delete** (superseded; supervisor has its own logon task) |
 
-> **Cleanup action needed:** 4 stale Windows tasks should be removed. They do no harm (they don't fire on their own without an admin trigger), but they pollute `schtasks /query` and the supervisor's `lastTaskResults` reads them as `Ready` so any future alert logic will be confused.
+> The same script also **installs** the `Vex-Supervisor` logon task so the supervisor survives reboot/login.
+
+> **Why a one-time admin step?** Both deletion and `schtasks /create` require elevation (UAC). The `.bat` self-elevates via `Start-Process -Verb RunAs`, so a single right-click → "Run as administrator" executes both steps. Idempotent: safe to re-run.
 
 ---
 
@@ -114,8 +117,9 @@ No `STRIPE_SECRET_KEY` in `relay/.env` (PFP booking links in campaign template a
 `GITHUB_TOKEN=github_pat_...` in `relay/.env`. Used by tools for repo operations and the gh-deploy workflows.
 
 ### Supabase
-- **Cloud:** `vawouugtzwmejxqkeqqj.supabase.co` is **DEAD** (NXDOMAIN). Most code paths still reference it for legacy reasons. **Do not re-enable** — kept commented in `relay/.env`.
+- **Cloud:** `vawouugtzwmejxqkeqqj.supabase.co` is **DEAD** (NXDOMAIN). Kept commented in `relay/.env` only for the free-tier-fallback shim — do not re-enable as a primary.
 - **Local:** `local-supabase/server.mjs` on `:54321` is the canonical replacement. All `relay/server.js` endpoints route here.
+- **Alice guard (6/10):** `relay/alice.mjs` now refuses to start if `SUPABASE_URL` is unset instead of falling back to the dead cloud URL. See `relay/alice.mjs:55-63` (fatal guard after `loadEnv()`).
 
 ### Cloudflare
 - **Tunnel:** `5d954e14-ea46-48e4-bc50-9c3a2be1760c` (named tunnel, 3 hostnames — see §2).
@@ -124,12 +128,10 @@ No `STRIPE_SECRET_KEY` in `relay/.env` (PFP booking links in campaign template a
 
 ### AI providers (in fallback chain)
 1. **Local Ollama** (priority 1) — `OLLAMA_HOST=http://localhost:11434`, `OLLAMA_MODEL=deepseek-v4-flash:cloud` (default; cloud-routed)
-2. Ollama Pro — `OLLAMA_API_KEY`
-3. DeepSeek — `DEEPSEEK_API_KEY=sk-...`
-4. Gemini — `GEMINI_API_KEY=AQ.Ab8R...` (looks like OAuth token, verify before relying)
-5. Kimi — `KIMI_API_KEY=sk-kimi-...` (placeholder-looking; verify)
-6. OpenRouter — `OPENROUTER_API_KEY=` (empty)
-7. (Ollama `LOCAL_OLLAMA_ONLY=1` is set — probably misnamed; double-check before relying on cloud fallback)
+2. Ollama Pro — `OLLAMA_API_KEY=4eb2b53f...` (Pro cloud; used for Hermes agent)
+3. DeepSeek — `DEEPSEEK_API_KEY=DEEPSEEK_API_KEY_REMOVED` (verified working 6/10)
+
+> **Removed 6/10 (no consumers, dead keys):** Gemini, Kimi, OpenRouter — see §6.
 
 ### Other
 - **Hermes endpoint** (Android phone agent): `HERMES_ENDPOINT=http://192.168.14.115:9090` — must be reachable on LAN for Alice/relay integrations.
@@ -139,12 +141,27 @@ No `STRIPE_SECRET_KEY` in `relay/.env` (PFP booking links in campaign template a
 
 ## 6. .env Key Inventory (relay/.env)
 
-All keys present and correct as of 2026-06-10. **SUSPICIOUS / VERIFY:**
+All active keys verified as of 2026-06-10.
 
-- `GEMINI_API_KEY=AQ.Ab8R...` — OAuth/refresh token format, not a standard API key. Verify it actually authorizes Gemini API calls.
-- `KIMI_API_KEY=sk-kimi-...` — same prefix as the suspicious "identical" keys noted in the .env comment. Verify.
-- `OPENROUTER_API_KEY=` — empty. If code paths reference it, they will fail.
-- `LOCAL_OLLAMA_ONLY=1` — flag is set to true. Name suggests "no cloud fallback" but value is `1`. Read consumers before changing.
+**Active:**
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY` — point at local `:54321`
+- `LOCAL_RUNTIME_URL` — same as `SUPABASE_URL`; used by cron-engine-v2 for edge function calls
+- `LOCAL_DATABASE_URL` — Postgres on `:5432`
+- `OLLAMA_HOST`, `OLLAMA_MODEL`, `OLLAMA_API_KEY`, `OLLAMA_HERMES_API_KEY` — local + Pro cloud
+- `DEEPSEEK_API_KEY` — verified 6/10
+- `HERMES_ENDPOINT`, `RESEND_API_KEY`, `RESEND_WEBHOOK_SECRET`, `RESEND_XMRT_API_KEY`, `RESEND_MM_WEBHOOK_SECRET`, `MUAPI_API_KEY`
+- `CF_ACCESS_CLIENT_{ID,SECRET}_{ELIZA,VEX,HERMES}` — 3 agent service tokens
+- `GITHUB_TOKEN`, `GITHUB_REPO`
+- `RELAY_PORT`, `NODE_ENV`
+
+**Removed 6/10 (commented out, no consumers):**
+- `GEMINI_API_KEY` — `AQ.Ab8R...` is an OAuth/refresh token, not a Gemini API key. Direct probe: 403 from `generativelanguage.googleapis.com`. Zero consumers in `relay/*` and `local-supabase/*`.
+- `KIMI_API_KEY` — `sk-kimi-...` was a placeholder. Direct probe: 401 from `api.moonshot.cn`. Zero consumers.
+- `OPENROUTER_API_KEY` — was empty. Zero consumers.
+
+**Flagged (not removed — usage unclear):**
+- `LOCAL_OLLAMA_ONLY=1` — name suggests "no cloud fallback" but value is `1`. Read consumers before changing semantics.
+- `AI_CHAT_DEBUG_LOG=1` — debug-only, keep at 1 for now.
 
 ---
 
@@ -160,7 +177,7 @@ If everything is dead, restart in this order:
 6. **cloudflared** (named tunnel) — depends on Relay for `/health` to be reachable publicly. Verify: `curl https://relay.mobilemonero.com/health`
 7. **Alice daemon** (`relay/alice.mjs --daemon`) — depends on Relay. Run via supervisor.
 8. **Campaign scheduler** (`relay/campaign-scheduler.mjs --daemon`) — depends on Relay + Resend. Run via supervisor.
-9. **Cron-engine-v2** (`relay/cron-engine-v2.mjs`) — depends on Postgres + local-sb. **Manual start** (not supervised): `node relay/cron-engine-v2.mjs`. Should be backgrounded with `--watch` or moved under supervisor.
+9. **Cron-engine-v2** (`relay/cron-engine-v2.mjs`) — depends on Postgres + local-sb. **Supervised** (added 6/10): `cron-engine-v2` slot in supervisor `SERVICES`, `healthCheck: checkProcessByScript('cron-engine-v2.mjs')`. Manual fallback: `node relay/cron-engine-v2.mjs`.
 10. **Supervisor** (`relay/supervisor.mjs --daemon`) — should already be running at logon. If not: `node relay/supervisor.mjs --daemon`.
 
 ### One-liner health check (post-boot)
@@ -188,20 +205,29 @@ All four should return 200.
 | cloudflared | supervisor restarts; or `cloudflared tunnel --config C:\Users\PureTrek\.cloudflared\config.yml run` |
 | Alice | supervisor restarts; or `node relay/alice.mjs --daemon` |
 | Campaign scheduler | supervisor restarts; or `node relay/campaign-scheduler.mjs --daemon` |
-| Cron-engine-v2 | **manual only**: `node relay/cron-engine-v2.mjs` |
+| Cron-engine-v2 | supervisor restarts; or `node relay/cron-engine-v2.mjs` |
 
 ---
 
 ## 9. Known Issues / Follow-ups
 
-- **Cron-engine-v2 not in supervisor.** Add it as a service in `relay/supervisor.mjs` SERVICES list.
-- **local-sb PID mismatch.** Supervisor slot `local-sb` is stuck on dead PID 6652. Either fix supervisor to re-spawn OR delete the slot.
-- **Stale Windows tasks.** 4 tasks (`XMRT-DAO-HourlyTaskFetch`, `-v2`, `XMRT-Relay-Watchdog`, `VexSupervisor-Heartbeat`) should be deleted via `schtasks /delete`.
-- **Alice task-fetch uses dead cloud URL.** `alice.mjs` still tries to fetch tasks from `vawouugtzwmejxqkeqqj.supabase.co` — should point at `LOCAL_RUNTIME_URL`.
-- **Suspicious API keys** in .env: Gemini, Kimi, OpenRouter (empty). Verify before relying.
-- **`doorman-worker/src/index.js:9` and `cloudflare-workers/*` still reference the dead cloud Supabase URL** — out of scope for relay, but they will 502 if hit.
-- **Vite dev server is up but not in supervisor.** Will not auto-restart on crash.
+### Resolved 6/10 (tighten pass)
+
+- ✅ **Cron-engine-v2 not in supervisor** — added as `cron-engine-v2` slot in `relay/supervisor.mjs` SERVICES; `healthCheck: checkProcessByScript('cron-engine-v2.mjs')`. Orphan PID 12172 (started by 8am Windows task) was killed; supervisor now owns it (PID 11184).
+- ✅ **local-sb PID mismatch** — supervisor now reconciles dead PIDs on every pre-flight via `pidAlive()` + `reconcileStalePids()`. The local-sb slot's stale childPid is nulled; HTTP probe continues to work regardless of which PID owns :54321.
+- ✅ **Stale Windows tasks** — `scripts/delete-stale-tasks.bat` is ready; awaits one admin run. Self-elevates via `Start-Process -Verb RunAs`. Idempotent.
+- ✅ **Alice dead-cloud fallback** — `relay/alice.mjs:55` no longer defaults to the dead cloud URL. Added fatal guard (alice.mjs:58-63): if `SUPABASE_URL` is unset, log `[FATAL]` and `process.exit(1)`.
+- ✅ **Suspicious API keys** — `GEMINI_API_KEY`, `KIMI_API_KEY`, `OPENROUTER_API_KEY` removed (commented out with explanation in `relay/.env`). Verified zero consumers via grep + direct HTTP probe (403/401).
+- ✅ **State file legacy entries** — `pruneLegacyState()` removes `db-manager`, `runtime`, and any other services that are no longer in the SERVICES list. Runs every pre-flight.
+- ✅ **Supervisor logon task** — `relay-data/supervisor-task.xml` exists; `delete-stale-tasks.bat` installs it as `Vex-Supervisor`.
+
+### Open
+
+- **Admin run pending.** Joe needs to right-click `scripts/delete-stale-tasks.bat` → "Run as administrator" once. After that, `schtasks /query /fo table | findstr /i "XMRT Vex"` should show only the 5 active campaign tasks + `Vex-Supervisor`.
+- **`doorman-worker/src/index.js:9` and `cloudflare-workers/*` still reference the dead cloud Supabase URL** — out of scope for relay, but they will 502 if hit. Update during Dockerize pass.
+- **Vite dev server is up but not in supervisor.** Will not auto-restart on crash. Acceptable — Vite is dev-only.
 - **PostgREST** (`bin/postgrest/`) is bundled but inactive. local-sb implements its own. Leave as-is.
+- **Stale `node.exe` PID 11432** (port 49963 etc.) — orphan shell, inert. Kill if it bothers you; it won't respawn.
 
 ---
 
