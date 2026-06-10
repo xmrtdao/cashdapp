@@ -58,8 +58,19 @@ import { getFullSnapshot, getSystemResources, checkExternalServices } from './to
 import * as state from './lib/state.mjs';
 import { createTaskRunner } from './lib/task-runner.mjs';
 import { handleInboundEmail } from './lib/auto-responder.mjs';
+import { ensureLocalDb, restFetch as localRestFetch, query as localQuery, LOCAL_DB_ENABLED } from './lib/localDb.mjs';
 import { createMeshRouter, initMeshNode, publishToMesh, getMeshMessageLog } from './lib/mesh-router.mjs';
 import { discoverFunctions, listFunctions } from './lib/function-runtime.mjs';
+
+// Local Postgres (embedded-postgres) connection helper
+import pg from 'pg';
+const { Client: PgClient } = pg;
+async function queryLocalPg(sql, params) {
+  const c = new PgClient({ host: '127.0.0.1', port: 5432, user: 'postgres', password: 'postgres', database: 'postgres' });
+  await c.connect();
+  try { return await c.query(sql, params); }
+  finally { await c.end(); }
+}
 
 // Local edge function runtime
 const LOCAL_FUNCTIONS_DIR = join(__dirname, 'functions');
@@ -77,9 +88,10 @@ let localFunctions = [];
 
 // ── Config ──────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '8080');
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://vawouugtzwmejxqkeqqj.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'http://127.0.0.1:54321';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'local-dev-service-role-key';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'local-anon-key';
+const LOCAL_DB_MODE = (process.env.LOCAL_DB_MODE ?? 'true') === 'true';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const GITHUB_REPO = process.env.GITHUB_REPO || 'xmrtdao/mobilemonero';
 const HERMES_ENDPOINT = process.env.HERMES_ENDPOINT || 'http://192.168.14.115:9090';
@@ -124,6 +136,14 @@ function trackRequest(endpoint, handler = null) {
 const SUPABASE_INTEGRATION_URL = `${SUPABASE_URL}/functions/v1/supabase-integration-v2`;
 
 async function supabaseFetch(method, path, opts = {}) {
+  if (LOCAL_DB_ENABLED) {
+    try {
+      return await localRestFetch(method, path, opts);
+    } catch (e) {
+      console.error(`[localDb] supabaseFetch ${method} ${path} failed: ${e.message}`);
+      throw e;
+    }
+  }
   const url = `${SUPABASE_URL}/rest/v1/${path}`;
   const headers = {
     'apikey': SUPABASE_KEY,
@@ -151,7 +171,30 @@ async function updateTaskStatus(taskId, status, progress, result, agent = 'Eliza
   const logPrefix = `[task-update ${taskId?.slice(0, 8)}]`;
   
   if (!taskId || !SUPABASE_KEY) return;
-  
+
+  if (LOCAL_DB_ENABLED) {
+    try {
+      await supabaseFetch('PATCH', 'tasks', {
+        params: { id: `eq.${taskId}` },
+        body: {
+          status,
+          progress_percentage: progress,
+          updated_at: new Date().toISOString(),
+          metadata: {
+            ...(result ? { relay_result: result } : {}),
+            relay_agent: agent,
+            relay_completed_at: new Date().toISOString()
+          },
+        },
+      });
+      logActivity('localDb', taskId, 'UPDATED', `Task ${status} via local pg`);
+      return;
+    } catch (e) {
+      logActivity('localDb', taskId, 'FAIL', e.message);
+      return;
+    }
+  }
+
   const metadataJson = JSON.stringify({
     ...(result ? { relay_result: result } : {}),
     relay_agent: agent,
@@ -1338,7 +1381,7 @@ app.get('/', (req, res) => {
   const hours = Math.floor((uptime % 86400) / 3600);
   const mins = Math.floor((uptime % 3600) / 60);
   const uptimeStr = `${days}d ${hours}h ${mins}m`;
-  const supabaseUrl = 'https://vawouugtzwmejxqkeqqj.supabase.co';
+  const supabaseUrl = SUPABASE_URL;
   
   const tools = Object.keys(toolHandlers);
   const toolCount = tools.length;
@@ -1972,7 +2015,7 @@ app.get('/', (req, res) => {
     </div>
 <div class="card">
       <h3 style="color:#60a5fa;">XMRT DAO Health</h3>
-      <div class="stat"><span class="label">Supabase</span><span class="value" id="dao-health-status">checking...</span></div>
+      <div class="stat"><span class="label">Local DB</span><span class="value" id="dao-health-status">checking...</span></div>
       <div class="stat"><span class="label">Health Score</span><span class="value" id="dao-health-score">-</span></div>
       <div class="stat"><span class="label">Edge Functions</span><span class="value" id="dao-fn-count">-</span></div>
       <div class="stat"><span class="label">Agents</span><span class="value" id="dao-agent-count">-</span></div>
@@ -2088,7 +2131,7 @@ app.get('/', (req, res) => {
     <span style="color:var(--accent-orange);font-weight:600;">XMRT DAO</span> &middot; <span style="color:var(--accent-teal);">&#x26a1;</span> Vex &middot; ${new Date().toISOString()} &middot;
     <a href="https://github.com/xmrtdao" target="_blank" style="color:var(--text-dim);">GitHub</a> &middot;
     <a href="${tunnelUrl}" target="_blank" style="color:var(--text-dim);">Relay</a> &middot;
-    Supabase: ${supabaseUrl}/functions/v1/{name}
+    Functions: ${supabaseUrl}/functions/v1/{name}
   </div>
 
   <script>
@@ -3528,7 +3571,9 @@ app.post('/log/sent', (req, res) => {
 // API: Edge Function Catalog
 
 // -- XMRT University Proxy --
-const SUPABASE_UNIVERSITY_URL = 'https://vawouugtzwmejxqkeqqj.supabase.co/functions/v1/xmrt-university';
+// Routes to local-sb (SUPABASE_URL) — the canonical runtime backend.
+// Cloud Supabase (vawouugtzwmejxqkeqqj) is dead; this used to be hardcoded.
+const SUPABASE_UNIVERSITY_URL = `${SUPABASE_URL}/functions/v1/xmrt-university`;
 
 app.post('/api/ef-university', async (req, res) => {
   try {
@@ -3626,6 +3671,90 @@ app.all('/api/v1/functions/:name', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// -- Local Edge Function Runtime (extended) --
+// Proxies Supabase-style requests to the local Deno-style runtime
+// (port 8090). This is the same path that Supabase functions used
+// (`/functions/v1/<name>`) so the api-gateway worker can repoint
+// the old `/supabase/functions/v1/...` route to here, and clients
+// that already use `https://api.mobilemonero.com/relay/functions/v1/ai-chat`
+// keep working unchanged.
+// 2026-06-10: Default to local-sb (54321) — see cron-engine-v2.mjs
+const LOCAL_RUNTIME_URL = process.env.LOCAL_RUNTIME_URL || 'http://127.0.0.1:54321';
+
+async function proxyToRuntime(req, res, targetPath) {
+  const target = `${LOCAL_RUNTIME_URL}${targetPath}`;
+  try {
+    const headers = { ...req.headers };
+    delete headers.host;
+    delete headers['content-length'];
+    // Forward the raw body stream so JSON-parse doesn't munge it
+    let body;
+    if (['GET', 'HEAD'].includes(req.method)) {
+      body = undefined;
+    } else if (Buffer.isBuffer(req.body)) {
+      body = req.body;
+    } else if (typeof req.body === 'string') {
+      body = req.body;
+    } else if (req.body && typeof req.body === 'object') {
+      // Express JSON-parsed the body. Re-serialize.
+      body = JSON.stringify(req.body);
+      if (!headers['content-type']) headers['content-type'] = 'application/json';
+    } else {
+      // Drain the raw request body
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      body = Buffer.concat(chunks);
+    }
+    const r = await fetch(target, {
+      method: req.method,
+      headers,
+      body,
+      signal: AbortSignal.timeout(120_000),
+      // Node 24 native fetch supports duplex for streaming bodies
+      duplex: body ? 'half' : undefined,
+    });
+    res.status(r.status);
+    r.headers.forEach((v, k) => {
+      if (k.toLowerCase() === 'set-cookie') res.appendHeader(k, v);
+      else res.setHeader(k, v);
+    });
+    if (r.body) {
+      const ab = await r.arrayBuffer();
+      res.end(Buffer.from(ab));
+    } else {
+      res.end();
+    }
+  } catch (e) {
+    console.error(`[runtime] proxy error to ${target}:`, e.message);
+    res.status(502).json({ error: 'runtime proxy error', target, message: e.message });
+  }
+}
+
+app.all(['/functions/v1/:name', '/functions/v1/:name/*'], async (req, res) => {
+  const tail = req.params[0] ? '/' + req.params[0] : '';
+  await proxyToRuntime(req, res, `/functions/v1/${req.params.name}${tail}`);
+});
+
+// Backwards-compat: short alias `POST /ai-chat` -> `/functions/v1/ai-chat`
+app.all(['/ai-chat', '/ai-chat/*'], async (req, res) => {
+  const tail = req.params[0] ? '/' + req.params[0] : '';
+  await proxyToRuntime(req, res, `/functions/v1/ai-chat${tail}`);
+});
+
+// Local runtime health (combined: relay + embedded PG + edge runtime)
+app.get('/local-runtime/health', async (req, res) => {
+  const out = { relay: 'up', ts: Date.now() };
+  try {
+    const r = await fetch(`${LOCAL_RUNTIME_URL}/health`, { signal: AbortSignal.timeout(3000) });
+    out.runtime = await r.json();
+  } catch (e) { out.runtime = { ok: false, error: e.message }; }
+  try {
+    const r = await fetch('http://127.0.0.1:8081/health', { signal: AbortSignal.timeout(3000) });
+    out.postgres = await r.json();
+  } catch (e) { out.postgres = { ok: false, error: e.message }; }
+  res.json(out);
 });
 
 app.get('/api/catalog', (req, res) => {
@@ -4013,7 +4142,7 @@ app.get('/api/fleet', async (req, res) => {
     hermes,
     ollama,
     resources,
-    supabase: 'https://vawouugtzwmejxqkeqqj.supabase.co',
+    supabase: SUPABASE_URL,
     edge_functions: 198,
   });
 });
@@ -4159,33 +4288,94 @@ app.get('/tools/agents', async (req, res) => {
 
 // ── XMRT DAO Dynamic Data Endpoints ─────────────────────────
 
-// GET /api/dao/health — Supabase system health & status
+// GET /api/dao/health — Local PostgreSQL health & status
+// 2026-06-08: Rewired from Supabase to local embedded-postgres.
+// Supabase is closed. We use pg.Client to query the local PG
+// running on 127.0.0.1:5432 (suite/runtime/db-manager.mjs).
 app.get('/api/dao/health', async (req, res) => {
   trackRequest('/api/dao/health');
+  const t0 = Date.now();
   try {
-    const [healthRes, statusRes] = await Promise.all([
-      fetch(`${SUPABASE_URL}/functions/v1/system-health`, {
-        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}` },
-        signal: AbortSignal.timeout(10000),
-      }),
-      fetch(`${SUPABASE_URL}/functions/v1/system-status`, {
-        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}` },
-        signal: AbortSignal.timeout(10000),
-      }),
-    ]);
+    // 1) PG reachable? (with a 2s timeout, fail fast)
+    const c = new PgClient({ host: '127.0.0.1', port: 5432, user: 'postgres', password: 'postgres', database: 'postgres', connectionTimeoutMillis: 2000 });
+    await c.connect();
+    try {
+      // 2) Aggregate the dashboard fields from local tables.
+      // The schema was migrated from Supabase on 2026-06-07; some
+      // tables are empty (we never had a real write path) but the
+      // structure is in place. We COALESCE nulls to 0 so the
+      // dashboard always renders.
+      const queries = [
+        c.query("SELECT COUNT(*)::int AS c FROM public.agents").catch(() => ({ rows: [{ c: 0 }] })),
+        c.query("SELECT COUNT(*)::int AS c FROM public.agents WHERE status = 'busy'").catch(() => ({ rows: [{ c: 0 }] })),
+        c.query("SELECT COUNT(*)::int AS c FROM public.tasks").catch(() => ({ rows: [{ c: 0 }] })),
+        c.query("SELECT COUNT(*)::int AS c FROM public.tasks WHERE status IN ('completed','done')").catch(() => ({ rows: [{ c: 0 }] })),
+        c.query("SELECT COUNT(*)::int AS c FROM public.eliza_function_usage WHERE invoked_at > NOW() - INTERVAL '24 hours'").catch(() => ({ rows: [{ c: 0 }] })),
+        c.query("SELECT COUNT(*)::int AS c FROM public.python_execs").catch(() => ({ rows: [{ c: 0 }] })),
+        c.query("SELECT COUNT(*)::int AS c FROM public.api_keys").catch(() => ({ rows: [{ c: 0 }] })),
+      ];
+      const [agents, agentsBusy, tasks, tasksDone, fnCalls24h, pyExecs, apiKeys] = await Promise.all(queries);
+      // Also count total tables + schemas for richness
+      const tablesRes = await c.query("SELECT COUNT(*)::int AS c FROM pg_tables WHERE schemaname='public'");
+      const schemasRes = await c.query("SELECT COUNT(*)::int AS c FROM pg_namespace WHERE nspname NOT IN ('pg_catalog','information_schema')");
 
-    const health = healthRes.ok ? await healthRes.json() : { error: 'unavailable' };
-    const status = statusRes.ok ? await statusRes.json() : { error: 'unavailable' };
+      const counts = {
+        agents_total:     agents.rows[0]?.c     ?? 0,
+        agents_busy:      agentsBusy.rows[0]?.c ?? 0,
+        tasks_total:      tasks.rows[0]?.c      ?? 0,
+        tasks_done:       tasksDone.rows[0]?.c  ?? 0,
+        fn_calls_24h:     fnCalls24h.rows[0]?.c ?? 0,
+        python_execs:     pyExecs.rows[0]?.c    ?? 0,
+        api_keys:         apiKeys.rows[0]?.c    ?? 0,
+        pg_tables_public: tablesRes.rows[0]?.c  ?? 0,
+        pg_schemas:       schemasRes.rows[0]?.c ?? 0,
+      };
+      // Compute a simple health score 0-100.
+      // Base 50 for being reachable. +25 if any agents. +15 if any
+      // function calls. +10 if tasks table exists (schema migrated).
+      let score = 50;
+      if (counts.agents_total > 0)            score += 20;
+      if (counts.fn_calls_24h > 0)            score += 15;
+      if (counts.pg_tables_public > 100)      score += 10;   // schema loaded
+      if (counts.tasks_total > 0)             score += 5;
+      score = Math.min(100, score);
+      const status = score >= 80 ? 'healthy' : score >= 50 ? 'degraded' : 'critical';
 
+      res.json({
+        success: true,
+        source: 'local-postgres',
+        database: 'postgres@127.0.0.1:5432',
+        pg_status: 'up',
+        health: {
+          overall_health: { score, status },
+        },
+        status: {
+          health_score: score,
+          overall_status: status,
+          components: {
+            edge_functions: { total_calls_24h: counts.fn_calls_24h },
+            agents:         { total: counts.agents_total, busy: counts.agents_busy },
+            tasks:          { total: counts.tasks_total, completed: counts.tasks_done },
+            python_execs:   { total: counts.python_execs },
+            api_keys:       { total: counts.api_keys },
+          },
+        },
+        counts,
+        latency_ms: Date.now() - t0,
+        timestamp: new Date().toISOString(),
+      });
+    } finally {
+      await c.end();
+    }
+  } catch (e) {
     res.json({
-      success: true,
-      supabase_project: 'vawouugtzwmejxqkeqqj',
-      health,
-      status,
+      success: false,
+      source: 'local-postgres',
+      pg_status: 'down',
+      error: e.message,
+      latency_ms: Date.now() - t0,
       timestamp: new Date().toISOString(),
     });
-  } catch (e) {
-    res.json({ success: false, error: e.message });
   }
 });
 
@@ -4353,6 +4543,7 @@ const FLEET_AGENTS = {
   'vex': { name: 'Vex (Captain, HMS Speedy)', endpoint: 'local', type: 'relay' },
   'eliza': { name: 'Eliza-Cloud', endpoint: 'eliza-relay', type: 'cloud' },
   'hermes': { name: 'Hermes', endpoint: 'https://hermes.mobilemonero.com', type: 'mobile' },
+  'alice': { name: 'Alice (Sidecar)', endpoint: 'local', type: 'sidecar', localEndpoint: 'http://127.0.0.1:8080/api/alice/inbox' },
 };
 
 function getFleetChatMessages(limit = 50) {
@@ -4646,8 +4837,8 @@ app.get('/api/fleet-chat/messages', async (req, res) => {
   
   // From Supabase fleet_messages table
   try {
-    const supabaseUrl = process.env.SUPABASE_URL || 'https://vawouugtzwmejxqkeqqj.supabase.co';
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const supabaseUrl = SUPABASE_URL;
+    const supabaseKey = SUPABASE_KEY;
     if (supabaseKey) {
       const sbRes = await fetch(supabaseUrl + '/rest/v1/fleet_messages?select=*&order=created_at.desc&limit=50', {
         headers: { 'apikey': supabaseKey, 'Authorization': 'Bearer ' + supabaseKey },
@@ -5047,7 +5238,13 @@ app.get('/pfp/templates/:file', (req, res) => {
   res.sendFile(filepath);
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
+  if (LOCAL_DB_ENABLED) {
+    const ok = await ensureLocalDb();
+    console.log(`  LocalDB:  ${ok ? 'connected (postgres @ 127.0.0.1:5432/xmrt_suite)' : 'FAILED — falling back to cloud REST'}`);
+  } else {
+    console.log('  LocalDB:  disabled (LOCAL_DB_MODE=false) — using cloud Supabase');
+  }
   const toolsCount = Object.keys(toolHandlers).length;
   const handlersCount = Object.keys(handlers).length;
   console.log('\n' +
@@ -5076,16 +5273,30 @@ app.listen(PORT, '0.0.0.0', () => {
   logActivity('system', '-', 'STARTUP', 'Relay v2 listening on port ' + PORT);
   
   // ── Start Local Cron Engine ──
+  // 2026-06-07: The old cron-engine.mjs used `psql -U postgres` and
+  // `cmd.exe` spawns that hung waiting for a password. The
+  // `pg/bin/` path it references doesn't exist on this machine
+  // (we use the embedded @embedded-postgres package in suite/).
+  // Disable the old engine; we'll add a working one in a
+  // follow-up that uses pg client + local runtime.
   setTimeout(() => {
+    if (process.env.SKIP_CRON === '1') {
+      logActivity('system', '-', 'CRON', 'Local cron engine disabled (SKIP_CRON=1)');
+      return;
+    }
     try {
-      import('./cron-engine.mjs').then(mod => {
-        mod.runDaemon();
-        logActivity('system', '-', 'CRON', 'Local cron engine started (66 jobs)');
+      import('./cron-engine-v2.mjs').then(mod => {
+        if (typeof mod.runDaemon === 'function') {
+          mod.runDaemon();
+          logActivity('system', '-', 'CRON', 'Local cron v2 engine started');
+        } else {
+          logActivity('system', '-', 'CRON_ERR', 'cron-engine-v2.mjs has no runDaemon()');
+        }
       }).catch(err => {
-        logActivity('system', '-', 'CRON_ERR', 'Failed to start cron: ' + err.message);
+        logActivity('system', '-', 'CRON_ERR', 'Failed to start cron v2: ' + err.message);
       });
     } catch (err) {
-      console.log('[CRON] Engine not available:', err.message);
+      console.log('[CRON] Engine v2 not available:', err.message);
     }
   }, 3000);
 });
