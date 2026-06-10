@@ -21,11 +21,12 @@ const env = fs.readFileSync(envPath, 'utf8').split('\n').reduce((acc, line) => {
   return acc;
 }, {});
 
-const KEY = env.SUPABASE_SERVICE_ROLE_KEY;
-const FALLBACK_KEY = env.RESEND_XMRT_API_KEY;
-if (!KEY) { console.error('No SUPABASE key'); process.exit(1); }
+const RESEND_KEY = env.RESEND_API_KEY;
+if (!RESEND_KEY) { console.error('No RESEND_API_KEY in .env'); process.exit(1); }
 
-const API = 'https://vawouugtzwmejxqkeqqj.supabase.co/functions/v1/resend-email';
+const RESEND_HOST = 'api.resend.com';
+const FROM_ADDRESS = 'Party Favor Photo <bookings@partyfavorphoto.com>';
+const REPLY_TO = 'joe@partyfavorphoto.com';
 const CONTACTS_FILE = path.join(__dirname, '..', 'relay-data', 'campaign-contacts.json');
 const LOG_FILE = path.join(__dirname, '..', 'relay-data', 'campaign.log');
 const SENT_FILE = path.join(__dirname, '..', 'relay-data', 'campaign-sent.json');
@@ -226,11 +227,23 @@ partyfavorphoto.com`;
   
   // Build proper multipart email with HTML + plain text fallback
   const htmlBody = buildCampaignHtml(body);
-  const postData = JSON.stringify({ to: entry.email, subject, body, html: htmlBody });
-  const req = https.request(API, {
+  // Resend native API: https://resend.com/docs/api-reference/emails/send-email
+  // Verified domain: partyfavorphoto.com (RESEND_API_KEY). Sends appear as
+  // "Party Favor Photo <bookings@partyfavorphoto.com>". Replies route to joe@.
+  const postData = JSON.stringify({
+    from: FROM_ADDRESS,
+    to: entry.email,
+    subject,
+    html: htmlBody,
+    text: body,
+    reply_to: REPLY_TO,
+  });
+  const req = https.request({
+    host: RESEND_HOST,
+    path: '/emails',
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${KEY}`,
+      'Authorization': `Bearer ${RESEND_KEY}`,
       'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(postData),
     },
@@ -238,21 +251,28 @@ partyfavorphoto.com`;
     let data = '';
     res.on('data', (chunk) => { data += chunk; });
     res.on('end', () => {
-      if (res.statusCode === 200) {
+      if (res.statusCode === 200 || res.statusCode === 201) {
         sent++;
         appendSent(entry.email);
         console.log(`  [${sent}] Sent to ${entry.email}`);
+      } else if (res.statusCode === 429) {
+        // Rate limited by Resend (5 req/s cap). Re-queue to front, back off 2s.
+        // Don't count as error and don't log as a failure.
+        batch.unshift(entry);
+        console.warn(`  [RATE] ${entry.email}: HTTP 429, re-queued (batch now ${batch.length})`);
+        setTimeout(sendNext, 2000);
+        return;
       } else {
         errors++;
-        console.error(`  [ERR] ${entry.email}: HTTP ${res.statusCode} ${data.slice(0,100)}`);
+        console.error(`  [ERR] ${entry.email}: HTTP ${res.statusCode} ${data.slice(0,200)}`);
       }
-      setTimeout(sendNext, 10);
+      setTimeout(sendNext, 250);
     });
   });
   req.on('error', (err) => {
     errors++;
     console.error(`  [ERR] ${entry.email}: ${err.message}`);
-    setTimeout(sendNext, 10);
+    setTimeout(sendNext, 250);
   });
   req.write(postData);
   req.end();
