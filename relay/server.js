@@ -1216,10 +1216,14 @@ async function defaultHandler(task) {
 }
 
 // ── Eliza-Cloud relay ───────────────────────────────────────
+// Calls the local ai-chat edge function (the live Eliza with provider
+// cascade, conversation memory, and tool execution). The old
+// /functions/v1/eliza-relay endpoint is a deprecated stub that just
+// proxies to /ollama/chat with gemma3:1b — we skip it entirely.
 async function relayToElizaCloud(message, senderName = 'Eliza-Dev', relayTag = null) {
   if (!SUPABASE_KEY) return logActivity('eliza', '-', 'SKIP', 'No SUPABASE_KEY set');
   const tag = relayTag || `eliza-dev-${Date.now().toString(36)}`;
-  const url = `${SUPABASE_URL}/functions/v1/eliza-relay`;
+  const url = `${SUPABASE_URL}/functions/v1/ai-chat`;
   try {
     logActivity('eliza', tag, 'SEND', message.slice(0, 80));
     const controller = new AbortController();
@@ -1227,7 +1231,12 @@ async function relayToElizaCloud(message, senderName = 'Eliza-Dev', relayTag = n
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'send', message, relay_tag: tag, agent_name: senderName }),
+      body: JSON.stringify({
+        userQuery: message,
+        senderName: senderName,
+        // session_id keeps ai-chat's memory keyed per-tag for tools/dispatch flows
+        session_id: tag,
+      }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -1237,8 +1246,11 @@ async function relayToElizaCloud(message, senderName = 'Eliza-Dev', relayTag = n
       return null;
     }
     const data = await res.json();
-    logActivity('eliza', tag, 'REPLY', (data.reply || '').slice(0, 80));
-    return data;
+    // ai-chat returns { content, provider, model, success }; the rest of the
+    // codebase expects { reply, ... } from eliza-relay, so normalize.
+    const reply = (data?.content || '').trim();
+    logActivity('eliza', tag, 'REPLY', reply.slice(0, 80));
+    return { ...data, reply };
   } catch (err) {
     logActivity('eliza', tag, 'ERROR', err.message);
     return null;
@@ -4958,23 +4970,44 @@ async function routeFleetMessage(entry) {
       } catch (e) { /* memory best-effort */ }
 
       const elizaMsg = '[Fleet Chat - ' + entry.agentLabel + '] ' + entry.message + contextHistory;
-      let elizaRes = await relayToElizaCloud(elizaMsg, entry.agentLabel, 'fleet-' + entry.id);
+
+      // Pre-fetch grounding context so the reply cites real system state
+      // instead of inventing "all systems operational". We embed the JSON
+      // in the user message so ai-chat's system prompt stays untouched.
+      const ctx = await gatherFleetContext();
+      const groundedMsg = elizaMsg + '\n\nGROUNDING — Real-time system data (use ONLY these facts; if asked about leads/money/bookings not in this block, say "I don\'t have that data"):\n' + JSON.stringify(ctx, null, 0) + '\n\nReply in 1-2 sentences. Reference specific fields by name when you can.';
+
+      // Primary path: ai-chat (via the shared relayToElizaCloud helper,
+      // which now calls the live /functions/v1/ai-chat EF, not the
+      // deprecated eliza-relay stub).
+      let elizaRes = await relayToElizaCloud(groundedMsg, entry.agentLabel, 'fleet-' + entry.id);
       console.log('[routeFleetMessage] elizaRes:', JSON.stringify(elizaRes).slice(0, 200));
-      // Fallback: if the deprecated eliza-relay EF gave us nothing useful
-      // (signoff-only like "—Eliza", or empty), retry through local Ollama
-      // using the deepseek default model — GROUNDED in real system data so
-      // the reply reflects actual state, not LLM invention.
-      const elizaReplyLooksThin = !elizaRes?.reply || elizaRes.reply.trim().length < 12 || /^—\s*\w+\s*$/.test(elizaRes.reply.trim());
+
+      // Fallback: if ai-chat returned nothing useful (slow/down/thin reply
+      // like "—Eliza", or a persona-style intro that doesn't reference any
+      // grounding fields), retry through local /ollama/chat with deepseek
+      // using a tighter grounded prompt.
+      const elizaReply = elizaRes?.reply || '';
+      // Detect: starts with greeting/intro AND doesn't quote a field name
+      // from our grounding JSON (supabase/ollama/hermes/github/uptime/memory
+      // /models/cpu/supervisor). This catches the persona-dump pattern
+      // without needing an exact length threshold.
+      const groundingMarkers = /(supabase|ollama|hermes|github|uptime|models?|cpu|memory|supervisor|relay)/i;
+      const isPersonaDump = !groundingMarkers.test(elizaReply) && (
+        /^hey|hi[!,]|hello|sure[,!]|great question|of course/i.test(elizaReply.trim()) ||
+        elizaReply.toLowerCase().includes("i'm eliza") ||
+        elizaReply.toLowerCase().includes("general intelligence") ||
+        elizaReply.length > 250
+      );
+      const elizaReplyLooksThin = !elizaReply || elizaReply.trim().length < 12 || /^—\s*\w+\s*$/.test(elizaReply.trim()) || isPersonaDump;
       if (elizaReplyLooksThin) {
         try {
-          const ctx = await gatherFleetContext();
-          const groundedMsg = elizaMsg + '\n\nGROUNDING — Real-time system data:\n' + JSON.stringify(ctx) + '\n\nReply with 1-2 sentences grounded ONLY in the JSON above. If the question is about leads/money/bookings (not in JSON), say you\'d need to check the inbox.';
-          // /ollama/chat reads top-level model/temperature/maxTokens, not options.model
+          const deepseekMsg = elizaMsg + '\n\nGROUNDING — Real-time system data:\n' + JSON.stringify(ctx) + '\n\nReply with 1-2 sentences grounded ONLY in the JSON above. If the question is about leads/money/bookings (not in JSON), say you\'d need to check the inbox.';
           const fbRes = await fetch('http://localhost:' + PORT + '/ollama/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              message: groundedMsg,
+              message: deepseekMsg,
               model: 'deepseek-v4-flash:cloud',
               temperature: 0.4,
               maxTokens: 320,
@@ -4984,7 +5017,7 @@ async function routeFleetMessage(entry) {
           if (fbRes.ok) {
             const fbData = await fbRes.json();
             if (fbData?.response && fbData.response.trim().length >= 4) {
-              elizaRes = { ...(elizaRes || {}), reply: fbData.response, model: fbData.model || 'deepseek-v4-flash:cloud' };
+              elizaRes = { ...(elizaRes || {}), reply: fbData.response, model: fbData.model || 'deepseek-v4-flash:cloud (fallback)' };
               console.log('[routeFleetMessage] eliza fallback to deepseek, len=' + fbData.response.length);
             }
           }
