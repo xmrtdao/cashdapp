@@ -1385,6 +1385,45 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Supervisor status — used by fleet-chat grounding so agents don't hallucinate
+// "all services are up" without actually checking. Reads relay-data/supervisor-state.json.
+app.get('/api/supervisor/status', (req, res) => {
+  trackRequest('/api/supervisor/status');
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const stateFile = path.join(DATA_DIR, 'supervisor-state.json');
+    if (!fs.existsSync(stateFile)) {
+      return res.json({ error: 'supervisor-state.json missing', path: stateFile });
+    }
+    const raw = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    const services = raw.services || {};
+    const result = { services: {} };
+    for (const [name, svc] of Object.entries(services)) {
+      result.services[name] = {
+        childPid: svc.childPid,
+        startedAt: svc.startedAt,
+        uptimeSec: svc.startedAt ? Math.floor((Date.now() - svc.startedAt) / 1000) : 0,
+        restartCount: Array.isArray(svc.restartTimestamps) ? svc.restartTimestamps.length : 0,
+        lastAlert: raw.alerts?.[name + '-down'] || 0,
+      };
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Debug: returns the exact grounding context fleet-chat agents are given.
+// Useful for verifying the anti-hallucination contract.
+app.get('/api/fleet-chat/grounded', async (req, res) => {
+  trackRequest('/api/fleet-chat/grounded');
+  try {
+    const ctx = await gatherFleetContext();
+    res.json({ ok: true, context: ctx });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Fleet dashboard
 app.get('/', (req, res) => {
   trackRequest('/');
@@ -4768,6 +4807,94 @@ function loadFleetChatHistory() {
 }
 loadFleetChatHistory();
 
+// ── Fleet Chat Grounding ──
+// Fetch real system state BEFORE the LLM is called, so agent prompts
+// can ground their claims in actual data instead of hallucinating facts.
+// Returns a compact, deterministic fact block the LLM must work from.
+//
+// Anti-hallucination contract: any claim an agent makes in fleet chat
+// must trace back to a field in this block. If something isn't here,
+// the agent should say "I don't have that data" rather than invent.
+async function gatherFleetContext() {
+  const local = 'http://localhost:' + PORT;
+  const fetchJson = async (path, ms = 4000) => {
+    try {
+      const r = await fetch(local + path, { signal: AbortSignal.timeout(ms) });
+      if (!r.ok) return { error: 'HTTP ' + r.status };
+      return await r.json();
+    } catch (e) { return { error: e.message }; }
+  };
+  const [health, monitor, ollama, recentMsgs, supervisor] = await Promise.all([
+    fetchJson('/health', 2000),
+    fetchJson('/monitor', 6000),
+    fetchJson('/ollama/health', 3000),
+    fetchJson('/api/fleet-chat/messages?limit=5', 2000),
+    fetchJson('/api/supervisor/status', 2000).catch(() => null),
+  ]);
+
+  // Distill monitor.services down to status string per dependency
+  const svc = (monitor && monitor.services) || {};
+  // If monitor itself failed (timeout/error), surface that as "fetch_failed"
+  // so the LLM can distinguish "we don't know" from "explicitly down"
+  const monitorFailed = monitor && monitor.error;
+  const svcSummary = monitorFailed ? {
+    _monitorError: monitor.error,
+    supabase: 'fetch_failed',
+    ollama: 'fetch_failed',
+    github: 'fetch_failed',
+    hermes: 'fetch_failed',
+  } : {
+    supabase: svc.supabase?.status || 'unknown',
+    ollama: svc.ollama?.status || 'unknown',
+    github: svc.github?.status || 'unknown',
+    hermes: svc.hermes?.status || 'unknown',
+  };
+
+  // System load
+  const sys = monitor?.system || {};
+  const sysSummary = monitorFailed ? {
+    _monitorError: monitor.error,
+    nodeUptimeSec: 'fetch_failed',
+    memUsedPct: 'fetch_failed',
+    cpuPct: 'fetch_failed',
+  } : {
+    nodeUptimeSec: sys.uptime ? Math.floor(sys.uptime) : 'unknown',
+    memUsedPct: sys.memory?.system?.usagePercent || 'unknown',
+    cpuPct: sys.cpu?.usage || 'unknown',
+  };
+
+  // Recent fleet chat (last 5, condensed)
+  const recent = (recentMsgs?.messages || []).slice(-5).map(m => ({
+    agent: m.agent,
+    text: (m.message || '').slice(0, 100),
+  }));
+
+  return {
+    fetchedAt: new Date().toISOString(),
+    relay: {
+      status: health?.status,
+      uptimeSec: health?.uptime ? Math.floor(health.uptime) : null,
+      tools: health?.tools,
+      requests: health?.requests,
+    },
+    services: svcSummary,
+    system: sysSummary,
+    ollama: {
+      status: ollama?.status,
+      modelCount: Array.isArray(ollama?.models) ? ollama.models.length : null,
+      models: Array.isArray(ollama?.models) ? ollama.models.slice(0, 8) : null,
+      latencyMs: ollama?.latency,
+    },
+    supervisor: supervisor && !supervisor.error ? {
+      relayUp: supervisor?.services?.relay?.childPid != null,
+      pgUp: supervisor?.services?.pg?.childPid != null,
+      localSbUp: supervisor?.services?.['local-sb']?.childPid != null,
+      tunnelUp: supervisor?.services?.tunnel?.childPid != null,
+    } : null,
+    recentFleetChat: recent,
+  };
+}
+
 // Route a fleet message to the appropriate agent
 async function routeFleetMessage(entry) {
   const results = {};
@@ -4835,18 +4962,21 @@ async function routeFleetMessage(entry) {
       console.log('[routeFleetMessage] elizaRes:', JSON.stringify(elizaRes).slice(0, 200));
       // Fallback: if the deprecated eliza-relay EF gave us nothing useful
       // (signoff-only like "—Eliza", or empty), retry through local Ollama
-      // using the deepseek default model.
+      // using the deepseek default model — GROUNDED in real system data so
+      // the reply reflects actual state, not LLM invention.
       const elizaReplyLooksThin = !elizaRes?.reply || elizaRes.reply.trim().length < 12 || /^—\s*\w+\s*$/.test(elizaRes.reply.trim());
       if (elizaReplyLooksThin) {
         try {
+          const ctx = await gatherFleetContext();
+          const groundedMsg = elizaMsg + '\n\nGROUNDING — Real-time system data:\n' + JSON.stringify(ctx) + '\n\nReply with 1-2 sentences grounded ONLY in the JSON above. If the question is about leads/money/bookings (not in JSON), say you\'d need to check the inbox.';
           // /ollama/chat reads top-level model/temperature/maxTokens, not options.model
           const fbRes = await fetch('http://localhost:' + PORT + '/ollama/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              message: elizaMsg,
+              message: groundedMsg,
               model: 'deepseek-v4-flash:cloud',
-              temperature: 0.7,
+              temperature: 0.4,
               maxTokens: 320,
             }),
             signal: AbortSignal.timeout(28000),
@@ -4933,18 +5063,33 @@ async function routeFleetMessage(entry) {
   const isInquiry = entry.message.includes('From:') || entry.message.includes('WEBSITE') || entry.message.includes('BOOKING');
   if ((entry.channel === 'all' && (mentionsVex || isInquiry)) || entry.channel === 'vex') {
     try {
+      // Ground the prompt in real system state. Without this, the LLM
+      // will happily invent "all systems nominal" with zero data.
+      const ctx = await gatherFleetContext();
+      const ctxJson = JSON.stringify(ctx, null, 0);
       const vexPersona = isInquiry
         ? `You are Vex, Joe Lee's primary AI agent. You work for Party Favor Photo (photo booth services in DC, VA, MD, Dallas/FW, PA/NJ) and XMRT DAO. Be sharp and direct. Respond as Vex to acknowledge the inquiry.`
-        : `You are Vex, Joe Lee's primary AI agent — sharp, witty, and concise. You're chatting with the fleet. Address the message directly and add something useful.`;
+        : `You are Vex, Joe Lee's primary AI agent — sharp, witty, and concise. You're chatting with the fleet. Address the message directly.`;
       const vexPrompt = `${vexPersona}
+
+GROUNDING — Real-time system data (these are facts, not guesses):
+\`\`\`json
+${ctxJson}
+\`\`\`
+
+GROUNDING RULES:
+- If a fact is in the JSON block, you may reference it.
+- If something is NOT in the JSON, say "I don't have that data" — DO NOT invent it.
+- Never claim "all systems nominal" or "no anomalies" without a matching field in the JSON. A supabase.status of "unreachable" means Supabase is down; say so.
+- For questions about PFP leads, bookings, money, or campaigns: this block does not contain that data, so say "I'd need to check the inbox/CRM" rather than fabricate.
 
 ${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"
 
 Your response (1-2 sentences, no emoji sign-offs, no "—Eliza", no "o7"):`;
       const r = await fetch('http://localhost:11434/api/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: vexPrompt, stream: false, options: { temperature: 0.7, max_tokens: 120 } }),
-        signal: AbortSignal.timeout(10000),
+        body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: vexPrompt, stream: false, options: { temperature: 0.5, max_tokens: 180 } }),
+        signal: AbortSignal.timeout(15000),
       });
       if (r.ok) {
         const d = await r.json();
@@ -4963,15 +5108,25 @@ Your response (1-2 sentences, no emoji sign-offs, no "—Eliza", no "o7"):`;
   const mentionsAlice = /@alice/i.test(entry.message) || entry.channel === 'alice';
   if ((entry.channel === 'all' && mentionsAlice) || entry.channel === 'alice') {
     try {
+      const ctx = await gatherFleetContext();
+      const ctxJson = JSON.stringify(ctx, null, 0);
       const alicePrompt = `You are Alice, Joe Lee's desktop sidecar agent. You're terse, observational, and screenshot-aware. You notice things. You don't fluff.
 
-${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"
+GROUNDING — Real-time data (use only these facts):
+\`\`\`json
+${ctxJson}
+\`\`\`
 
-Your response (1 short sentence, sharp and direct, no emoji sign-offs):`;
+GROUNDING RULES:
+- Reference specific fields (e.g. "relay uptime: 1234s", "supabase unreachable") only when they're in the JSON.
+- If asked about something the JSON doesn't cover (emails, leads, money), say "not in my view" — don't make it up.
+- One short sentence. Sharp and direct. No emoji sign-offs.
+
+${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"`;
       const r = await fetch('http://localhost:11434/api/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: alicePrompt, stream: false, options: { temperature: 0.6, max_tokens: 80 } }),
-        signal: AbortSignal.timeout(8000),
+        body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: alicePrompt, stream: false, options: { temperature: 0.4, max_tokens: 120 } }),
+        signal: AbortSignal.timeout(12000),
       });
       if (r.ok) {
         const d = await r.json();
@@ -5567,11 +5722,24 @@ app.listen(PORT, '0.0.0.0', async () => {
       const idleFor = last ? Date.now() - last.ts : Infinity;
       // Bail if we spoke recently, or if anyone is on cooldown
       if (idleFor < FLEET_IDLE_THRESHOLD_MS) return;
-      const heartbeatPrompt = `You are Eliza, the XMRT/PartyFavor fleet coordinator. The fleet chat has been idle for ${Math.floor(idleFor / 60000)} minutes. Post a single short status ping (1 sentence) to keep the channel warm. Mention something useful: an active lead count, the latest campaign drop, or a system status note. No emoji sign-offs.`;
+      // Ground the heartbeat in real data so it doesn't claim fake leads/metrics
+      const ctx = await gatherFleetContext();
+      const ctxJson = JSON.stringify(ctx, null, 0);
+      const heartbeatPrompt = `You are Eliza, the XMRT/PartyFavor fleet coordinator. The fleet chat has been idle for ${Math.floor(idleFor / 60000)} minutes. Post a single short status ping (1 sentence) to keep the channel warm.
+
+GROUNDING — Real-time data (use only these facts):
+\`\`\`json
+${ctxJson}
+\`\`\`
+
+GROUNDING RULES:
+- Mention only fields that exist in the JSON (e.g. relay.uptimeSec, services.supabase, ollama.modelCount).
+- If a topic (leads, money, campaigns) isn't covered in the JSON, say "I don't have that data" — never invent counts.
+- No emoji sign-offs, no "—Eliza", no "o7".`;
       const r = await fetch('http://localhost:11434/api/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: heartbeatPrompt, stream: false, options: { temperature: 0.7, max_tokens: 80 } }),
-        signal: AbortSignal.timeout(10000),
+        body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: heartbeatPrompt, stream: false, options: { temperature: 0.4, max_tokens: 140 } }),
+        signal: AbortSignal.timeout(15000),
       });
       if (!r.ok) return;
       const d = await r.json();
