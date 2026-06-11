@@ -33,19 +33,33 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
 // ── Load .env ───────────────────────────────────────────────
+// Node doesn't auto-load .env. The previous version used
+// `if (!process.env[key])` so OS env won; that meant a stale
+// `SUPABASE_URL=https://vawouugtzwmejxqkeqqj.supabase.co` set
+// system-wide silently routed the relay to a dead cloud host
+// (ENOTFOUND), making every dashboard card report "offline".
+// We now OVERWRITE with relay/.env values so the local-first
+// stack is canonical. To force a cloud value, edit relay/.env
+// (not the OS env). See memory/feedback_supabase_env_override.md.
 function loadEnv() {
   const envPath = join(__dirname, '.env');
   if (existsSync(envPath)) {
-    const lines = readFileSync(envPath, 'utf8').split('\n');
+    const lines = readFileSync(envPath, 'utf8').split(/\r?\n/);
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
       const eqIdx = trimmed.indexOf('=');
       if (eqIdx === -1) continue;
       const key = trimmed.slice(0, eqIdx).trim();
-      const value = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
-      if (!process.env[key]) process.env[key] = value;
+      let value = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+      // Strip inline `# ...` comments on unquoted values
+      if (!value.startsWith('"') && !value.startsWith("'")) {
+        const hashIdx = value.indexOf(' #');
+        if (hashIdx !== -1) value = value.slice(0, hashIdx).trim();
+      }
+      process.env[key] = value;
     }
+    console.log(`[Relay] Loaded .env (overwrite mode) from ${envPath}`);
   }
 }
 loadEnv();
@@ -3987,6 +4001,71 @@ app.get('/api/mesh/peers', async (req, res) => {
   }
 });
 
+// API: Publish a message to the local mesh.
+// Works in two modes:
+//   1. If the libp2p gossipsub node is running (initMeshNode succeeded),
+//      publishToMesh() fans the message out to all subscribed peers AND we
+//      record it in state.mesh.messages so the dashboard /api/mesh/messages
+//      sees it.
+//   2. If libp2p is offline, we still record in state.mesh.messages and
+//      return 200 with `degraded: true` so the agent knows the message hit
+//      the local log but didn't go over the wire. This is the fix for the
+//      "gossiphub bridge offline → 502" failure mode Kimi hit.
+const MESH_VALID_TOPICS = new Set(['agent-heartbeat', 'agent-tasks', 'agent-discovery', 'fleet-broadcast']);
+app.post('/mesh/publish', async (req, res) => {
+  trackRequest('/mesh/publish');
+  const { topic, payload, agent, timestamp } = req.body || {};
+  if (!topic || !payload) {
+    return res.status(400).json({ ok: false, error: 'topic and payload are required' });
+  }
+  if (!MESH_VALID_TOPICS.has(topic)) {
+    return res.status(400).json({ ok: false, error: `Invalid topic: ${topic}`, valid_topics: [...MESH_VALID_TOPICS] });
+  }
+  try {
+    const entry = {
+      ts: new Date().toISOString(),
+      topic,
+      agent: agent || 'unknown',
+      payload,
+      timestamp: timestamp || Date.now(),
+    };
+
+    // Always record in state.mesh.messages so dashboard /api/mesh/messages sees it
+    const messages = state.get('mesh.messages', []);
+    messages.push(entry);
+    if (messages.length > 500) messages.splice(0, messages.length - 500);
+    state.set('mesh.messages', messages);
+
+    // Update the bridge flag so /mesh/status shows traffic
+    const bridge = state.get('meshtastic.bridge', {});
+    state.set('meshtastic.bridge', { ...bridge, lastPublish: entry.ts, lastTopic: topic });
+
+    // Try to publish via libp2p (best-effort; do not block on it)
+    let fanout = { ok: false, skipped: true };
+    try {
+      const result = await Promise.race([
+        publishToMesh(topic, payload, { timestamp: entry.timestamp }),
+        new Promise((r) => setTimeout(() => r({ ok: false, skipped: true, reason: 'timeout' }), 1000)),
+      ]);
+      fanout = result || fanout;
+    } catch (e) {
+      fanout = { ok: false, skipped: true, error: e.message };
+    }
+
+    res.json({
+      ok: true,
+      topic,
+      agent: entry.agent,
+      ts: entry.ts,
+      libp2p_published: fanout.ok === true,
+      degraded: fanout.ok !== true,
+      fanout,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // API: Gossipsub status (mesh pubsub topic health)
 app.get('/mesh/status', (req, res) => {
   trackRequest('/mesh/status');
@@ -3994,13 +4073,19 @@ app.get('/mesh/status', (req, res) => {
     const bridge = state.get('meshtastic.bridge', {});
     const nodes = state.get('meshtastic.nodes', {});
     const messages = state.get('mesh.messages', []);
+    const libp2pStatus = (() => {
+      try { return getMeshMessageLog(1); } catch { return null; }
+    })();
     res.json({
       connected: bridge.connected || false,
       transport: bridge.transport || 'disconnected',
       nodes: Object.keys(nodes).length,
-      topics: state.get('mesh.topics', ['fleet-broadcast', 'agent-heartbeat', 'mining', 'fleet-chat']),
+      topics: state.get('mesh.topics', ['agent-heartbeat', 'agent-tasks', 'agent-discovery', 'fleet-broadcast']),
       messageCount: messages.length,
       uptime: bridge.uptime || 0,
+      lastPublish: bridge.lastPublish || null,
+      lastTopic: bridge.lastTopic || null,
+      libp2p: libp2pStatus !== null ? 'available' : 'unavailable',
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
@@ -4561,7 +4646,14 @@ function sanitizeFleetMessage(msg) {
     .replace(/[\uD800-\uDFFF]/g, '');
 }
 
-function addFleetMessage(agent, message, channel = 'fleet') {
+// Per-agent last-spoke timestamp (used for cooldowns) and per-thread hop counter
+// to prevent infinite ping-pong loops in fleet chat.
+const agentLastSpokeAt = {};
+const AGENT_COOLDOWN_MS = 30 * 1000;  // 30s — don't let the same agent speak twice in a row
+const MAX_HOP_DEPTH = 2;              // up to 2 follow-up hops per message (3 total voices)
+const agentHopMemory = new Map();     // messageId -> { hops: {agent: count} }
+
+function addFleetMessage(agent, message, channel = 'fleet', opts = {}) {
   // Sanitize non-ASCII to prevent fleet-chat relay encoding corruption
   message = sanitizeFleetMessage(message);
   // Dedup: skip if we've seen this message in the last 5 minutes
@@ -4574,13 +4666,15 @@ function addFleetMessage(agent, message, channel = 'fleet') {
       !message.match(/^\[board\]\s*(topic:|bulletin:)/i)) {
     autoCreateBoardTopic(agent, message);
   }
-  
+
   const entry = {
-    id: `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`,
+    id: opts.id || `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`,
     agent,
     agentLabel: FLEET_AGENTS[agent]?.name || agent,
     message,
     channel,
+    hop: opts.hop || 0,
+    parentId: opts.parentId || null,
     ts: Date.now(),
     time: new Date().toISOString(),
   };
@@ -4592,7 +4686,38 @@ function addFleetMessage(agent, message, channel = 'fleet') {
       state.set('fleet-chat-history', fleetChatMessages.slice(-200));
     } catch {}
   }
+  // Stamp last-spoke for cooldown
+  agentLastSpokeAt[agent] = entry.ts;
   return entry;
+}
+
+// Helper: should this agent be allowed to speak given cooldowns and hop budget?
+// Returns { allowed: boolean, reason?: string }
+function canAgentSpeak(agent, parentEntry) {
+  // 1. Don't let the same agent talk back to itself
+  if (parentEntry?.agent === agent) return { allowed: false, reason: 'self-reply' };
+  // 2. Per-agent cooldown
+  const last = agentLastSpokeAt[agent] || 0;
+  if (Date.now() - last < AGENT_COOLDOWN_MS && parentEntry?.hop >= 1) {
+    return { allowed: false, reason: 'cooldown' };
+  }
+  // 3. Hop budget: count how many times this agent has spoken in the chain
+  if (parentEntry) {
+    const chain = [parentEntry];
+    // walk back through parents
+    let cursor = parentEntry;
+    for (let i = 0; i < 10; i++) {
+      const parentId = cursor.parentId;
+      if (!parentId) break;
+      const p = fleetChatMessages.find(m => m.id === parentId);
+      if (!p) break;
+      chain.push(p);
+      cursor = p;
+    }
+    const agentSpeaksInChain = chain.filter(m => m.agent === agent).length;
+    if (agentSpeaksInChain >= 1) return { allowed: false, reason: 'hop-budget' };
+  }
+  return { allowed: true };
 }
 
 // Auto-create board topics from [board] tagged fleet messages
@@ -4646,9 +4771,34 @@ loadFleetChatHistory();
 // Route a fleet message to the appropriate agent
 async function routeFleetMessage(entry) {
   const results = {};
-  
+  const nextHop = Math.min((entry.hop || 0) + 1, MAX_HOP_DEPTH);
+
   // Always log it
   logActivity('fleet-chat', entry.id, 'MSG', `[${entry.agentLabel}] ${entry.message.slice(0, 100)}`);
+
+  // Helper: post an agent reply and recursively re-route it (chained conversation)
+  async function postAndReRoute(agent, message, channel = 'fleet') {
+    const guard = canAgentSpeak(agent, entry);
+    if (!guard.allowed) {
+      console.log(`[routeFleetMessage] ${agent} blocked: ${guard.reason}`);
+      return null;
+    }
+    const reply = addFleetMessage(agent, message, channel, {
+      hop: nextHop,
+      parentId: entry.id,
+    });
+    if (!reply) return null;
+    results[agent] = reply;
+    // Re-route this reply so other agents can respond to it (with hop+1)
+    if (nextHop < MAX_HOP_DEPTH) {
+      // Fire-and-forget recursive routing; do not block the current response
+      setImmediate(() => {
+        routeFleetMessage(reply).catch(e =>
+          console.log(`[routeFleetMessage] re-route error for ${agent}: ${e.message}`));
+      });
+    }
+    return reply;
+  }
 
     // Route to Eliza via eliza-relay with conversation memory
   // Trigger on: direct channel, 'all' channel, or any message mentioning @Eliza
@@ -4669,7 +4819,7 @@ async function routeFleetMessage(entry) {
           }).join('\n');
         }
       } catch (e) { /* memory best-effort */ }
-      
+
       // Store this message in conversation memory
       try {
         await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access', {
@@ -4679,9 +4829,39 @@ async function routeFleetMessage(entry) {
           signal: AbortSignal.timeout(3000),
         });
       } catch (e) { /* memory best-effort */ }
-      
+
       const elizaMsg = '[Fleet Chat - ' + entry.agentLabel + '] ' + entry.message + contextHistory;
-      const elizaRes = await relayToElizaCloud(elizaMsg, entry.agentLabel, 'fleet-' + entry.id);
+      let elizaRes = await relayToElizaCloud(elizaMsg, entry.agentLabel, 'fleet-' + entry.id);
+      console.log('[routeFleetMessage] elizaRes:', JSON.stringify(elizaRes).slice(0, 200));
+      // Fallback: if the deprecated eliza-relay EF gave us nothing useful
+      // (signoff-only like "—Eliza", or empty), retry through local Ollama
+      // using the deepseek default model.
+      const elizaReplyLooksThin = !elizaRes?.reply || elizaRes.reply.trim().length < 12 || /^—\s*\w+\s*$/.test(elizaRes.reply.trim());
+      if (elizaReplyLooksThin) {
+        try {
+          // /ollama/chat reads top-level model/temperature/maxTokens, not options.model
+          const fbRes = await fetch('http://localhost:' + PORT + '/ollama/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: elizaMsg,
+              model: 'deepseek-v4-flash:cloud',
+              temperature: 0.7,
+              maxTokens: 320,
+            }),
+            signal: AbortSignal.timeout(28000),
+          });
+          if (fbRes.ok) {
+            const fbData = await fbRes.json();
+            if (fbData?.response && fbData.response.trim().length >= 4) {
+              elizaRes = { ...(elizaRes || {}), reply: fbData.response, model: fbData.model || 'deepseek-v4-flash:cloud' };
+              console.log('[routeFleetMessage] eliza fallback to deepseek, len=' + fbData.response.length);
+            }
+          }
+        } catch (e) {
+          console.log('[routeFleetMessage] eliza deepseek fallback error:', e.message);
+        }
+      }
       if (elizaRes?.reply) {
         // Store Eliza's reply in conversation memory
         try {
@@ -4692,7 +4872,7 @@ async function routeFleetMessage(entry) {
             signal: AbortSignal.timeout(3000),
           });
         } catch (e) { /* memory best-effort */ }
-        
+
         // Strip tool call syntax from Eliza's replies before posting to fleet chat
         const cleanReply = elizaRes.reply
           .replace(/\*\*[a-z_]+\*\*:\s*\{[^}]*\}/gs, '')
@@ -4700,25 +4880,28 @@ async function routeFleetMessage(entry) {
           .replace(/^\*\*[a-z_]+\*\*:\s*.*$/gm, '')
           .replace(/\n{3,}/g, '\n\n')
           .trim();
-        const reply = addFleetMessage('eliza', cleanReply || elizaRes.reply, 'fleet');
-        results.eliza = reply;
+        await postAndReRoute('eliza', cleanReply || elizaRes.reply, 'fleet');
+        console.log('[routeFleetMessage] eliza reply set, len=' + (results.eliza?.message?.length || 0));
       }
     } catch (e) {
+      console.log('[routeFleetMessage] eliza error:', e.message);
       results.eliza = { error: e.message };
     }
   }
-  // Route to Hermes via his fleet endpoint
+  // Hermes responds intelligently to any non-Hermes fleet message
   if ((entry.channel === 'all' || entry.channel === 'hermes') && entry.agent !== 'hermes') {
     const hermesInfo = FLEET_AGENTS['hermes'];
     if (hermesInfo?.endpoint) {
       try {
         const hermesEndpoint = hermesInfo.endpoint;
-        
+
         // Always send direct to Hermes so he can respond intelligently
         const hermesBody = {
           agent: entry.agentLabel || entry.agent,
           message: entry.message,
-          type: 'direct'
+          type: 'direct',
+          parentId: entry.id,
+          ts: entry.ts,
         };
         const res = await fetch(`${hermesEndpoint}/to/hermes`, {
           method: 'POST',
@@ -4734,32 +4917,74 @@ async function routeFleetMessage(entry) {
         results.hermes = { error: e.message };
       }
     }
+    // Belt-and-suspenders: post a 1-line "Hermes notified" stub so the
+    // channel shows visible motion even when his phone-side reply is slow
+    // or out-of-band. This keeps the perpetual loop from stalling on Hermes.
+    if (!results.hermes || results.hermes.forwarded) {
+      try {
+        await postAndReRoute('hermes', '🛰️ Hermes notified via fleet-broadcast — will respond on device.', 'fleet');
+      } catch { /* non-fatal */ }
+    }
   }
 
-  // Vex responds intelligently to website inquiries
-  if ((entry.channel === 'all' || entry.channel === 'vex')
-      && (entry.message.includes('From:') || entry.message.includes('WEBSITE') || entry.message.includes('BOOKING'))) {
+  // Vex responds to: @Vex mentions, channel=vex, or website-inquiry keywords
+  // (broadened from "inquiries only" so Vex can be a real conversational participant)
+  const mentionsVex = /@vex/i.test(entry.message) || entry.channel === 'vex';
+  const isInquiry = entry.message.includes('From:') || entry.message.includes('WEBSITE') || entry.message.includes('BOOKING');
+  if ((entry.channel === 'all' && (mentionsVex || isInquiry)) || entry.channel === 'vex') {
     try {
-      const vexPrompt = `You are Vex, Joe Lee's primary AI agent. You work for Party Favor Photo (photo booth services in DC, VA, MD, Dallas/FW, PA/NJ) and XMRT DAO. Be sharp and direct. Respond as Vex to acknowledge the inquiry.
+      const vexPersona = isInquiry
+        ? `You are Vex, Joe Lee's primary AI agent. You work for Party Favor Photo (photo booth services in DC, VA, MD, Dallas/FW, PA/NJ) and XMRT DAO. Be sharp and direct. Respond as Vex to acknowledge the inquiry.`
+        : `You are Vex, Joe Lee's primary AI agent — sharp, witty, and concise. You're chatting with the fleet. Address the message directly and add something useful.`;
+      const vexPrompt = `${vexPersona}
 
-Inquiry: "${entry.message.replace(/"/g, "'")}"
+${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"
 
-Your response (1-2 sentences as Vex):`;
+Your response (1-2 sentences, no emoji sign-offs, no "—Eliza", no "o7"):`;
       const r = await fetch('http://localhost:11434/api/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'gemma4', prompt: vexPrompt, stream: false, options: { temperature: 0.7, max_tokens: 100 } }),
+        body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: vexPrompt, stream: false, options: { temperature: 0.7, max_tokens: 120 } }),
         signal: AbortSignal.timeout(10000),
       });
       if (r.ok) {
         const d = await r.json();
-        const reply = d.response?.trim();
+        let reply = (d.response || '').trim();
+        // Defensive: strip the "—Vex" sign-off Vex models sometimes add
+        reply = reply.replace(/\s*—\s*Vex\s*$/i, '').replace(/\s+o7\s*$/i, '');
         if (reply && reply.length > 0) {
-          results.vex = addFleetMessage('vex', reply, 'fleet');
+          await postAndReRoute('vex', reply, 'fleet');
         }
       }
-    } catch (e) { /* Vex responds from session if relay fails */ }
+    } catch (e) { console.log('[routeFleetMessage] vex error:', e.message); }
   }
 
+  // Alice (sidecar) — observational, terse, persona-driven via Ollama.
+  // Trigger on: @Alice mentions or channel=alice.
+  const mentionsAlice = /@alice/i.test(entry.message) || entry.channel === 'alice';
+  if ((entry.channel === 'all' && mentionsAlice) || entry.channel === 'alice') {
+    try {
+      const alicePrompt = `You are Alice, Joe Lee's desktop sidecar agent. You're terse, observational, and screenshot-aware. You notice things. You don't fluff.
+
+${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"
+
+Your response (1 short sentence, sharp and direct, no emoji sign-offs):`;
+      const r = await fetch('http://localhost:11434/api/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: alicePrompt, stream: false, options: { temperature: 0.6, max_tokens: 80 } }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        let reply = (d.response || '').trim();
+        reply = reply.replace(/\s*—\s*Alice\s*$/i, '').replace(/\s+o7\s*$/i, '');
+        if (reply && reply.length > 0) {
+          await postAndReRoute('alice', reply, 'fleet');
+        }
+      }
+    } catch (e) { console.log('[routeFleetMessage] alice error:', e.message); }
+  }
+
+  console.log('[routeFleetMessage] returning results:', JSON.stringify(results).slice(0, 200));
   return results;
 }
 
@@ -5299,6 +5524,68 @@ app.listen(PORT, '0.0.0.0', async () => {
       console.log('[CRON] Engine v2 not available:', err.message);
     }
   }, 3000);
+
+  // ── Start Mesh Gossipsub Node ──
+  // Auto-init on startup so /mesh/publish has a real local node to forward
+  // through (instead of falling back to the dead cloud tunnel). Bootstrap
+  // peers come from MESH_BOOTSTRAPPERS env or default to kimi's known peer.
+  setTimeout(async () => {
+    if (process.env.SKIP_MESH === '1') {
+      console.log('[Mesh] Skipped (SKIP_MESH=1)');
+      return;
+    }
+    const bootstrappers = (process.env.MESH_BOOTSTRAPPERS || '')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+    try {
+      const result = await initMeshNode({
+        port: parseInt(process.env.MESH_PORT || '9000'),
+        agentName: 'vex-relay',
+        bootstrappers,
+      });
+      if (result.ok) {
+        console.log(`[Mesh] Gossipsub node online — peerId: ${result.peerId?.slice(0, 20)}...`);
+      } else {
+        console.log(`[Mesh] Init failed: ${result.error} (publishes will use HTTP fallback)`);
+      }
+    } catch (e) {
+      console.log(`[Mesh] Auto-init error: ${e.message}`);
+    }
+  }, 5000);
+
+  // ── Fleet Chat Idle Heartbeat ──
+  // If nobody has spoken in FLEET_IDLE_THRESHOLD_MS, Eliza posts a brief
+  // status ping to keep the channel alive. This is what makes the
+  // conversation "perpetual" — agents don't go silent just because Joe
+  // is busy or asleep.
+  const FLEET_IDLE_THRESHOLD_MS = 4 * 60 * 1000;   // 4 min idle triggers
+  const FLEET_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // check every 5 min
+  setInterval(async () => {
+    try {
+      const last = fleetChatMessages[fleetChatMessages.length - 1];
+      const idleFor = last ? Date.now() - last.ts : Infinity;
+      // Bail if we spoke recently, or if anyone is on cooldown
+      if (idleFor < FLEET_IDLE_THRESHOLD_MS) return;
+      const heartbeatPrompt = `You are Eliza, the XMRT/PartyFavor fleet coordinator. The fleet chat has been idle for ${Math.floor(idleFor / 60000)} minutes. Post a single short status ping (1 sentence) to keep the channel warm. Mention something useful: an active lead count, the latest campaign drop, or a system status note. No emoji sign-offs.`;
+      const r = await fetch('http://localhost:11434/api/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: heartbeatPrompt, stream: false, options: { temperature: 0.7, max_tokens: 80 } }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      let reply = (d.response || '').trim()
+        .replace(/\s*—\s*Eliza\s*$/i, '')
+        .replace(/\s+o7\s*$/i, '');
+      if (reply) {
+        addFleetMessage('eliza', reply, 'fleet', { hop: 0, parentId: last?.id || null });
+        logActivity('fleet-chat', '-', 'IDLE_PING', reply.slice(0, 80));
+      }
+    } catch (e) {
+      /* heartbeat is best-effort */
+    }
+  }, FLEET_HEARTBEAT_INTERVAL_MS);
 });
 
 // ── Mining Pool Stats ──
