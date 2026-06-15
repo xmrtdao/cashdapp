@@ -73,7 +73,8 @@ import * as state from './lib/state.mjs';
 import { createTaskRunner } from './lib/task-runner.mjs';
 import { handleInboundEmail } from './lib/auto-responder.mjs';
 import { ensureLocalDb, restFetch as localRestFetch, query as localQuery, LOCAL_DB_ENABLED } from './lib/localDb.mjs';
-import { createMeshRouter, initMeshNode, publishToMesh, getMeshMessageLog } from './lib/mesh-router.mjs';
+import { createMeshRouter, initMeshNode, publishToMesh, getMeshMessageLog, getMeshStatus } from './lib/mesh-router.mjs';
+import registerSuiteRoutes from './routes/suite-dashboard.mjs';
 import { discoverFunctions, listFunctions } from './lib/function-runtime.mjs';
 
 // Local Postgres (embedded-postgres) connection helper
@@ -1312,6 +1313,22 @@ app.use(express.json({ limit: '5mb' }));
 // ── Fast static file routes (bypasses slow express.static on Windows) ──
 const PUBLIC_DIR = join(__dirname, 'public');
 const SPATIAL_DIR = join(__dirname, 'spatial');
+
+// ── Suite SPA (Vite build, served locally instead of GH Pages' broken CDN) ──
+const SUITE_DIR = join(__dirname, '..', 'xmrtdao.github.io', 'suite');
+if (existsSync(join(SUITE_DIR, 'index.html'))) {
+  app.use('/suite', express.static(SUITE_DIR, { maxAge: '5m' }));
+  // SPA fallback — any /suite/* path that isn't a real file serves index.html
+  // so client-side routing (e.g. /suite/dashboard) works.
+  app.get('/suite/*', (req, res) => {
+    const filePath = join(SUITE_DIR, req.path.replace(/^\/suite\//, ''));
+    if (existsSync(filePath)) return res.sendFile(filePath);
+    res.sendFile(join(SUITE_DIR, 'index.html'));
+  });
+  console.log(`  Suite SPA: ${SUITE_DIR}`);
+} else {
+  console.log(`  Suite SPA: NOT FOUND at ${SUITE_DIR} — skipping`);
+}
 
 app.get('/radar/radar.html', (req, res) => {
   trackRequest('/radar/radar.html');
@@ -3516,12 +3533,18 @@ app.post('/webhook/resend-inbound', (req, res) => {
   const emailEntry = {
     email_id: emailId,
     from: data.from,
+    from_name: data.from_name,
     to: data.to,
     cc: data.cc,
     subject: data.subject,
-    body: '',
-    text: '',
-    html: '',
+    // 2026-06-11: honor the body's text/html if the webhook caller
+    // provided them (e.g. synthetic test posts, edge-function proxies
+    // that pre-fetched). Real Resend webhooks don't include body and
+    // we still fetch from /emails/receiving/:id below; this just lets
+    // local testing work without round-tripping through Resend's API.
+    body: data.text || data.body || '',
+    text: data.text || '',
+    html: data.html || '',
     created_at: data.created_at,
     message_id: data.message_id,
     attachments: (data.attachments || []).map(a => ({ id: a.id, filename: a.filename, content_type: a.content_type })),
@@ -3536,7 +3559,22 @@ app.post('/webhook/resend-inbound', (req, res) => {
   // auto-responder) AND the unified email.inbox state (for /resend/inbox
   // GET routes and Alice's parser).
   const inbox = state.get('resend_inbox') || [];
-  inbox.unshift(emailEntry);
+  // 2026-06-11: dedup legacy resend_inbox by email_id too. Re-posting the
+  // same webhook must not create a second row. The unified email.inbox
+  // dedups by content-hash as a fallback, but the legacy key only has
+  // email_id to go on.
+  const existingResendIdx = emailId
+    ? inbox.findIndex(e => e.email_id === emailId)
+    : -1;
+  if (existingResendIdx === -1) {
+    inbox.unshift(emailEntry);
+  } else {
+    // Update body in place; keep original position
+    inbox[existingResendIdx].body = emailEntry.body;
+    inbox[existingResendIdx].text = emailEntry.text;
+    inbox[existingResendIdx].html = emailEntry.html;
+    inbox[existingResendIdx]._lastDedupHit = new Date().toISOString();
+  }
   if (inbox.length > 50) inbox.length = 50;
   state.set('resend_inbox', inbox);
 
@@ -3550,9 +3588,10 @@ app.post('/webhook/resend-inbound', (req, res) => {
     addToInbox(toDomain, {
       to: data.to,
       from: data.from,
+      from_name: data.from_name,
       subject: data.subject,
-      text: '',  // will be filled below
-      html: '',
+      text: data.text || '',  // pre-fetched body if caller provided it
+      html: data.html || '',
       email_id: emailId,
       attachments: data.attachments,
     });
@@ -4121,22 +4160,24 @@ app.post('/mesh/publish', async (req, res) => {
 app.get('/mesh/status', (req, res) => {
   trackRequest('/mesh/status');
   try {
-    const bridge = state.get('meshtastic.bridge', {});
-    const nodes = state.get('meshtastic.nodes', {});
     const messages = state.get('mesh.messages', []);
-    const libp2pStatus = (() => {
-      try { return getMeshMessageLog(1); } catch { return null; }
+    const libp2p = (() => {
+      try { return getMeshStatus(); } catch { return null; }
     })();
+    const peerCount = libp2p?.peers?.count ?? 0;
     res.json({
-      connected: bridge.connected || false,
-      transport: bridge.transport || 'disconnected',
-      nodes: Object.keys(nodes).length,
-      topics: state.get('mesh.topics', ['agent-heartbeat', 'agent-tasks', 'agent-discovery', 'fleet-broadcast']),
+      connected: peerCount > 0,
+      transport: peerCount > 0 ? 'libp2p' : 'disconnected',
+      nodes: peerCount,
+      topics: libp2p?.topics || state.get('mesh.topics', ['agent-heartbeat', 'agent-tasks', 'agent-discovery', 'fleet-broadcast']),
       messageCount: messages.length,
-      uptime: bridge.uptime || 0,
-      lastPublish: bridge.lastPublish || null,
-      lastTopic: bridge.lastTopic || null,
-      libp2p: libp2pStatus !== null ? 'available' : 'unavailable',
+      uptime: libp2p?.uptime || 0,
+      lastPublish: messages.length > 0 ? messages[messages.length - 1].ts : null,
+      lastTopic: messages.length > 0 ? messages[messages.length - 1].topic : null,
+      libp2p: libp2p ? 'available' : 'unavailable',
+      libp2pStatus: libp2p?.status || 'unknown',
+      peerId: libp2p?.peerId || null,
+      peers: libp2p?.peers || { count: 0, list: [] },
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
@@ -4988,18 +5029,32 @@ async function routeFleetMessage(entry) {
       // grounding fields), retry through local /ollama/chat with deepseek
       // using a tighter grounded prompt.
       const elizaReply = elizaRes?.reply || '';
-      // Detect: starts with greeting/intro AND doesn't quote a field name
-      // from our grounding JSON (supabase/ollama/hermes/github/uptime/memory
-      // /models/cpu/supervisor). This catches the persona-dump pattern
-      // without needing an exact length threshold.
-      const groundingMarkers = /(supabase|ollama|hermes|github|uptime|models?|cpu|memory|supervisor|relay)/i;
-      const isPersonaDump = !groundingMarkers.test(elizaReply) && (
-        /^hey|hi[!,]|hello|sure[,!]|great question|of course/i.test(elizaReply.trim()) ||
-        elizaReply.toLowerCase().includes("i'm eliza") ||
-        elizaReply.toLowerCase().includes("general intelligence") ||
-        elizaReply.length > 250
+      // Detect persona dumps. We do this by cross-checking numeric claims in
+      // the reply against the grounding JSON. A reply that mentions
+      // "21% CPU" or "14 models" with no matching value in the JSON is
+      // fabricating plausible-looking stats — that's the failure mode the
+      // old topic-marker regex missed.
+      //
+      // We extract every number from the reply, then for each one check
+      // whether it appears (string-form) in any field of the JSON. If at
+      // least one number traces, the reply is grounded. If zero numbers
+      // trace, treat as persona-dump and retry via local deepseek with a
+      // tighter grounded prompt.
+      const elizaReplyText = elizaRes?.reply || '';
+      const replyNumbers = elizaReplyText.match(/\b\d+(\.\d+)?\b/g) || [];
+      const ctxJson = JSON.stringify(ctx);
+      const hasTracedNumber = replyNumbers.some(n => ctxJson.includes(n));
+      const mentionsJsonField = /(uptimeSec|nodeUptimeSec|modelCount|memUsedPct|cpuPct|supervisor\.|relay\.|ollama\.)\b/.test(elizaReplyText);
+      const isGrounded = hasTracedNumber || mentionsJsonField;
+      const isPersonaDump = !isGrounded || (
+        elizaReplyText.toLowerCase().includes("want me to") ||
+        elizaReplyText.toLowerCase().includes("i'm eliza") ||
+        elizaReplyText.toLowerCase().includes("general intelligence") ||
+        elizaReplyText.toLowerCase().includes("mining stats") ||
+        elizaReplyText.toLowerCase().includes("@mobilemonero") ||
+        elizaReplyText.length > 320
       );
-      const elizaReplyLooksThin = !elizaReply || elizaReply.trim().length < 12 || /^—\s*\w+\s*$/.test(elizaReply.trim()) || isPersonaDump;
+      const elizaReplyLooksThin = !elizaReplyText || elizaReplyText.trim().length < 12 || /^—\s*\w+\s*$/.test(elizaReplyText.trim()) || isPersonaDump;
       if (elizaReplyLooksThin) {
         try {
           const deepseekMsg = elizaMsg + '\n\nGROUNDING — Real-time system data:\n' + JSON.stringify(ctx) + '\n\nReply with 1-2 sentences grounded ONLY in the JSON above. If the question is about leads/money/bookings (not in JSON), say you\'d need to check the inbox.';
@@ -6007,9 +6062,23 @@ function addToInbox(domain, email) {
   const inbox = getInbox();
   const key = domain === 'partyfavorphoto.com' ? 'pfp' : 'mobilemonero';
   if (!inbox[key]) inbox[key] = [];
-  
+
+  // 2026-06-11: dedup by email_id (Resend message id). Re-posting the same
+  // webhook twice (or duplicate Resend deliveries) must not create a second
+  // inbox row. Falls back to from+subject hash if no email_id.
+  const eid = email.email_id;
+  let existingIdx = -1;
+  if (eid) {
+    existingIdx = inbox[key].findIndex(e => e.id === eid || e.email_id === eid);
+  }
+  if (existingIdx === -1) {
+    // Cheap content-hash fallback: from + subject + first 80 chars of body
+    const sig = `${email.from || ''}|${email.subject || ''}|${(email.text||'').slice(0, 80)}`;
+    existingIdx = inbox[key].findIndex(e => e._dedupSig === sig);
+  }
+
   // Store attachments: filter for PDFs and store base64 data
-  const attachments = (email.attachments || []).filter(a => 
+  const attachments = (email.attachments || []).filter(a =>
     a.content_type === 'application/pdf' || a.filename?.endsWith('.pdf')
   ).map(a => ({
     filename: a.filename || 'document.pdf',
@@ -6017,9 +6086,10 @@ function addToInbox(domain, email) {
     data: a.content, // base64-encoded PDF data
     size: a.content ? Math.round((a.content.length * 0.75) / 1024) : 0, // approximate KB
   }));
-  
-  inbox[key].unshift({
-    id: email.email_id || `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+
+  const newEntry = {
+    id: eid || `${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+    email_id: eid,
     from: email.from,
     to: email.to,
     subject: email.subject || '(no subject)',
@@ -6030,7 +6100,20 @@ function addToInbox(domain, email) {
     agent: email.agent || null,
     attachments,
     hasPdf: attachments.length > 0,
-  });
+    _dedupSig: `${email.from || ''}|${email.subject || ''}|${(email.text||'').slice(0, 80)}`,
+  };
+
+  if (existingIdx !== -1) {
+    // Update the existing entry's body (a re-delivery might have a fuller body)
+    // but do NOT bump it to position 0 / change its receivedAt.
+    inbox[key][existingIdx].text = newEntry.text;
+    inbox[key][existingIdx].html = newEntry.html;
+    inbox[key][existingIdx].attachments = attachments;
+    inbox[key][existingIdx].hasPdf = attachments.length > 0;
+    inbox[key][existingIdx]._lastDedupHit = new Date().toISOString();
+  } else {
+    inbox[key].unshift(newEntry);
+  }
   if (inbox[key].length > 200) inbox[key] = inbox[key].slice(0, 200);
   state.set(EMAIL_STORE_KEY, inbox);
 }
@@ -6184,3 +6267,6 @@ app.get('/cron/status', (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── Suite Dashboard API (31 Harbor multi-tenant app) ────────────────
+registerSuiteRoutes(app);
