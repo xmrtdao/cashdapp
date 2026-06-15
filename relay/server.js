@@ -1315,7 +1315,11 @@ const PUBLIC_DIR = join(__dirname, 'public');
 const SPATIAL_DIR = join(__dirname, 'spatial');
 
 // ── Suite SPA (Vite build, served locally instead of GH Pages' broken CDN) ──
-const SUITE_DIR = join(__dirname, '..', 'xmrtdao.github.io', 'suite');
+// IMPORTANT: SUITE_DIR must point to the Vite build output (suite/dist/), not
+// the GH Pages subpath (xmrtdao.github.io/suite/). The GH Pages version was
+// replaced with a redirect to relay.mobilemonero.com/suite/, so serving from
+// there would create an infinite loop.
+const SUITE_DIR = join(__dirname, '..', 'suite', 'dist');
 if (existsSync(join(SUITE_DIR, 'index.html'))) {
   app.use('/suite', express.static(SUITE_DIR, { maxAge: '5m' }));
   // SPA fallback — any /suite/* path that isn't a real file serves index.html
