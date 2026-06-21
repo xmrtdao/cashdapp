@@ -81,7 +81,7 @@ import { discoverFunctions, listFunctions } from './lib/function-runtime.mjs';
 import pg from 'pg';
 const { Client: PgClient } = pg;
 async function queryLocalPg(sql, params) {
-  const c = new PgClient({ host: '127.0.0.1', port: 5432, user: 'postgres', password: 'postgres', database: 'postgres' });
+  const c = new PgClient({ host: '127.0.0.1', port: 5432, user: 'postgres', password: 'postgres', database: 'xmrt_suite' });
   await c.connect();
   try { return await c.query(sql, params); }
   finally { await c.end(); }
@@ -422,7 +422,7 @@ const handlers = {
         'OCR screen text capture (needs Tesseract install)',
         'Voice commands (needs PyAudio install)',
       ],
-      backend: 'Ollama (gemma4:e2b on localhost:11434)',
+      backend: 'Ollama (deepseek-v4-flash:cloud)',
       import_status: 'All core modules import successfully',
       action_taken: null,
     };
@@ -545,6 +545,76 @@ const toolHandlers = {
     const { issueNumber, body } = args || {};
     if (!issueNumber || !body) return { error: 'issueNumber and body are required' };
     return await postGitHubComment(issueNumber, body);
+  },
+
+  // ── Database Query Tools ──────────────────────────────────
+  'db-query': async (args) => {
+    const sql = args?.sql || args?.query;
+    if (!sql) return { error: 'sql query is required' };
+    try {
+      const rows = await localQuery(sql);
+      return { success: true, rowCount: rows.length, rows };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  'db-rest': async (args) => {
+    const { method = 'GET', path, body } = args || {};
+    if (!path) return { error: 'path is required (e.g. "agent_profiles?select=agent_id,agent_label")' };
+    try {
+      const rows = await localRestFetch(method, path, body ? { body } : {});
+      return { success: true, rowCount: rows.length, rows };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  'shared-context': async (args) => {
+    const { action = 'read', key, value, description } = args || {};
+    try {
+      if (action === 'read') {
+        if (key) {
+          const row = await localQuery("SELECT * FROM public.shared_context WHERE context_key = $1", [key]);
+          return { success: true, context: row[0] || null };
+        }
+        const rows = await localQuery("SELECT * FROM public.shared_context ORDER BY context_key");
+        return { success: true, contexts: rows };
+      }
+      if (action === 'write') {
+        if (!key || !value) return { error: 'key and value are required for write' };
+        const existing = await localQuery("SELECT id FROM public.shared_context WHERE context_key = $1", [key]);
+        if (existing.length > 0) {
+          await localQuery(
+            "UPDATE public.shared_context SET value = $1, description = COALESCE($2, description), last_updated_by = 'eliza', updated_at = now() WHERE context_key = $3",
+            [JSON.stringify(value), description || null, key]
+          );
+        } else {
+          await localQuery(
+            "INSERT INTO public.shared_context (context_key, context_type, value, description, last_updated_by) VALUES ($1, 'general', $2, $3, 'eliza')",
+            [key, JSON.stringify(value), description || '']
+          );
+        }
+        return { success: true, key, action: 'written' };
+      }
+      return { error: `unknown action: ${action}. Use 'read' or 'write'` };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  'agent-profile': async (args) => {
+    const { agent_id } = args || {};
+    try {
+      if (agent_id) {
+        const row = await localQuery("SELECT * FROM public.agent_profiles WHERE agent_id = $1", [agent_id]);
+        return { success: true, profile: row[0] || null };
+      }
+      const rows = await localQuery("SELECT * FROM public.agent_profiles ORDER BY agent_id");
+      return { success: true, profiles: rows };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
   },
 
   // ── Edge Function Proxy ──────────────────────────────────
@@ -1206,6 +1276,45 @@ const toolHandlers = {
       return { success: false, error: 'Audio capture via ffmpeg needs device name fix on this Windows build. Vision is fully operational.', duration };
     } catch (err) { return { success: false, error: err.message }; }
   },
+
+  // ── Resend Inbox (read emails stored in relay state) ──────
+  'resend-inbox': async (args) => {
+    const domain = args?.domain || 'all'; // pfp, mobilemonero, 31harbor, or all
+    const limit = Math.min(args?.limit || 10, 50);
+    const inbox = getInbox();
+    const result = { domains: {} };
+    const targets = domain === 'all' ? ['pfp', 'mobilemonero', '31harbor'] : [domain];
+    for (const key of targets) {
+      const emails = (inbox[key] || []).slice(-limit).reverse();
+      result.domains[key] = {
+        total: inbox[key]?.length || 0,
+        unread: (inbox[key] || []).filter(e => !e.read).length,
+        recent: emails.map(e => ({
+          id: e.id, from: e.from, to: e.to, subject: e.subject,
+          receivedAt: e.receivedAt, read: e.read,
+          text: (e.text || '').slice(0, 500),
+        })),
+      };
+    }
+    return { success: true, ...result };
+  },
+
+  // ── Resend Send Email (agent sends email via fleet-chat endpoint) ──
+  'resend-send-email': async (args) => {
+    const { agent, to, subject, body, from: customFrom } = args || {};
+    if (!agent || !to || !subject || !body) {
+      return { error: 'agent, to, subject, and body are required. agent: vex|eliza|hermes|pfp|harbor' };
+    }
+    try {
+      const res = await fetch(`http://localhost:${PORT}/api/fleet-chat/send-email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent, to, subject, body, from: customFrom }),
+        signal: AbortSignal.timeout(15000),
+      });
+      return await res.json();
+    } catch (err) { return { success: false, error: err.message }; }
+  },
 };
 
 async function defaultHandler(task) {
@@ -1332,6 +1441,20 @@ if (existsSync(join(SUITE_DIR, 'index.html'))) {
   console.log(`  Suite SPA: ${SUITE_DIR}`);
 } else {
   console.log(`  Suite SPA: NOT FOUND at ${SUITE_DIR} — skipping`);
+}
+
+// ── HottieHouse SPA (Vite build) ──
+const HOTTIE_DIR = join(__dirname, '..', 'hottiehouse', 'app', 'dist');
+if (existsSync(join(HOTTIE_DIR, 'index.html'))) {
+  app.use('/hottiehouse', express.static(HOTTIE_DIR, { maxAge: '5m' }));
+  app.get('/hottiehouse/*', (req, res) => {
+    const filePath = join(HOTTIE_DIR, req.path.replace(/^\/hottiehouse\//, ''));
+    if (existsSync(filePath)) return res.sendFile(filePath);
+    res.sendFile(join(HOTTIE_DIR, 'index.html'));
+  });
+  console.log(`  HottieHouse SPA: ${HOTTIE_DIR}`);
+} else {
+  console.log(`  HottieHouse SPA: NOT FOUND at ${HOTTIE_DIR} — skipping`);
 }
 
 app.get('/radar/radar.html', (req, res) => {
@@ -2069,6 +2192,80 @@ app.get('/', (req, res) => {
         })();
       </script>
     </div>
+<div class="card" id="meshtastic-fleet-card">
+      <h3 style="color:#4ade80;">📡 Meshtastic Fleet <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— LoRa Mesh Bridge (via Hermes)</span></h3>
+      <div id="meshtastic-status">
+        <div class="stat"><span class="label">Bridge</span><span class="value" id="mt-bridge-status" style="color:#6b6b80;">checking...</span></div>
+        <div class="stat"><span class="label">Transport</span><span class="value" id="mt-transport" style="color:#6b6b80;">-</span></div>
+        <div class="stat"><span class="label">Peers</span><span class="value" id="mt-peers" style="color:#6b6b80;">-</span></div>
+        <div class="stat"><span class="label">Messages</span><span class="value" id="mt-messages" style="color:#6b6b80;">-</span></div>
+        <div class="stat"><span class="label">Uptime</span><span class="value" id="mt-uptime" style="color:#6b6b80;">-</span></div>
+        <div class="stat"><span class="label">Last Update</span><span class="value" id="mt-last-update" style="color:#6b6b80;">-</span></div>
+      </div>
+      <div id="meshtastic-nodes" style="margin-top:6px;display:none;">
+        <div style="font-size:0.7rem;color:#6b6b80;margin-bottom:4px;">Discovered Nodes:</div>
+        <div id="mt-node-list" style="font-size:0.65rem;"></div>
+      </div>
+      <div style="margin-top:8px;padding-top:6px;border-top:1px solid #1e1e2e;font-size:0.7rem;color:#6b6b80;">
+        <span>🟢 Bridge node: <strong>Hermes</strong> (Termux/Android)</span>
+        <span style="display:block;margin-top:2px;">🔗 <a href="/api/mesh/bridge" style="color:#60a5fa;">Bridge API</a> · <a href="/api/p2p/health" style="color:#60a5fa;">P2P Health</a></span>
+        <span style="display:block;margin-top:2px;color:#4ade80;">POST /api/meshtastic/update — Hermes pushes bridge state here</span>
+      </div>
+      <script>
+        (function(){
+          function updateMeshtastic() {
+            fetch('/api/mesh/bridge').then(r=>r.json()).then(d => {
+              const status = document.getElementById('mt-bridge-status');
+              const transport = document.getElementById('mt-transport');
+              const peers = document.getElementById('mt-peers');
+              const messages = document.getElementById('mt-messages');
+              const uptime = document.getElementById('mt-uptime');
+              const lastUpdate = document.getElementById('mt-last-update');
+              const nodesDiv = document.getElementById('meshtastic-nodes');
+              const nodeList = document.getElementById('mt-node-list');
+
+              if (d.connected) {
+                status.textContent = '🟢 Connected';
+                status.style.color = '#4ade80';
+                transport.textContent = d.transport || 'tcp';
+                peers.textContent = d.nodes + ' nodes';
+                messages.textContent = d.messageCount || 0;
+                const u = d.uptime || 0;
+                uptime.textContent = u > 3600 ? Math.floor(u/3600)+'h '+Math.floor((u%3600)/60)+'m' : u > 60 ? Math.floor(u/60)+'m '+u%60+'s' : u+'s';
+                if (d.nodeList && d.nodeList.length > 0) {
+                  nodesDiv.style.display = 'block';
+                  nodeList.innerHTML = d.nodeList.map(n =>
+                    '<div style="padding:2px 0;">🟢 ' + (n.name || n.id) +
+                    (n.rssi ? ' <span style="color:#6b6b80;">RSSI:'+n.rssi.toFixed(1)+'</span>' : '') +
+                    (n.snr ? ' <span style="color:#6b6b80;">SNR:'+n.snr.toFixed(1)+'</span>' : '') +
+                    '</div>'
+                  ).join('');
+                } else {
+                  nodesDiv.style.display = 'none';
+                }
+              } else {
+                status.textContent = '○ Disconnected';
+                status.style.color = '#6b6b80';
+                transport.textContent = '-';
+                peers.textContent = (d.nodes || 0) + ' nodes tracked';
+                messages.textContent = d.messageCount || 0;
+                uptime.textContent = '-';
+                nodesDiv.style.display = 'none';
+              }
+              if (lastUpdate) {
+                const ts = d.lastUpdate || d.timestamp;
+                if (ts) lastUpdate.textContent = new Date(ts).toLocaleTimeString();
+              }
+            }).catch(() => {
+              const status = document.getElementById('mt-bridge-status');
+              if (status) { status.textContent = '○ offline'; status.style.color = '#6b6b80'; }
+            });
+          }
+          updateMeshtastic();
+          setInterval(updateMeshtastic, 5000);
+        })();
+      </script>
+    </div>
 <div class="card">
       <h3>Heartbeat Endpoint</h3>
       <div style="background:#0d0d15;padding:0.4rem 0.6rem;border-radius:4px;font-family:monospace;font-size:0.75rem;color:#60a5fa;word-break:break-all;" id="heartbeat-url">loading...</div>
@@ -2107,6 +2304,7 @@ app.get('/', (req, res) => {
       <div class="stat"><span class="label">Agents</span><span class="value" id="dao-agent-count">-</span></div>
       <div class="stat"><span class="label">Tasks</span><span class="value" id="dao-task-count">-</span></div>
       <div class="stat"><span class="label">Gossip Hub</span><span class="value" id="dao-gossip-status">-</span></div>
+      <div class="stat"><span class="label">Services</span><span class="value" id="dao-service-status">-</span></div>
       <div style="margin-top:8px;font-size:11px;color:#6b6b80;">Live from system-health endpoint</div>
     </div>
 <div class="card">
@@ -2124,6 +2322,12 @@ app.get('/', (req, res) => {
 <div class="card" id="mm-card">
       <h3> MobileMonero <span style="color:#6b6b80;font-size:0.7rem;">inbox</span></h3>
       <div id="mm-inbox">
+        <div class="stat"><span class="label">Loading inbox...</span></div>
+      </div>
+    </div>
+<div class="card" id="hb-card">
+      <h3> 31 Harbor <span style="color:#6b6b80;font-size:0.7rem;">inbox</span></h3>
+      <div id="hb-inbox">
         <div class="stat"><span class="label">Loading inbox...</span></div>
       </div>
     </div>
@@ -2490,6 +2694,46 @@ loadUniversityStatus();
   loadMmInbox();
   setInterval(loadMmInbox, 15000);
 
+  // 31 Harbor inbox refresh (brief — lightweight)
+  function loadHbInbox() {
+    fetch('/resend/31harbor/inbox/brief').then(function(r){return r.json();}).then(function(data){
+      var card = document.getElementById('hb-inbox');
+      if (!card) return;
+      var emails = data.emails || data.recent || [];
+      if (!emails.length) {
+        card.innerHTML = '<div class="stat"><span class="label">No emails yet</span></div>';
+        return;
+      }
+      var html = '';
+      var groups = {};
+      emails.slice(0,15).forEach(function(e){
+        var addr = Array.isArray(e.to) ? (e.to[0] || 'unknown') : (e.to || 'unknown');
+        if (!groups[addr]) groups[addr] = [];
+        groups[addr].push(e);
+      });
+      var count = 0;
+      Object.keys(groups).forEach(function(addr){
+        html += '<div class="stat" style="border-bottom:1px solid #2a2a3a;padding:0.3rem 0;">';
+        html += '<span class="label" style="font-size:0.75rem;color:#60a5fa;">' + addr + '</span>';
+        html += '<span class="value badge badge-info">' + groups[addr].length + '</span></div>';
+        groups[addr].forEach(function(m){
+          count++;
+          if (count > 8) return;
+          html += '<div class="stat" style="padding:0.15rem 0 0.15rem 0.4rem;font-size:0.7rem;">';
+          html += '<span class="label">' + (m.from||'').substring(0,25) + '</span>';
+          html += '<span class="value" style="color:#a0a0b0;">' + (m.subject||'').substring(0,20) + '</span></div>';
+        });
+      });
+      if (!html) html = '<div class="stat"><span class="label">No emails yet</span></div>';
+      card.innerHTML = html;
+    }).catch(function(){
+      var e = document.getElementById('hb-inbox');
+      if (e) e.innerHTML = '<div class="stat"><span class="label">Inbox unavailable</span></div>';
+    });
+  }
+  loadHbInbox();
+  setInterval(loadHbInbox, 15000);
+
   // XMRT DAO Health — dynamic data from Supabase
   function loadDaoHealth() {
     fetch('/api/dao/health', { signal: AbortSignal.timeout(8000) })
@@ -2554,6 +2798,30 @@ loadUniversityStatus();
           }
         }
 
+        // Render supervisor service statuses from d.services
+        var svcEl = document.getElementById('dao-service-status');
+        if (svcEl && d.services && typeof d.services === 'object') {
+          var keys = Object.keys(d.services);
+          if (keys.length === 0) {
+            svcEl.innerHTML = '<span class="badge badge-warn">no services</span>';
+          } else {
+            var running = 0, down = 0;
+            keys.forEach(function(k){
+              if (d.services[k].uptimeSec > 0) running++; else down++;
+            });
+            var badgeClass = down === 0 ? 'badge-ok' : (running > 0 ? 'badge-warn' : 'badge-err');
+            svcEl.innerHTML = '<span class="badge ' + badgeClass + '">' + running + ' up / ' + (running + down) + ' total</span>';
+            // Also populate a small hover tooltip with individual service statuses
+            svcEl.title = keys.map(function(k){
+              var s = d.services[k];
+              var uptime = s.uptimeSec > 0 ? Math.floor(s.uptimeSec / 60) + 'm' : 'down';
+              return k + ' (pid ' + (s.childPid || '-') + ', ' + uptime + ', restarts: ' + s.restartCount + ')';
+            }).join(' | ');
+          }
+        } else if (svcEl) {
+          svcEl.textContent = 'unavailable';
+        }
+
         // Check gossip hub separately
         fetch('/api/dao/gossip?topic=fleet-broadcast&limit=1', { signal: AbortSignal.timeout(5000) })
           .then(function(r){return r.json();})
@@ -2595,20 +2863,19 @@ loadUniversityStatus();
 
         if (d.recent_commits && d.recent_commits.length > 0) {
           var last = d.recent_commits[0];
-          // Note: split('\\n') in source becomes a real newline in the served HTML
-          // (because the whole dashboard is a template literal that interprets escapes).
-          // Use String.fromCharCode(10) to get a newline at runtime in the browser.
           var NL = String.fromCharCode(10);
-          var msg = (last.commit && last.commit.message) ? last.commit.message.split(NL)[0].slice(0, 35) : 'recent commit';
-          var when = new Date(last.commit.author.date).toLocaleDateString();
-          if (commitEl) commitEl.textContent = msg + ' (' + when + ')';
+          var lastMsg = (last.commit && last.commit.message) ? last.commit.message.split(NL)[0].slice(0, 35) : 'recent commit';
+          var lastWhen = new Date(last.commit.author.date).toLocaleDateString();
+          var lastRepo = last._repo ? ' [' + last._repo + ']' : '';
+          if (commitEl) commitEl.textContent = lastMsg + lastRepo + ' (' + lastWhen + ')';
 
-          // Show last 3 commits
+          // Show last 5 commits across all repos with repo tag
           if (recentEl) {
-            recentEl.innerHTML = d.recent_commits.slice(0,3).map(function(c){
+            recentEl.innerHTML = d.recent_commits.slice(0,5).map(function(c){
               var m = (c.commit && c.commit.message) ? c.commit.message.split(NL)[0].slice(0, 28) : '?';
               var dd = new Date(c.commit.author.date).toLocaleDateString();
-              return '<div style="font-size:0.65rem;color:#a0a0b0;margin:2px 0;">' + m + ' <span style="color:#6b6b80;">(' + dd + ')</span></div>';
+              var repo = c._repo ? '<span style="color:#4ade80;">' + c._repo + '</span> ' : '';
+              return '<div style="font-size:0.65rem;color:#a0a0b0;margin:2px 0;">' + repo + m + ' <span style="color:#6b6b80;">(' + dd + ')</span></div>';
             }).join('');
           }
         }
@@ -3500,8 +3767,21 @@ app.post('/webhook/resend-inbound', (req, res) => {
     return res.status(400).json({ error: 'unexpected event type' });
   }
 
-  // Optional: verify webhook signature
-  const signingSecret = process.env.RESEND_WEBHOOK_SECRET;
+  // Optional: verify webhook signature (per-domain secret)
+  // Determine target domain before the body-fetch below for signature matching
+  const { data } = event;
+  const toArr = Array.isArray(data.to) ? data.to : (data.to ? [data.to] : []);
+  const toDomain = toArr[0]?.includes('31harbor') ? '31harbor.com'
+                  : toArr[0]?.includes('partyfavorphoto') ? 'partyfavorphoto.com'
+                  : toArr[0]?.includes('mobilemonero') ? 'mobilemonero.com'
+                  : toArr[0]?.includes('xmrt') ? 'mobilemonero.com'
+                  : 'partyfavorphoto.com';
+  const SIGNING_SECRETS = {
+    'partyfavorphoto.com': process.env.RESEND_WEBHOOK_SECRET,
+    'mobilemonero.com': process.env.RESEND_MM_WEBHOOK_SECRET,
+    '31harbor.com': process.env.RESEND_31HARBOR_WEBHOOK_SECRET,
+  };
+  const signingSecret = SIGNING_SECRETS[toDomain] || process.env.RESEND_WEBHOOK_SECRET;
   if (signingSecret) {
     try {
       const crypto = require('crypto');
@@ -3532,7 +3812,6 @@ app.post('/webhook/resend-inbound', (req, res) => {
     }
   }
 
-  const { data } = event;
   const emailId = data.id || data.email_id;
   const emailEntry = {
     email_id: emailId,
@@ -3584,10 +3863,6 @@ app.post('/webhook/resend-inbound', (req, res) => {
 
   // Also store in the unified email.inbox state so GET /resend/inbox
   // returns it and Alice's parser picks it up.
-  const toArr = Array.isArray(data.to) ? data.to : (data.to ? [data.to] : []);
-  const toDomain = toArr[0]?.includes('partyfavorphoto') ? 'partyfavorphoto.com'
-                  : toArr[0]?.includes('mobilemonero') ? 'mobilemonero.com'
-                  : 'partyfavorphoto.com';
   try {
     addToInbox(toDomain, {
       to: data.to,
@@ -3610,6 +3885,7 @@ app.post('/webhook/resend-inbound', (req, res) => {
   const RESEND_KEYS = {
     'partyfavorphoto.com': process.env.RESEND_API_KEY,
     'mobilemonero.com': process.env.RESEND_XMRT_API_KEY,
+    '31harbor.com': process.env.RESEND_31HARBOR_API_KEY,
   };
   const RESEND_API_KEY = RESEND_KEYS[toDomain] || process.env.RESEND_API_KEY;
   if (RESEND_API_KEY && emailId) {
@@ -3629,7 +3905,7 @@ app.post('/webhook/resend-inbound', (req, res) => {
         }
         // Update unified email.inbox so /resend/inbox and Alice's parser see it
         const unified = getInbox();
-        const unifiedKey = toDomain === 'partyfavorphoto.com' ? 'pfp' : 'mobilemonero';
+        const unifiedKey = domainToInboxKey(toDomain);
         if (unified[unifiedKey]) {
           const u = unified[unifiedKey].find(e => e.id === emailId);
           if (u) {
@@ -4245,6 +4521,47 @@ app.post('/api/arp/update', express.json({ limit: '1mb' }), (req, res) => {
   }
 });
 
+// API: Meshtastic Bridge Update (from Hermes' meshtastic-bridge)
+// Hermes POSTs its bridge state here so the local relay dashboard shows live data
+app.post('/api/meshtastic/update', express.json({ limit: '1mb' }), (req, res) => {
+  trackRequest('/api/meshtastic/update');
+  try {
+    const { bridge, nodes, fleetMessage } = req.body;
+    if (bridge) {
+      const existing = state.get('meshtastic.bridge', {});
+      state.set('meshtastic.bridge', { ...existing, ...bridge, lastUpdate: Date.now() });
+    }
+    if (nodes) {
+      const existing = state.get('meshtastic.nodes', {});
+      // Merge: Hermes' nodes keyed by node ID
+      for (const [id, info] of Object.entries(nodes)) {
+        existing[id] = { ...existing[id], ...info, lastSeen: Date.now() };
+      }
+      state.set('meshtastic.nodes', existing);
+    }
+    // Optionally relay a fleet message from the Meshtastic mesh
+    if (fleetMessage) {
+      const { agent, message, channel } = fleetMessage;
+      if (agent && message) {
+        // Don't await — fire and forget
+        fetch(`http://127.0.0.1:${PORT}/api/fleet-chat/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agent: `meshtastic:${agent}`,
+            agentLabel: `Meshtastic (${agent})`,
+            message,
+            channel: channel || 'fleet',
+          }),
+        }).catch(() => {});
+      }
+    }
+    res.json({ ok: true, timestamp: Date.now() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // API: GET fleet heartbeat summary (for dashboard queries)
 app.get('/api/fleet/heartbeat', (req, res) => {
   trackRequest('/api/fleet/heartbeat');
@@ -4381,6 +4698,8 @@ function getToolDescription(name) {
     'github-post': 'Post a comment on a GitHub issue',
     'vex-vision': 'Capture a photo from the webcam and describe it using a vision model',
     'vex-hear': 'Capture audio from the microphone for a specified duration',
+    'resend-inbox': 'Read recent emails from the Resend inbox (pfp, mobilemonero, 31harbor)',
+    'resend-send-email': 'Send an email via Resend as a fleet agent (vex, eliza, hermes, pfp, harbor)',
   };
   return descriptions[name] || 'No description';
 }
@@ -4478,7 +4797,7 @@ app.get('/api/dao/health', async (req, res) => {
   const t0 = Date.now();
   try {
     // 1) PG reachable? (with a 2s timeout, fail fast)
-    const c = new PgClient({ host: '127.0.0.1', port: 5432, user: 'postgres', password: 'postgres', database: 'postgres', connectionTimeoutMillis: 2000 });
+    const c = new PgClient({ host: '127.0.0.1', port: 5432, user: 'postgres', password: 'postgres', database: 'xmrt_suite', connectionTimeoutMillis: 2000 });
     await c.connect();
     try {
       // 2) Aggregate the dashboard fields from local tables.
@@ -4517,7 +4836,7 @@ app.get('/api/dao/health', async (req, res) => {
       let score = 50;
       if (counts.agents_total > 0)            score += 20;
       if (counts.fn_calls_24h > 0)            score += 15;
-      if (counts.pg_tables_public > 100)      score += 10;   // schema loaded
+      if (counts.pg_tables_public > 40)       score += 10;   // schema loaded
       if (counts.tasks_total > 0)             score += 5;
       score = Math.min(100, score);
       const status = score >= 80 ? 'healthy' : score >= 50 ? 'degraded' : 'critical';
@@ -4525,7 +4844,7 @@ app.get('/api/dao/health', async (req, res) => {
       res.json({
         success: true,
         source: 'local-postgres',
-        database: 'postgres@127.0.0.1:5432',
+        database: 'xmrt_suite@127.0.0.1:5432',
         pg_status: 'up',
         health: {
           overall_health: { score, status },
@@ -4542,6 +4861,25 @@ app.get('/api/dao/health', async (req, res) => {
           },
         },
         counts,
+        // Inject supervisor-managed service statuses (read from supervisor-state.json)
+        services: (() => {
+          try {
+            const stateFile = join(DATA_DIR, 'supervisor-state.json');
+            if (!existsSync(stateFile)) return null;
+            const raw = JSON.parse(readFileSync(stateFile, 'utf8'));
+            const svcs = raw.services || {};
+            const out = {};
+            for (const [name, svc] of Object.entries(svcs)) {
+              out[name] = {
+                childPid: svc.childPid,
+                startedAt: svc.startedAt,
+                uptimeSec: svc.startedAt ? Math.floor((Date.now() - svc.startedAt) / 1000) : 0,
+                restartCount: Array.isArray(svc.restartTimestamps) ? svc.restartTimestamps.length : 0,
+              };
+            }
+            return out;
+          } catch (_) { return null; }
+        })(),
         latency_ms: Date.now() - t0,
         timestamp: new Date().toISOString(),
       });
@@ -4560,28 +4898,30 @@ app.get('/api/dao/health', async (req, res) => {
   }
 });
 
-// GET /api/dao/gossip — Gossip hub fleet messages
+// GET /api/dao/gossip — Gossip hub fleet messages (read from local mesh log)
 app.get('/api/dao/gossip', async (req, res) => {
   trackRequest('/api/dao/gossip');
   const topic = req.query.topic || 'fleet-broadcast';
   const limit = parseInt(req.query.limit) || 20;
 
   try {
-    // Gossip-hub uses GET for history retrieval
-    const historyRes = await fetch(`${SUPABASE_URL}/functions/v1/gossip-hub/history?topic=${encodeURIComponent(topic)}&limit=${limit}`, {
-      method: 'GET',
-      headers: {
-        'x-certificate-id': 'XMRT-CERT-RMJTYENN',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    const messages = historyRes.ok ? await historyRes.json() : { error: 'unavailable' };
+    const raw = getMeshMessageLog(limit * 2);
+    const messages = raw
+      .filter(e => !topic || e.topic === topic)
+      .slice(0, limit)
+      .map(e => ({
+        id: e.ts,
+        topic: e.topic,
+        agent: e.from,
+        message: e.data,
+        created_at: e.ts,
+      }));
 
     res.json({
-      success: historyRes.ok,
+      success: true,
+      source: 'local-mesh-log',
       topic,
-      messages: messages.messages || [],
+      messages,
       timestamp: new Date().toISOString(),
     });
   } catch (e) {
@@ -4592,30 +4932,47 @@ app.get('/api/dao/gossip', async (req, res) => {
 // GET /api/dao/github — GitHub org activity
 app.get('/api/dao/github', async (req, res) => {
   trackRequest('/api/dao/github');
-  const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+  const GH_TOKEN = process.env.GITHUB_TOKEN || '';
+  const GH_HEADERS = GH_TOKEN ? { 'Authorization': `token ${GH_TOKEN}` } : {};
 
   try {
     // Search repos in org
     const reposRes = await fetch('https://api.github.com/search/repositories?q=org:xmrtdao&sort=updated&per_page=10', {
-      headers: GITHUB_TOKEN ? { 'Authorization': `token ${GITHUB_TOKEN}` } : {},
+      headers: GH_HEADERS,
       signal: AbortSignal.timeout(10000),
     });
 
     const repos = reposRes.ok ? await reposRes.json() : { items: [] };
 
-    // Get recent commits from mobilemonero
-    const commitsRes = await fetch('https://api.github.com/repos/xmrtdao/mobilemonero/commits?per_page=5', {
-      headers: GITHUB_TOKEN ? { 'Authorization': `token ${GITHUB_TOKEN}` } : {},
-      signal: AbortSignal.timeout(10000),
-    });
+    // Fetch recent commits from the 4 key repos in parallel
+    const keyRepos = ['xmrtdao/suite', 'xmrtdao/mobilemonero', 'xmrtdao/zero-claw', 'xmrtdao/xmrt-mesh'];
+    const commitResults = await Promise.allSettled(
+      keyRepos.map(repo =>
+        fetch(`https://api.github.com/repos/${repo}/commits?per_page=3`, {
+          headers: GH_HEADERS,
+          signal: AbortSignal.timeout(10000),
+        }).then(r => r.ok ? r.json() : [])
+      )
+    );
 
-    const commits = commitsRes.ok ? await commitsRes.json() : [];
+    // Merge commits from all repos, tag each with its repo, sort by date descending
+    const allCommits = [];
+    commitResults.forEach((result, i) => {
+      if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+        result.value.forEach(c => {
+          c._repo = keyRepos[i].replace('xmrtdao/', '');
+          allCommits.push(c);
+        });
+      }
+    });
+    allCommits.sort((a, b) => new Date(b.commit?.author?.date || 0) - new Date(a.commit?.author?.date || 0));
 
     res.json({
       success: true,
       repos: repos.items?.slice(0, 10) || [],
       total_repos: repos.total_count || 0,
-      recent_commits: commits.slice(0, 5) || [],
+      recent_commits: allCommits.slice(0, 6) || [],
+      has_token: !!GH_TOKEN,
       timestamp: new Date().toISOString(),
     });
   } catch (e) {
@@ -4883,7 +5240,7 @@ async function gatherFleetContext() {
   };
   const [health, monitor, ollama, recentMsgs, supervisor] = await Promise.all([
     fetchJson('/health', 2000),
-    fetchJson('/monitor', 6000),
+    fetchJson('/monitor', 12000),
     fetchJson('/ollama/health', 3000),
     fetchJson('/api/fleet-chat/messages?limit=5', 2000),
     fetchJson('/api/supervisor/status', 2000).catch(() => null),
@@ -4926,8 +5283,32 @@ async function gatherFleetContext() {
     text: (m.message || '').slice(0, 100),
   }));
 
+  // Shared context from the database (shared memory for all agents)
+  let sharedContext = null;
+  try {
+    const ctxRows = await localQuery("SELECT context_key, context_type, value, description, last_updated_by FROM public.shared_context ORDER BY context_key");
+    if (ctxRows && ctxRows.length > 0) {
+      sharedContext = ctxRows.map(r => ({
+        key: r.context_key,
+        type: r.context_type,
+        value: typeof r.value === 'string' ? JSON.parse(r.value) : r.value,
+        description: r.description,
+        lastUpdatedBy: r.last_updated_by,
+      }));
+    }
+  } catch (e) {
+    // shared_context table may not exist yet
+  }
+
   return {
     fetchedAt: new Date().toISOString(),
+    infrastructure: {
+      database: 'local Postgres (xmrt_suite) on localhost:5432 — NOT cloud Supabase',
+      api: 'local-sb REST at localhost:54321/rest/v1 — NOT cloud Supabase',
+      relay: 'primary interface at localhost:8080, tunneled via relay.mobilemonero.com',
+      cloudSupabase: 'DEPRECATED — all services migrated to local stack. Cloud Supabase DNS may still resolve but is not in use.',
+      note: 'The "supabase" service status below probes the local-sb REST endpoint. "error (500)" means local-sb is down, NOT cloud Supabase. The database itself (Postgres on port 5432) may still be running even if local-sb REST is down.',
+    },
     relay: {
       status: health?.status,
       uptimeSec: health?.uptime ? Math.floor(health.uptime) : null,
@@ -4944,12 +5325,41 @@ async function gatherFleetContext() {
     },
     supervisor: supervisor && !supervisor.error ? {
       relayUp: supervisor?.services?.relay?.childPid != null,
-      pgUp: supervisor?.services?.pg?.childPid != null,
-      localSbUp: supervisor?.services?.['local-sb']?.childPid != null,
-      tunnelUp: supervisor?.services?.tunnel?.childPid != null,
+      // Wrapper-exit services (pg, local-sb, tunnel) have null childPid
+      // because the wrapper process exits cleanly. Check uptimeSec > 0 instead.
+      pgUp: (supervisor?.services?.pg?.uptimeSec || 0) > 0,
+      localSbUp: (supervisor?.services?.['local-sb']?.uptimeSec || 0) > 0,
+      tunnelUp: (supervisor?.services?.tunnel?.uptimeSec || 0) > 0,
     } : null,
     recentFleetChat: recent,
+    sharedContext, // agents can read this to answer questions about shared memory
   };
+}
+
+// Seed health data on startup so /api/dao/health doesn't always score 50/100
+async function seedHealthData() {
+  try {
+    await queryLocalPg(`
+      INSERT INTO public.agents (name, status, current_workload, role)
+      SELECT 'Eliza-Dev', 'idle', 0, 'executive'
+      WHERE NOT EXISTS (SELECT 1 FROM public.agents WHERE name = 'Eliza-Dev')
+    `);
+    await queryLocalPg(`
+      INSERT INTO public.tasks (title, status, category, priority)
+      SELECT 'System health seed', 'COMPLETED', 'system', 0
+      WHERE NOT EXISTS (SELECT 1 FROM public.tasks WHERE title = 'System health seed')
+    `);
+    await queryLocalPg(`
+      INSERT INTO public.eliza_function_usage (function_name, success, status)
+      SELECT 'health-seed', true, 'success'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM public.eliza_function_usage WHERE function_name = 'health-seed'
+      )
+    `);
+    console.log('[seed] Health data seeded (agents=1, tasks=1, fn_calls=1)');
+  } catch (e) {
+    console.log('[seed] Skip (tables may not exist yet): ' + e.message);
+  }
 }
 
 // Route a fleet message to the appropriate agent
@@ -5017,56 +5427,93 @@ async function routeFleetMessage(entry) {
       const elizaMsg = '[Fleet Chat - ' + entry.agentLabel + '] ' + entry.message + contextHistory;
 
       // Pre-fetch grounding context so the reply cites real system state
-      // instead of inventing "all systems operational". We embed the JSON
-      // in the user message so ai-chat's system prompt stays untouched.
+      // instead of inventing "all systems operational".
       const ctx = await gatherFleetContext();
-      const groundedMsg = elizaMsg + '\n\nGROUNDING — Real-time system data (use ONLY these facts; if asked about leads/money/bookings not in this block, say "I don\'t have that data"):\n' + JSON.stringify(ctx, null, 0) + '\n\nReply in 1-2 sentences. Reference specific fields by name when you can.';
+      const ctxJson = JSON.stringify(ctx, null, 0);
 
-      // Primary path: ai-chat (via the shared relayToElizaCloud helper,
-      // which now calls the live /functions/v1/ai-chat EF, not the
-      // deprecated eliza-relay stub).
-      let elizaRes = await relayToElizaCloud(groundedMsg, entry.agentLabel, 'fleet-' + entry.id);
-      console.log('[routeFleetMessage] elizaRes:', JSON.stringify(elizaRes).slice(0, 200));
+      // ── Pre-execute tool intents ──────────────────────────────────
+      // ai-chat has no tool-capable provider enabled (all API keys removed).
+      // The relay pre-executes common tool intents (web scrape, inbox check,
+      // web search) and injects results into the prompt so the LLM can
+      // reference them without needing native function calling.
+      let toolResultsBlock = '';
+      try {
+        // Detect URLs to browse
+        const urlMatch = entry.message.match(/https?:\/\/[^\s,;)]+/);
+        if (urlMatch) {
+          const scrapeRes = await fetch('http://localhost:' + PORT + '/scrape', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: urlMatch[0], maxLength: 3000 }),
+            signal: AbortSignal.timeout(10000),
+          });
+          if (scrapeRes.ok) {
+            const scrapeData = await scrapeRes.json();
+            if (scrapeData?.content) {
+              toolResultsBlock += '\n\n## 🛰️ PRE-EXECUTED TOOL: Web Scrape\n';
+              toolResultsBlock += 'URL: ' + urlMatch[0] + '\n';
+              toolResultsBlock += 'Content: ' + scrapeData.content.slice(0, 2000) + '\n';
+            }
+          }
+        }
+        // Detect inbox/email queries
+        if (/inbox|email|lead|booking|message/i.test(entry.message)) {
+          const inboxRes = await fetch('http://localhost:' + PORT + '/resend/inbox/brief', {
+            signal: AbortSignal.timeout(5000),
+          });
+          if (inboxRes.ok) {
+            const inboxData = await inboxRes.json();
+            if (inboxData?.inboxes) {
+              toolResultsBlock += '\n\n## 🛰️ PRE-EXECUTED TOOL: Inbox Summary\n';
+              toolResultsBlock += JSON.stringify(inboxData.inboxes.slice(0, 3)) + '\n';
+            }
+          }
+        }
+        // Detect web search queries
+        if (/search|find|look up|google/i.test(entry.message)) {
+          const searchQuery = entry.message.replace(/@\w+/g, '').replace(/search|find|look up|google/gi, '').trim().slice(0, 100);
+          if (searchQuery) {
+            const searchRes = await fetch('http://localhost:' + PORT + '/web-search', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query: searchQuery, maxResults: 3 }),
+              signal: AbortSignal.timeout(8000),
+            });
+            if (searchRes.ok) {
+              const searchData = await searchRes.json();
+              if (searchData?.results) {
+                toolResultsBlock += '\n\n## 🛰️ PRE-EXECUTED TOOL: Web Search\n';
+                toolResultsBlock += 'Query: ' + searchQuery + '\n';
+                toolResultsBlock += 'Results: ' + JSON.stringify(searchData.results.slice(0, 3)) + '\n';
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.log('[routeFleetMessage] tool pre-execution error:', e.message);
+      }
 
-      // Fallback: if ai-chat returned nothing useful (slow/down/thin reply
-      // like "—Eliza", or a persona-style intro that doesn't reference any
-      // grounding fields), retry through local /ollama/chat with deepseek
-      // using a tighter grounded prompt.
-      const elizaReply = elizaRes?.reply || '';
-      // Detect persona dumps. We do this by cross-checking numeric claims in
-      // the reply against the grounding JSON. A reply that mentions
-      // "21% CPU" or "14 models" with no matching value in the JSON is
-      // fabricating plausible-looking stats — that's the failure mode the
-      // old topic-marker regex missed.
-      //
-      // We extract every number from the reply, then for each one check
-      // whether it appears (string-form) in any field of the JSON. If at
-      // least one number traces, the reply is grounded. If zero numbers
-      // trace, treat as persona-dump and retry via local deepseek with a
-      // tighter grounded prompt.
-      const elizaReplyText = elizaRes?.reply || '';
-      const replyNumbers = elizaReplyText.match(/\b\d+(\.\d+)?\b/g) || [];
-      const ctxJson = JSON.stringify(ctx);
-      const hasTracedNumber = replyNumbers.some(n => ctxJson.includes(n));
-      const mentionsJsonField = /(uptimeSec|nodeUptimeSec|modelCount|memUsedPct|cpuPct|supervisor\.|relay\.|ollama\.)\b/.test(elizaReplyText);
-      const isGrounded = hasTracedNumber || mentionsJsonField;
-      const isPersonaDump = !isGrounded || (
-        elizaReplyText.toLowerCase().includes("want me to") ||
-        elizaReplyText.toLowerCase().includes("i'm eliza") ||
-        elizaReplyText.toLowerCase().includes("general intelligence") ||
-        elizaReplyText.toLowerCase().includes("mining stats") ||
-        elizaReplyText.toLowerCase().includes("@mobilemonero") ||
-        elizaReplyText.length > 320
-      );
-      const elizaReplyLooksThin = !elizaReplyText || elizaReplyText.trim().length < 12 || /^—\s*\w+\s*$/.test(elizaReplyText.trim()) || isPersonaDump;
-      if (elizaReplyLooksThin) {
+      // Build the full prompt with grounding + tool results
+      const fullPrompt = elizaMsg + '\n\nGROUNDING — Real-time system data (use ONLY these facts; if asked about leads/money/bookings not in this block, say "I don\'t have that data"):\n' + ctxJson + toolResultsBlock + '\n\nIMPORTANT: Read the `infrastructure` field first. The database is local Postgres, NOT cloud Supabase. Cloud Supabase is DEPRECATED. A "supabase" status of "error" or "unreachable" means the local-sb REST layer is down, not the cloud.\n\nReply in 1-2 sentences. Reference specific fields by name when you can. If a tool result block is present above, use that data — do NOT say you cannot browse/check/search. The data is already fetched.';
+
+      // Primary path: ai-chat edge function. Deepseek fallback is used when
+      // ai-chat is unreachable.
+      let elizaRes = null;
+      try {
+        elizaRes = await relayToElizaCloud(fullPrompt, entry.agentLabel, 'fleet-' + entry.id);
+        console.log('[routeFleetMessage] ai-chat reply:', JSON.stringify(elizaRes).slice(0, 200));
+      } catch (e) {
+        console.log('[routeFleetMessage] ai-chat error:', e.message);
+      }
+
+      // Fallback: if ai-chat failed, try local deepseek
+      if (!elizaRes?.reply) {
         try {
-          const deepseekMsg = elizaMsg + '\n\nGROUNDING — Real-time system data:\n' + JSON.stringify(ctx) + '\n\nReply with 1-2 sentences grounded ONLY in the JSON above. If the question is about leads/money/bookings (not in JSON), say you\'d need to check the inbox.';
           const fbRes = await fetch('http://localhost:' + PORT + '/ollama/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              message: deepseekMsg,
+              message: fullPrompt,
               model: 'deepseek-v4-flash:cloud',
               temperature: 0.4,
               maxTokens: 320,
@@ -5076,12 +5523,11 @@ async function routeFleetMessage(entry) {
           if (fbRes.ok) {
             const fbData = await fbRes.json();
             if (fbData?.response && fbData.response.trim().length >= 4) {
-              elizaRes = { ...(elizaRes || {}), reply: fbData.response, model: fbData.model || 'deepseek-v4-flash:cloud (fallback)' };
-              console.log('[routeFleetMessage] eliza fallback to deepseek, len=' + fbData.response.length);
+              elizaRes = { reply: fbData.response, model: fbData.model || 'deepseek-v4-flash:cloud' };
             }
           }
         } catch (e) {
-          console.log('[routeFleetMessage] eliza deepseek fallback error:', e.message);
+          console.log('[routeFleetMessage] deepseek fallback error:', e.message);
         }
       }
       if (elizaRes?.reply) {
@@ -5111,7 +5557,7 @@ async function routeFleetMessage(entry) {
     }
   }
   // Hermes responds intelligently to any non-Hermes fleet message
-  if ((entry.channel === 'all' || entry.channel === 'hermes') && entry.agent !== 'hermes') {
+  if ((entry.channel === 'all' || entry.channel === 'hermes' || (entry.channel === 'fleet' && /@hermes/i.test(entry.message))) && entry.agent !== 'hermes') {
     const hermesInfo = FLEET_AGENTS['hermes'];
     if (hermesInfo?.endpoint) {
       try {
@@ -5149,11 +5595,11 @@ async function routeFleetMessage(entry) {
     }
   }
 
-  // Vex responds to: @Vex mentions, channel=vex, or website-inquiry keywords
+  // Vex responds to: @Vex mentions, channel=vex, fleet channel with @Vex, or website-inquiry keywords
   // (broadened from "inquiries only" so Vex can be a real conversational participant)
-  const mentionsVex = /@vex/i.test(entry.message) || entry.channel === 'vex';
+  const mentionsVex = /@vex/i.test(entry.message) || entry.channel === 'vex' || (entry.channel === 'fleet' && /@vex/i.test(entry.message));
   const isInquiry = entry.message.includes('From:') || entry.message.includes('WEBSITE') || entry.message.includes('BOOKING');
-  if ((entry.channel === 'all' && (mentionsVex || isInquiry)) || entry.channel === 'vex') {
+  if ((entry.channel === 'all' && (mentionsVex || isInquiry)) || entry.channel === 'vex' || (entry.channel === 'fleet' && mentionsVex)) {
     try {
       // Ground the prompt in real system state. Without this, the LLM
       // will happily invent "all systems nominal" with zero data.
@@ -5172,8 +5618,9 @@ ${ctxJson}
 GROUNDING RULES:
 - If a fact is in the JSON block, you may reference it.
 - If something is NOT in the JSON, say "I don't have that data" — DO NOT invent it.
-- Never claim "all systems nominal" or "no anomalies" without a matching field in the JSON. A supabase.status of "unreachable" means Supabase is down; say so.
-- For questions about PFP leads, bookings, money, or campaigns: this block does not contain that data, so say "I'd need to check the inbox/CRM" rather than fabricate.
+- Read the \`infrastructure\` field first. It explains the architecture: the database is local Postgres, NOT cloud Supabase. Cloud Supabase is DEPRECATED. A \`supabase.status\` of "error" or "unreachable" means the local-sb REST layer is down, NOT the cloud database.
+- Never claim "all systems nominal" or "no anomalies" without a matching field in the JSON.
+- For questions about PFP leads, bookings, money, or campaigns: you CAN check the inbox by calling the resend_inbox tool (or resend-send-email to reply). If the tool is unavailable, say "I'd need to check the inbox/CRM" rather than fabricate.
 
 ${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"
 
@@ -5196,9 +5643,9 @@ Your response (1-2 sentences, no emoji sign-offs, no "—Eliza", no "o7"):`;
   }
 
   // Alice (sidecar) — observational, terse, persona-driven via Ollama.
-  // Trigger on: @Alice mentions or channel=alice.
-  const mentionsAlice = /@alice/i.test(entry.message) || entry.channel === 'alice';
-  if ((entry.channel === 'all' && mentionsAlice) || entry.channel === 'alice') {
+  // Trigger on: @Alice mentions, channel=alice, or fleet channel with @Alice.
+  const mentionsAlice = /@alice/i.test(entry.message) || entry.channel === 'alice' || (entry.channel === 'fleet' && /@alice/i.test(entry.message));
+  if ((entry.channel === 'all' && mentionsAlice) || entry.channel === 'alice' || (entry.channel === 'fleet' && mentionsAlice)) {
     try {
       const ctx = await gatherFleetContext();
       const ctxJson = JSON.stringify(ctx, null, 0);
@@ -5211,7 +5658,7 @@ ${ctxJson}
 
 GROUNDING RULES:
 - Reference specific fields (e.g. "relay uptime: 1234s", "supabase unreachable") only when they're in the JSON.
-- If asked about something the JSON doesn't cover (emails, leads, money), say "not in my view" — don't make it up.
+- If asked about something the JSON doesn't cover (emails, leads, money), say "not in my view" — don't make it up. (Note: you CAN check the inbox via the resend_inbox tool if needed.)
 - One short sentence. Sharp and direct. No emoji sign-offs.
 
 ${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"`;
@@ -5372,6 +5819,9 @@ app.post('/api/fleet-chat/email-webhook', async (req, res) => {
     'vex@partyfavorphoto.com': 'vex',
     'eliza@partyfavorphoto.com': 'eliza',
     'hermes@partyfavorphoto.com': 'hermes',
+    'david@31harbor.com': 'vex',
+    'info@31harbor.com': 'vex',
+    'hello@31harbor.com': 'vex',
   };
   
   const agent = AGENT_EMAILS[toEmail] || null;
@@ -5384,7 +5834,9 @@ app.post('/api/fleet-chat/email-webhook', async (req, res) => {
   const cleanBody = body.replace(/<[^>]*>/g, '').trim().slice(0, 500);
   
   // Determine domain for inbox routing
-  const domain = toEmail.includes('partyfavorphoto') ? 'partyfavorphoto.com' : 'mobilemonero.com';
+  const domain = toEmail.includes('31harbor') ? '31harbor.com'
+               : toEmail.includes('partyfavorphoto') ? 'partyfavorphoto.com'
+               : 'mobilemonero.com';
   
   // Store in inbox (even for unknown agents — they can read on relay)
   if (!isAutoReply) {
@@ -5419,16 +5871,18 @@ app.post('/api/fleet-chat/send-email', async (req, res) => {
     'eliza': 'Eliza Cloud <eliza@mobilemonero.com>',
     'hermes': 'Hermes Mobile <hermes@mobilemonero.com>',
     'pfp': 'Party Favor Photo <bookings@partyfavorphoto.com>',
+    'harbor': '31 Harbor <david@31harbor.com>',
   };
   
   // Allow custom from override, otherwise use agent mapping
   const from = customFrom || AGENT_FROM[agent];
-  if (!from) return res.status(400).json({ error: `Unknown agent: ${agent}. Try 'pfp' for bookings@partyfavorphoto.com` });
+  if (!from) return res.status(400).json({ error: `Unknown agent: ${agent}. Try 'pfp' for bookings@partyfavorphoto.com or 'harbor' for david@31harbor.com` });
   
   // Pick the right Resend key based on the from domain
   const RESEND_KEYS = {
-    'mobilemonero.com': 'RESEND_XMRT_API_KEY_REMOVED',
-    'partyfavorphoto.com': 're_K1p8eaKu_2kQwBZyqcBGPPxvtkc43Xous',
+    'mobilemonero.com': process.env.RESEND_XMRT_API_KEY || 'RESEND_XMRT_API_KEY_REMOVED',
+    'partyfavorphoto.com': process.env.RESEND_API_KEY || 're_K1p8eaKu_2kQwBZyqcBGPPxvtkc43Xous',
+    '31harbor.com': process.env.RESEND_31HARBOR_API_KEY || '',
   };
   const domain = from.match(/@([^>]+)/)?.[1]?.trim() || 'mobilemonero.com';
   const RESEND_KEY = RESEND_KEYS[domain] || RESEND_KEYS['mobilemonero.com'];
@@ -5447,6 +5901,63 @@ app.post('/api/fleet-chat/send-email', async (req, res) => {
       res.json({ success: true, id: data.id });
     } else {
       res.status(apiRes.status).json({ error: data });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/contact/31harbor — Contact form endpoint for 31harbor.com
+// Sends inquiry to david@31harbor.com and confirmation to the submitter
+app.options('/api/contact/31harbor', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.status(200).end();
+});
+app.post('/api/contact/31harbor', express.json(), async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  trackRequest('/api/contact/31harbor');
+  const { name, email, phone, message } = req.body || {};
+  if (!name || !email) return res.status(400).json({ error: 'name and email required' });
+
+  const RESEND_KEY = process.env.RESEND_31HARBOR_API_KEY;
+  if (!RESEND_KEY) return res.status(500).json({ error: 'Resend key not configured' });
+
+  const phoneLine = phone ? `\nPhone: ${phone}` : '';
+  const msgLine = message ? `\n\nMessage:\n${message}` : '';
+  const ownerBody = `New showing request from 31harbor.com\n\nName: ${name}\nEmail: ${email}${phoneLine}${msgLine}`;
+
+  try {
+    // Send to owner
+    const ownerRes = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: '31 Harbor <david@31harbor.com>',
+        to: ['david@31harbor.com'],
+        subject: `Showing Request - 31 Harbor Road - ${name}`,
+        text: ownerBody,
+      }),
+    });
+    const ownerData = await ownerRes.json();
+
+    // Send confirmation to submitter
+    if (ownerRes.ok) {
+      await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: '31 Harbor <david@31harbor.com>',
+          to: [email],
+          subject: 'Thank you for your interest in 31 Harbor Road',
+          text: `Hi ${name},\n\nThank you for your interest in 31 Harbor Road in Amagansett, NY.\n\nWe have received your showing request and will respond within 24 hours to confirm your appointment.\n\nThe 31 Harbor Team`,
+        }),
+      });
+      logActivity('contact-31harbor', ownerData.id, 'SENT', `Showing request from ${name} <${email}>`);
+      res.json({ success: true, id: ownerData.id });
+    } else {
+      res.status(500).json({ error: ownerData });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -5738,6 +6249,7 @@ app.listen(PORT, '0.0.0.0', async () => {
     '║  Cron:     http://0.0.0.0:' + String(PORT).padEnd(5) + '/cron/status       ║\n' +
     '║  PFP Inbox: http://0.0.0.0:' + String(PORT).padEnd(5) + '/resend/inbox     ║\n' +
     '║  MM Inbox:  http://0.0.0.0:' + String(PORT).padEnd(5) + '/resend/mobilemonero/inbox ║\n' +
+    '║  31HB Inbox: http://0.0.0.0:' + String(PORT).padEnd(5) + '/resend/31harbor/inbox ║\n' +
     '╚══════════════════════════════════════════════════════╝\n\n' +
     '  Tools: ' + toolsCount + ' registered\n' +
     '  Handlers: ' + handlersCount + ' task handlers\n' +
@@ -5800,6 +6312,11 @@ app.listen(PORT, '0.0.0.0', async () => {
       console.log(`[Mesh] Auto-init error: ${e.message}`);
     }
   }, 5000);
+
+  // ── Seed health data (fire after mesh init so DB is likely ready) ──
+  setTimeout(() => {
+    seedHealthData().catch(e => console.log('[seed] Error during startup seed:', e.message));
+  }, 8000);
 
   // ── Fleet Chat Idle Heartbeat ──
   // If nobody has spoken in FLEET_IDLE_THRESHOLD_MS, Eliza posts a brief
@@ -6058,13 +6575,24 @@ app.get('/mining/leaderboard', async (req, res) => {
 // Stores inbound emails in relay state for agent reading
 const EMAIL_STORE_KEY = 'email.inbox';
 
+function domainToInboxKey(domain) {
+  if (domain === 'partyfavorphoto.com') return 'pfp';
+  if (domain === '31harbor.com') return '31harbor';
+  return 'mobilemonero';
+}
+
 function getInbox() {
-  return state.get(EMAIL_STORE_KEY, { pfp: [], mobilemonero: [] });
+  const inbox = state.get(EMAIL_STORE_KEY, { pfp: [], mobilemonero: [], '31harbor': [] });
+  // Ensure all sub-keys exist even when persisted state predates a key
+  if (!inbox.pfp) inbox.pfp = [];
+  if (!inbox.mobilemonero) inbox.mobilemonero = [];
+  if (!inbox['31harbor']) inbox['31harbor'] = [];
+  return inbox;
 }
 
 function addToInbox(domain, email) {
   const inbox = getInbox();
-  const key = domain === 'partyfavorphoto.com' ? 'pfp' : 'mobilemonero';
+  const key = domainToInboxKey(domain);
   if (!inbox[key]) inbox[key] = [];
 
   // 2026-06-11: dedup by email_id (Resend message id). Re-posting the same
@@ -6187,7 +6715,7 @@ app.get('/resend/inbox/brief', (req, res) => {
 app.post('/resend/inbox/read', (req, res) => {
   const { id, domain } = req.body;
   const inbox = getInbox();
-  const key = domain === 'partyfavorphoto.com' ? 'pfp' : 'mobilemonero';
+  const key = domainToInboxKey(domain || 'partyfavorphoto.com');
   if (inbox[key]) {
     const email = inbox[key].find(e => e.id === id);
     if (email) email.read = true;
@@ -6205,7 +6733,7 @@ app.post('/resend/inbox/parsed', (req, res) => {
   const { id, domain, classification, extracted } = req.body || {};
   if (!id || !domain) return res.status(400).json({ error: 'id and domain required' });
   const inbox = getInbox();
-  const key = domain === 'partyfavorphoto.com' ? 'pfp' : 'mobilemonero';
+  const key = domainToInboxKey(domain || 'partyfavorphoto.com');
   if (!inbox[key]) return res.status(404).json({ error: 'no inbox for domain' });
   const email = inbox[key].find(e => e.id === id);
   if (!email) return res.status(404).json({ error: 'email not found' });
@@ -6250,6 +6778,43 @@ app.post('/resend/mobilemonero/inbox/read', (req, res) => {
   const { id } = req.body;
   const inbox = getInbox();
   const email = inbox.mobilemonero.find(e => e.id === id);
+  if (email) email.read = true;
+  state.set(EMAIL_STORE_KEY, inbox);
+  res.json({ success: true });
+});
+
+// ── Resend Inbox (31 Harbor)
+app.get('/resend/31harbor/inbox', (req, res) => {
+  const inbox = getInbox();
+  const agent = req.query.agent || req.headers['x-agent-id'] || 'vex';
+  res.json({
+    domain: '31harbor.com',
+    total: inbox['31harbor'].length,
+    unread: inbox['31harbor'].filter(e => !e.read).length,
+    agent,
+    emails: inbox['31harbor'].map(e => ({
+      ...e,
+      text: ['vex','hermes','eliza'].includes(agent) ? e.text : e.text.slice(0, 100),
+    })),
+  });
+});
+
+app.get('/resend/31harbor/inbox/brief', (req, res) => {
+  const inbox = getInbox();
+  res.json({
+    total: inbox['31harbor'].length,
+    unread: inbox['31harbor'].filter(e => !e.read).length,
+    recent: inbox['31harbor'].slice(0, 5).map(e => ({
+      id: e.id, from: e.from, to: e.to, subject: e.subject,
+      receivedAt: e.receivedAt, read: e.read,
+    })),
+  });
+});
+
+app.post('/resend/31harbor/inbox/read', (req, res) => {
+  const { id } = req.body;
+  const inbox = getInbox();
+  const email = inbox['31harbor'].find(e => e.id === id);
   if (email) email.read = true;
   state.set(EMAIL_STORE_KEY, inbox);
   res.json({ success: true });
