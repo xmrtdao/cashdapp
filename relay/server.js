@@ -2316,7 +2316,7 @@ app.get('/', (req, res) => {
       <div id="miner-leaderboard"><div class="stat"><span class="label">Loading...</span></div></div>
     </div>
 <div class="card">
-      <h3>Campaign</h3>
+      <h3>PFP Campaign</h3>
       <div class="stat"><span class="label">Contact Pool</span><span class="value">${poolSize}</span></div>
       <div class="stat"><span class="label">Sent Today</span><span class="value">${sentToday}</span></div>
       <div class="stat"><span class="label">Sent Total</span><span class="value">${totalSent}</span></div>
