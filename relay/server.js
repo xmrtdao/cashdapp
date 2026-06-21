@@ -1627,6 +1627,34 @@ app.get('/', (req, res) => {
   
   const todayStart = new Date(); todayStart.setHours(0,0,0,0);
   const sentToday = campaignSent.filter(s => s.ts > todayStart.getTime()).length;
+
+
+  // ── Campaign stats (31harbor) ──────────────────────────
+  const HARBOR_CONTACTS = join(DATA_DIR, '31harbor-contacts.json');
+  const HARBOR_SENT = join(DATA_DIR, '31harbor-sent.json');
+  const HARBOR_LOG = join(DATA_DIR, '31harbor-campaign.log');
+
+  let harborSent = [];
+  let harborContacts = [];
+  let harborLastRun = 'never';
+  try {
+    if (existsSync(HARBOR_SENT)) harborSent = JSON.parse(readFileSync(HARBOR_SENT, 'utf8'));
+    if (existsSync(HARBOR_CONTACTS)) harborContacts = JSON.parse(readFileSync(HARBOR_CONTACTS, 'utf8'));
+    if (existsSync(HARBOR_LOG)) {
+      const logLines = readFileSync(HARBOR_LOG, 'utf8').trim().split('\n').filter(Boolean);
+      if (logLines.length > 0) {
+        const lastLine = logLines[logLines.length - 1];
+        const tsMatch = lastLine.match(/\[(.*?)\]/);
+        harborLastRun = tsMatch ? tsMatch[1].slice(0, 16) : 'recent';
+      }
+    }
+  } catch (e) { /* stats unavailable */ }
+
+  const harborSentTotal = harborSent.length;
+  const harborPoolSize = harborContacts.length;
+  const harborCutoff30 = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  const recentHarborSent = new Set(harborSent.filter(s => s.ts > harborCutoff30).map(s => s.email));
+  const harborFresh = harborContacts.filter(c => !recentHarborSent.has(c.email) && c.email?.includes('@')).length;
   
   // ── Scheduled Tasks ───────────────────────────────────
   const taskSchedule = [
@@ -2295,6 +2323,13 @@ app.get('/', (req, res) => {
       <div class="stat"><span class="label">Fresh Avail</span><span class="value">${freshAvailable}</span></div>
       <div class="stat"><span class="label">Last Run</span><span class="value">${campaignLastRun}</span></div>
       <div class="stat"><span class="label">Next Drop</span><span class="value" id="next-drop">-</span></div>
+    </div>
+<div class="card">
+      <h3>31 Harbor 🏠</h3>
+      <div class="stat"><span class="label">Contact Pool</span><span class="value">${harborPoolSize}</span></div>
+      <div class="stat"><span class="label">Sent Total</span><span class="value">${harborSentTotal}</span></div>
+      <div class="stat"><span class="label">Fresh Avail</span><span class="value">${harborFresh}</span></div>
+      <div class="stat"><span class="label">Last Run</span><span class="value">${harborLastRun}</span></div>
     </div>
 <div class="card">
       <h3 style="color:#60a5fa;">XMRT DAO Health</h3>

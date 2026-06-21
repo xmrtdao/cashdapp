@@ -153,7 +153,7 @@ function sendNext() {
     return;
   }
   // Build dynamic email body with Stripe booking links
-  const stripeGeneral = 'https://buy.stripe.com/8x25kD7ezg6h4iC15YbZe03';
+  const stripeGeneral = 'https://buy.stripe.com/cNicN5gP9g6haH0bKCbZe0d';
   const stripe3hr = 'https://buy.stripe.com/9B63cv9mH07j3eyeWObZe06';
   const stripe4hr = 'https://buy.stripe.com/eVqcN556r4nz16qeWObZe04';
   

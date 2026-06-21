@@ -7,7 +7,7 @@
  */
 
 const IMG_BASE = 'https://raw.githubusercontent.com/xmrtdao/muapi-workflows/main/assets/pfp';
-const S2 = 'https://buy.stripe.com/8x25kD7ezg6h4iC15YbZe03';
+const S2 = 'https://buy.stripe.com/cNicN5gP9g6haH0bKCbZe0d';
 const S3 = 'https://buy.stripe.com/9B63cv9mH07j3eyeWObZe06';
 const S4 = 'https://buy.stripe.com/eVqcN556r4nz16qeWObZe04';
 

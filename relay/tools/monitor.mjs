@@ -97,82 +97,72 @@ export function getSystemResources() {
 /**
  * Check external service health
  */
-export async function checkExternalServices() {
-  const services = {};
-
-  // Supabase — uses SUPABASE_URL from env (defaults to local_sb) so Eliza reports
-  // the correct backend; no longer hardcoded to the dead cloud Supabase.
+async function probeSupabase(url, key) {
   try {
-    const supabaseUrl = process.env.SUPABASE_URL || 'http://127.0.0.1:54321';
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY || 'local-dev-service-role-key';
-    const res = await fetch(supabaseUrl + '/rest/v1/tasks?select=id&limit=1', {
-      headers: {
-        'apikey': key,
-        'Authorization': 'Bearer ' + key,
-        'Content-Type': 'application/json',
-      },
-      signal: AbortSignal.timeout(10000),
+    const res = await fetch(url + '/rest/v1/tasks?select=id&limit=1', {
+      headers: { 'apikey': key, 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(8000),
     });
-    services.supabase = {
-      status: res.ok ? 'ok' : `error (${res.status})`,
-      latency: null,
-      url: supabaseUrl,
-    };
+    return { status: res.ok ? 'ok' : `error (${res.status})`, latency: null, url };
   } catch (e) {
-    services.supabase = { status: 'unreachable', error: e.message };
+    return { status: 'unreachable', error: e.message };
   }
+}
 
-  // Ollama
+async function probeOllama() {
   try {
     const start = Date.now();
     const res = await fetch(`${process.env.OLLAMA_HOST || 'http://localhost:11434'}/api/tags`, {
       signal: AbortSignal.timeout(5000),
     });
     const latency = Date.now() - start;
-    if (res.ok) {
-      const data = await res.json();
-      services.ollama = {
-        status: 'ok',
-        models: (data.models || []).map(m => m.name),
-        latency: `${latency}ms`,
-      };
-    } else {
-      services.ollama = { status: `error (${res.status})` };
-    }
+    if (!res.ok) return { status: `error (${res.status})` };
+    const data = await res.json();
+    return { status: 'ok', models: (data.models || []).map(m => m.name), latency: `${latency}ms` };
   } catch (e) {
-    services.ollama = { status: 'unreachable', error: e.message };
+    return { status: 'unreachable', error: e.message };
   }
+}
 
-  // GitHub API
+async function probeGithub() {
   try {
     const res = await fetch('https://api.github.com/repos/xmrtdao/mobilemonero', {
       headers: { 'User-Agent': 'xmrtdao-monitor' },
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(8000),
     });
-    services.github = {
-      status: res.ok ? 'ok' : `error (${res.status})`,
-    };
+    return { status: res.ok ? 'ok' : `error (${res.status})` };
   } catch (e) {
-    services.github = { status: 'unreachable', error: e.message };
+    return { status: 'unreachable', error: e.message };
   }
+}
 
-  // Hermes (phone agent)
-  const hermesUrl = process.env.HERMES_ENDPOINT || 'http://192.168.14.115:9090';
+async function probeHermes(url) {
   try {
-    const res = await fetch(hermesUrl, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'ping' }),
       signal: AbortSignal.timeout(5000),
     });
-    services.hermes = {
-      status: res.ok ? 'ok' : `error (${res.status})`,
-    };
+    return { status: res.ok ? 'ok' : `error (${res.status})` };
   } catch (e) {
-    services.hermes = { status: 'unreachable', error: e.message };
+    return { status: 'unreachable', error: e.message };
   }
+}
 
-  return services;
+export async function checkExternalServices() {
+  // Run all 4 probes in parallel so a slow GitHub response doesn't
+  // starve the gatherFleetContext 6s timeout and cause every service to
+  // report "fetch_failed".
+  const [supabase, ollama, github, hermes] = await Promise.all([
+    probeSupabase(process.env.SUPABASE_URL || 'http://127.0.0.1:54321',
+                  process.env.SUPABASE_SERVICE_ROLE_KEY || 'local-dev-service-role-key'),
+    probeOllama(),
+    probeGithub(),
+    probeHermes(process.env.HERMES_ENDPOINT || 'http://192.168.14.115:9090'),
+  ]);
+
+  return { supabase, ollama, github, hermes };
 }
 
 /**

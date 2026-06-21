@@ -70,6 +70,15 @@ const SERVICES = [
     maxRestartsPerHour: 4,
   },
   {
+    name: '31harbor-scheduler',
+    cmd: 'node',
+    args: ['relay/tools/31harbor-scheduler.mjs', '--daemon'],
+    cwd: ROOT,
+    healthCheck: () => checkProcessByScript('31harbor-scheduler.mjs'),
+    startupGrace: 3_000,
+    maxRestartsPerHour: 4,
+  },
+  {
     name: 'pg',
     cmd: 'node',
     args: ['relay/start-pg.mjs'],
@@ -91,11 +100,12 @@ const SERVICES = [
   {
     name: 'vite',
     cmd: 'node',
-    args: ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '5173'],
-    cwd: join(ROOT, 'suite'),
+    args: ['relay/start-vite-detached.mjs', 'suite'],
+    cwd: ROOT,
     healthCheck: () => checkHttp('http://127.0.0.1:5173/', 2000),
     startupGrace: VITE_STARTUP_GRACE_MS,
     maxRestartsPerHour: 3,
+    wrapperExits: true,
   },
   {
     name: 'tunnel',
@@ -104,6 +114,16 @@ const SERVICES = [
     cwd: ROOT,
     healthCheck: () => checkProcessByName('cloudflared.exe'),
     startupGrace: TUNNEL_STARTUP_GRACE_MS,
+    maxRestartsPerHour: 3,
+    wrapperExits: true,
+  },
+  {
+    name: 'zero-claw',
+    cmd: 'node',
+    args: ['relay/start-vite-detached.mjs', 'zero-claw'],
+    cwd: ROOT,
+    healthCheck: () => checkHttp('http://127.0.0.1:5174/', 2000),
+    startupGrace: 15_000,
     maxRestartsPerHour: 3,
     wrapperExits: true,
   },
@@ -201,7 +221,7 @@ function checkHttp(url, timeoutMs) {
   return new Promise((resolve) => {
     const req = http.get(url, { timeout: timeoutMs }, (res) => {
       res.resume();
-      resolve(res.statusCode === 200);
+      resolve(res.statusCode >= 200 && res.statusCode < 400);
     });
     req.on('error', () => resolve(false));
     req.on('timeout', () => { req.destroy(); resolve(false); });
