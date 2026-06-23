@@ -1530,6 +1530,19 @@ app.get('/api/suite/leads/count', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get('/api/suite/leads/search', async (req, res) => {
+  trackRequest('/api/suite/leads/search');
+  try {
+    const q = req.query.q || '';
+    if (!q.trim()) return res.json([]);
+    const r = await queryLocalPg(
+      'SELECT * FROM app.suite_leads WHERE name ILIKE $1 OR email ILIKE $1 OR company_routed ILIKE $1 OR intent ILIKE $1 ORDER BY score DESC LIMIT 20',
+      [`%${q}%`]
+    );
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/suite/leads', async (req, res) => {
   trackRequest('/api/suite/leads');
   try {
