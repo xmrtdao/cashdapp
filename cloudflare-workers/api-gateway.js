@@ -291,7 +291,7 @@ async function handleRequest(request) {
         ]);
         const health = hr.ok ? await hr.json() : { error: "system-health " + hr.status };
         const status = sr.ok ? await sr.json() : { error: "system-status " + sr.status };
-        return jsonResponse({ success: true, supabase_project: "vawouugtzwmejxqkeqqj", health, status, ts: new Date().toISOString() });
+        return jsonResponse({ success: true, supabase_via: "relay.mobilemonero.com", health, status, ts: new Date().toISOString() });
       } catch (e) {
         return jsonResponse({ success: false, error: e.message }, 502);
       }

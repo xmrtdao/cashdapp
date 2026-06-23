@@ -1457,6 +1457,565 @@ if (existsSync(join(HOTTIE_DIR, 'index.html'))) {
   console.log(`  HottieHouse SPA: NOT FOUND at ${HOTTIE_DIR} — skipping`);
 }
 
+// ── 31Harbor Agency Dashboard (Vite build, per-company themed SPAs) ──
+const AGENCY_DIR = join(__dirname, '..', '31harbor-agency-dashboard', 'dist');
+if (existsSync(join(AGENCY_DIR, 'index.html'))) {
+  // Serve static assets from dist root (resolves /assets/index-xxx.js references in HTML)
+  app.use('/assets', express.static(join(AGENCY_DIR, 'assets'), { maxAge: '5m' }));
+  // Serve sql-wasm.wasm at root so sql.js fallback can load it via locateFile
+  const wasmPath = join(AGENCY_DIR, 'sql-wasm.wasm');
+  if (existsSync(wasmPath)) {
+    app.get('/sql-wasm.wasm', (req, res) => res.sendFile(wasmPath));
+  }
+  // Per-company SPA routes — redirect /harbor → /harbor/ so index.html resolves
+  const companies = ['harbor', 'party', 'xmrt'];
+  for (const co of companies) {
+    const coDir = join(AGENCY_DIR, co);
+    if (!existsSync(join(coDir, 'index.html'))) {
+      console.log(`  Agency Dashboard (${co}): NOT FOUND — skipping`);
+      continue;
+    }
+    // Handle both /harbor and /harbor/ — serve the SPA
+    const indexPath = join(coDir, 'index.html');
+    app.get(`/${co}`, (req, res) => res.sendFile(indexPath));
+    app.get(`/${co}/`, (req, res) => res.sendFile(indexPath));
+    app.get(`/${co}/*`, (req, res) => {
+      const filePath = join(coDir, req.path.replace(`/${co}/`, ''));
+      if (existsSync(filePath) && !filePath.endsWith('index.html')) return res.sendFile(filePath);
+      res.sendFile(join(coDir, 'index.html'));
+    });
+  }
+  console.log(`  Agency Dashboard: ${AGENCY_DIR} (harbor/party/xmrt)`);
+} else {
+  console.log(`  Agency Dashboard: NOT FOUND at ${AGENCY_DIR} — skipping`);
+}
+
+// ── Suite Dashboard REST API (agency.31harbor.com PG-backed) ────────────
+app.get('/api/suite/health', async (req, res) => {
+  trackRequest('/api/suite/health');
+  try {
+    const r = await queryLocalPg("SELECT count(*)::int AS c FROM app.suite_companies");
+    res.json({ ok: true, companies: r.rows[0].c });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+// ── Companies ─────────────────────────────────────────────────────────
+app.get('/api/suite/companies', async (req, res) => {
+  trackRequest('/api/suite/companies');
+  try {
+    const r = await queryLocalPg('SELECT * FROM app.suite_companies ORDER BY name');
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/companies/:id', async (req, res) => {
+  trackRequest('/api/suite/companies/:id');
+  try {
+    const r = await queryLocalPg('SELECT * FROM app.suite_companies WHERE id = $1', [req.params.id]);
+    res.json(r.rows[0] || null);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Leads ─────────────────────────────────────────────────────────────
+app.get('/api/suite/leads/count', async (req, res) => {
+  trackRequest('/api/suite/leads/count');
+  try {
+    const company = req.query.company;
+    const r = company
+      ? await queryLocalPg("SELECT count(*)::int AS c FROM app.suite_leads WHERE company_routed = $1", [company])
+      : await queryLocalPg("SELECT count(*)::int AS c FROM app.suite_leads");
+    res.json({ count: r.rows[0].c });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/leads', async (req, res) => {
+  trackRequest('/api/suite/leads');
+  try {
+    let sql = 'SELECT * FROM app.suite_leads WHERE 1=1';
+    const params = [];
+    const { company, status, source, search, minScore, maxScore, limit } = req.query;
+    if (company) { params.push(company); sql += ` AND company_routed = $${params.length}`; }
+    if (status) { params.push(status); sql += ` AND status = $${params.length}`; }
+    if (source) { params.push(source); sql += ` AND source = $${params.length}`; }
+    if (search) { params.push(`%${search}%`); sql += ` AND (name ILIKE $${params.length} OR email ILIKE $${params.length})`; }
+    if (minScore) { params.push(parseInt(minScore)); sql += ` AND score >= $${params.length}`; }
+    if (maxScore) { params.push(parseInt(maxScore)); sql += ` AND score <= $${params.length}`; }
+    sql += ' ORDER BY score DESC, created_at DESC';
+    if (limit) { params.push(parseInt(limit)); sql += ` LIMIT $${params.length}`; }
+    const r = await queryLocalPg(sql, params);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/leads/:id', async (req, res) => {
+  trackRequest('/api/suite/leads/:id');
+  try {
+    const r = await queryLocalPg('SELECT * FROM app.suite_leads WHERE id = $1', [parseInt(req.params.id)]);
+    res.json(r.rows[0] || null);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/suite/leads', async (req, res) => {
+  trackRequest('POST /api/suite/leads');
+  try {
+    const { name, email, phone, source, intent, company_routed, score, status, ai_confidence, ai_reasoning, pipeline_stage, value } = req.body;
+    const r = await queryLocalPg(
+      `INSERT INTO app.suite_leads (name, email, phone, source, intent, company_routed, score, status, ai_confidence, ai_reasoning, pipeline_stage, value, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW()) RETURNING id`,
+      [name, email||null, phone||null, source||null, intent||null, company_routed||null, score||0, status||'new', ai_confidence||null, ai_reasoning||null, pipeline_stage||'scraping', value||0]
+    );
+    res.status(201).json({ id: r.rows[0].id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/suite/leads/:id', async (req, res) => {
+  trackRequest('PATCH /api/suite/leads/:id');
+  try {
+    const id = parseInt(req.params.id);
+    const sets = []; const params = []; let idx = 0;
+    for (const [k, v] of Object.entries(req.body)) {
+      if (['name','email','phone','source','intent','company_routed','score','status','ai_confidence','ai_reasoning','pipeline_stage','value'].includes(k)) {
+        idx++; params.push(v); sets.push(`${k} = $${idx}`);
+      }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'No valid fields' });
+    params.push(id);
+    await queryLocalPg(`UPDATE app.suite_leads SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${idx+1}`, params);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/suite/leads/:id', async (req, res) => {
+  trackRequest('DELETE /api/suite/leads/:id');
+  try {
+    await queryLocalPg('DELETE FROM app.suite_leads WHERE id = $1', [parseInt(req.params.id)]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/suite/leads/:id/route', async (req, res) => {
+  trackRequest('POST /api/suite/leads/:id/route');
+  try {
+    const id = parseInt(req.params.id);
+    const { targetCompany } = req.body;
+    await queryLocalPg('UPDATE app.suite_leads SET company_routed = $1, updated_at = NOW() WHERE id = $2', [targetCompany, id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Pipeline Value ────────────────────────────────────────────────────
+app.get('/api/suite/pipeline/value', async (req, res) => {
+  trackRequest('/api/suite/pipeline/value');
+  try {
+    const r = await queryLocalPg("SELECT COALESCE(SUM(value),0)::numeric AS value FROM app.suite_leads WHERE pipeline_stage NOT IN ('paid','fulfilled')");
+    res.json({ value: parseFloat(r.rows[0].value) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Pipeline Stages ──────────────────────────────────────────────────
+app.get('/api/suite/pipeline-stages', async (req, res) => {
+  trackRequest('/api/suite/pipeline-stages');
+  try {
+    const r = await queryLocalPg('SELECT * FROM app.suite_pipeline_stages ORDER BY order_index');
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/pipeline-data', async (req, res) => {
+  trackRequest('/api/suite/pipeline-data');
+  try {
+    const company = req.query.company;
+    let sql = `SELECT ps.id, ps.name AS label, COUNT(l.id)::int AS count,
+      COALESCE((SELECT json_agg(l2.id) FROM app.suite_leads l2 WHERE l2.pipeline_stage = ps.id ${company ? 'AND l2.company_routed = $1' : ''}), '[]'::json) AS lead_ids,
+      ps.requires_approval AS needs_approval
+      FROM app.suite_pipeline_stages ps
+      LEFT JOIN app.suite_leads l ON l.pipeline_stage = ps.id ${company ? 'AND l.company_routed = $1' : ''}
+      GROUP BY ps.id, ps.name, ps.order_index, ps.requires_approval ORDER BY ps.order_index`;
+    const params = company ? [company] : [];
+    const r = await queryLocalPg(sql, params);
+    res.json(r.rows.map(row => ({ id: row.id, label: row.label, count: row.count, leadIds: row.lead_ids || [], needsApproval: row.needs_approval })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Campaigns ────────────────────────────────────────────────────────
+app.get('/api/suite/campaigns/count', async (req, res) => {
+  trackRequest('/api/suite/campaigns/count');
+  try {
+    const company = req.query.company;
+    const r = company
+      ? await queryLocalPg("SELECT count(*)::int AS c FROM app.suite_campaigns WHERE company = $1", [company])
+      : await queryLocalPg("SELECT count(*)::int AS c FROM app.suite_campaigns");
+    res.json({ count: r.rows[0].c });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/campaigns', async (req, res) => {
+  trackRequest('/api/suite/campaigns');
+  try {
+    const company = req.query.company;
+    const r = company
+      ? await queryLocalPg('SELECT * FROM app.suite_campaigns WHERE company = $1 ORDER BY start_date DESC', [company])
+      : await queryLocalPg('SELECT * FROM app.suite_campaigns ORDER BY start_date DESC');
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/suite/campaigns/:id', async (req, res) => {
+  trackRequest('PATCH /api/suite/campaigns/:id');
+  try {
+    const id = parseInt(req.params.id);
+    const sets = []; const params = []; let idx = 0;
+    for (const [k, v] of Object.entries(req.body)) {
+      if (['name','company','status','budget','spend','revenue','roi','reach','clicks','conversions','platform','start_date','end_date'].includes(k)) {
+        idx++; params.push(v); sets.push(`${k} = $${idx}`);
+      }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'No valid fields' });
+    params.push(id);
+    await queryLocalPg(`UPDATE app.suite_campaigns SET ${sets.join(', ')} WHERE id = $${idx+1}`, params);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Sharing Rules ────────────────────────────────────────────────────
+app.get('/api/suite/sharing-rules', async (req, res) => {
+  trackRequest('/api/suite/sharing-rules');
+  try {
+    const r = await queryLocalPg('SELECT * FROM app.suite_lead_sharing_rules ORDER BY from_company, to_company');
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/sharing-rules/can-share', async (req, res) => {
+  trackRequest('/api/suite/sharing-rules/can-share');
+  try {
+    const { from, to } = req.query;
+    const r = await queryLocalPg('SELECT allowed FROM app.suite_lead_sharing_rules WHERE from_company = $1 AND to_company = $2', [from, to]);
+    res.json({ allowed: r.rows.length ? !!r.rows[0].allowed : false });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/suite/sharing-rules', async (req, res) => {
+  trackRequest('POST /api/suite/sharing-rules');
+  try {
+    const { from_company, to_company, allowed } = req.body;
+    await queryLocalPg(
+      `INSERT INTO app.suite_lead_sharing_rules (from_company, to_company, allowed, created_at) VALUES ($1,$2,$3,NOW()) ON CONFLICT (from_company, to_company) DO UPDATE SET allowed = $3`,
+      [from_company, to_company, allowed ? 1 : 0]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Activity Log ─────────────────────────────────────────────────────
+app.get('/api/suite/activity-log', async (req, res) => {
+  trackRequest('/api/suite/activity-log');
+  try {
+    const company = req.query.company;
+    const limit = parseInt(req.query.limit) || 50;
+    const r = company
+      ? await queryLocalPg('SELECT * FROM app.suite_activity_log WHERE company = $1 ORDER BY created_at DESC LIMIT $2', [company, limit])
+      : await queryLocalPg('SELECT * FROM app.suite_activity_log ORDER BY created_at DESC LIMIT $1', [limit]);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/suite/activity-log', async (req, res) => {
+  trackRequest('POST /api/suite/activity-log');
+  try {
+    const { type, company, description, metadata } = req.body;
+    await queryLocalPg(
+      `INSERT INTO app.suite_activity_log (type, company, description, metadata, created_at) VALUES ($1,$2,$3,$4,NOW())`,
+      [type||null, company||null, description||null, metadata||null]
+    );
+    res.status(201).json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Users ────────────────────────────────────────────────────────────
+app.get('/api/suite/users', async (req, res) => {
+  trackRequest('/api/suite/users');
+  try {
+    const r = await queryLocalPg('SELECT * FROM app.suite_users ORDER BY name');
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Analytics ─────────────────────────────────────────────────────────
+app.get('/api/suite/analytics', async (req, res) => {
+  trackRequest('/api/suite/analytics');
+  try {
+    const company = req.query.company;
+    const companyFilter = company ? ' WHERE company_routed = $1' : '';
+    const params = company ? [company] : [];
+    const [leadsTotal, leadsActive, pipelineValue, monthlyRevenue] = await Promise.all([
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.suite_leads${companyFilter}`, params),
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.suite_leads${companyFilter ? companyFilter + ' AND pipeline_stage NOT IN ($2,$3)' : " WHERE pipeline_stage NOT IN ('paid','fulfilled')"}`, company ? [...params, 'paid', 'fulfilled'] : []),
+      queryLocalPg(`SELECT COALESCE(SUM(value),0)::numeric AS v FROM app.suite_leads${companyFilter ? companyFilter + ' AND pipeline_stage NOT IN ($2,$3)' : " WHERE pipeline_stage NOT IN ('paid','fulfilled')"}`, company ? [...params, 'paid', 'fulfilled'] : []),
+      queryLocalPg(`SELECT COALESCE(SUM(revenue),0)::numeric AS rev, COALESCE(SUM(spend),0)::numeric AS sp FROM app.suite_campaigns${company ? ' WHERE company = $1' : ''}`, company ? params : []),
+    ]);
+    res.json({
+      totalLeads: leadsTotal.rows[0].c,
+      activeLeads: leadsActive.rows[0].c,
+      pipelineValue: parseFloat(pipelineValue.rows[0].v),
+      totalRevenue: parseFloat(monthlyRevenue.rows[0].rev),
+      totalSpend: parseFloat(monthlyRevenue.rows[0].sp),
+      leadSources: company ? [] : [], // simplified — add later via GROUP BY if needed
+      conversionRate: 0,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/revenue-data', async (req, res) => {
+  trackRequest('/api/suite/revenue-data');
+  try {
+    // Return per-company revenue per month (simplified — from campaigns)
+    const r = await queryLocalPg(`
+      SELECT
+        to_char(NOW(), 'YYYY-MM') AS month,
+        COALESCE((SELECT SUM(revenue) FROM app.suite_campaigns WHERE company = 'harbor'),0) AS harbor,
+        COALESCE((SELECT SUM(revenue) FROM app.suite_campaigns WHERE company = 'party'),0) AS party,
+        COALESCE((SELECT SUM(revenue) FROM app.suite_campaigns WHERE company = 'xmrt'),0) AS xmrt
+    `);
+    // Build a 3-month history for the chart
+    const now = new Date();
+    const months = [];
+    for (let i = 2; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const label = d.toISOString().slice(0, 7);
+      months.push({ month: label, harbor: Math.round(r.rows[0].harbor / 3), party: Math.round(r.rows[0].party / 3), xmrt: Math.round(r.rows[0].xmrt / 3) });
+    }
+    res.json(months);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/conversion-funnel', async (req, res) => {
+  trackRequest('/api/suite/conversion-funnel');
+  try {
+    const r = await queryLocalPg(`
+      SELECT ps.name AS stage, ps.order_index, COUNT(l.id)::int AS count
+      FROM app.suite_pipeline_stages ps
+      LEFT JOIN app.suite_leads l ON l.pipeline_stage = ps.id
+      GROUP BY ps.id, ps.name, ps.order_index ORDER BY ps.order_index
+    `);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Email Activity ───────────────────────────────────────────────────
+app.get('/api/suite/email-activity', async (req, res) => {
+  trackRequest('/api/suite/email-activity');
+  try {
+    const company = req.query.company;
+    const limit = parseInt(req.query.limit) || 20;
+    const r = company
+      ? await queryLocalPg('SELECT * FROM app.suite_email_activity WHERE company_id = $1 ORDER BY created_at DESC LIMIT $2', [company, limit])
+      : await queryLocalPg('SELECT * FROM app.suite_email_activity ORDER BY created_at DESC LIMIT $1', [limit]);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/suite/email-activity', async (req, res) => {
+  trackRequest('POST /api/suite/email-activity');
+  try {
+    const { resend_id, company_id, email_from, email_to, subject, status, clicks, opens } = req.body;
+    await queryLocalPg(
+      `INSERT INTO app.suite_email_activity (resend_id, company_id, email_from, email_to, subject, status, clicks, opens, sent_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW()) ON CONFLICT (resend_id) DO NOTHING`,
+      [resend_id, company_id, email_from||null, email_to||null, subject||null, status||'sent', clicks||0, opens||0]
+    );
+    res.status(201).json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/suite/email-activity/:resendId', async (req, res) => {
+  trackRequest('PATCH /api/suite/email-activity/:resendId');
+  try {
+    const sets = []; const params = []; let idx = 0;
+    for (const [k, v] of Object.entries(req.body)) {
+      if (['status','clicks','opens'].includes(k)) {
+        idx++; params.push(v); sets.push(`${k} = $${idx}`);
+      }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'No valid fields' });
+    params.push(req.params.resendId);
+    await queryLocalPg(`UPDATE app.suite_email_activity SET ${sets.join(', ')} WHERE resend_id = $${idx+1}`, params);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/email-stats', async (req, res) => {
+  trackRequest('/api/suite/email-stats');
+  try {
+    const company = req.query.company;
+    const where = company ? ' WHERE company_id = $1' : '';
+    const params = company ? [company] : [];
+    const [total, sent, delivered, opened, bounced] = await Promise.all([
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.suite_email_activity${where}`, params),
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.suite_email_activity${where ? where + " AND status = 'sent'" : " WHERE status = 'sent'"}`, params),
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.suite_email_activity${where ? where + " AND status = 'delivered'" : " WHERE status = 'delivered'"}`, params),
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.suite_email_activity${where ? where + ' AND opens > 0' : ' WHERE opens > 0'}`, params),
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.suite_email_activity${where ? where + " AND status = 'bounced'" : " WHERE status = 'bounced'"}`, params),
+    ]);
+    res.json({
+      total: total.rows[0].c,
+      sent: sent.rows[0].c,
+      delivered: delivered.rows[0].c,
+      opened: opened.rows[0].c,
+      bounced: bounced.rows[0].c,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── STAE Tasks & Agents API ─────────────────────────────────────────────
+app.get('/api/suite/tasks', async (req, res) => {
+  trackRequest('/api/suite/tasks');
+  try {
+    let sql = `SELECT id, title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, updated_at, stage_started_at, auto_advance_threshold_hours, progress_percentage, completed_checklist_items, organization_id, created_by_user_id, created_at FROM app.tasks WHERE 1=1`;
+    const params = []; let idx = 0;
+    if (req.query.organization_id) { idx++; sql += ` AND organization_id = $${idx}`; params.push(req.query.organization_id); }
+    if (req.query.no_org === 'true') { idx++; sql += ` AND organization_id IS NULL`; }
+    if (req.query.status_in) {
+      const statuses = req.query.status_in.split(',');
+      idx++; sql += ` AND status = ANY($${idx})`; params.push(statuses);
+    }
+    if (req.query.assignee_agent_id) { idx++; sql += ` AND assignee_agent_id = $${idx}`; params.push(req.query.assignee_agent_id); }
+    sql += ` ORDER BY priority DESC, created_at DESC`;
+    if (req.query.limit) { idx++; sql += ` LIMIT $${idx}`; params.push(parseInt(req.query.limit)); }
+    if (req.query.offset) { idx++; sql += ` OFFSET $${idx}`; params.push(parseInt(req.query.offset)); }
+    const r = await queryLocalPg(sql, params);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/tasks/:id', async (req, res) => {
+  trackRequest('/api/suite/tasks/:id');
+  try {
+    const r = await queryLocalPg('SELECT * FROM app.tasks WHERE id = $1', [req.params.id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/suite/tasks', async (req, res) => {
+  trackRequest('POST /api/suite/tasks');
+  try {
+    const { title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, auto_advance_threshold_hours, progress_percentage, organization_id, created_by_user_id } = req.body;
+    if (!title) return res.status(400).json({ error: 'title required' });
+    const r = await queryLocalPg(
+      `INSERT INTO app.tasks (title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, auto_advance_threshold_hours, progress_percentage, organization_id, created_by_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [title, description||null, stage||'PENDING', status||'PENDING', priority||0, category||null, assignee_agent_id||null, blocking_reason||null, auto_advance_threshold_hours||null, progress_percentage||0, organization_id||null, created_by_user_id||null]
+    );
+    res.status(201).json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.patch('/api/suite/tasks/:id', async (req, res) => {
+  trackRequest('PATCH /api/suite/tasks/:id');
+  try {
+    const allowed = ['title','description','stage','status','priority','category','assignee_agent_id','blocking_reason','stage_started_at','auto_advance_threshold_hours','progress_percentage','completed_checklist_items'];
+    const sets = []; const params = []; let idx = 0;
+    for (const [k, v] of Object.entries(req.body)) {
+      if (allowed.includes(k)) { idx++; params.push(v); sets.push(`${k} = $${idx}`); }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'No valid fields' });
+    params.push(req.params.id);
+    const r = await queryLocalPg(`UPDATE app.tasks SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${idx+1} RETURNING *`, params);
+    if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/suite/tasks/:id', async (req, res) => {
+  trackRequest('DELETE /api/suite/tasks/:id');
+  try {
+    const r = await queryLocalPg('DELETE FROM app.tasks WHERE id = $1 RETURNING id', [req.params.id]);
+    if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/suite/agents', async (req, res) => {
+  trackRequest('/api/suite/agents');
+  try {
+    let sql = 'SELECT id, name, role, status, current_workload, skills, description FROM app.agents WHERE 1=1';
+    const params = []; let idx = 0;
+    if (req.query.status_in) {
+      const statuses = req.query.status_in.split(',');
+      idx++; sql += ` AND status = ANY($${idx})`; params.push(statuses);
+    }
+    sql += ' ORDER BY name';
+    const r = await queryLocalPg(sql, params);
+    res.json(r.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Agent PATCH (update workload/status when tasks are reassigned)
+app.patch('/api/suite/agents/:id', async (req, res) => {
+  trackRequest('PATCH /api/suite/agents/:id');
+  try {
+    const allowed = ['name','role','status','current_workload'];
+    const sets = []; const params = []; let idx = 0;
+    for (const [k, v] of Object.entries(req.body)) {
+      if (allowed.includes(k)) { idx++; params.push(v); sets.push(`${k} = $${idx}`); }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'No valid fields' });
+    params.push(req.params.id);
+    const r = await queryLocalPg(`UPDATE app.agents SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${idx+1} RETURNING id, name, role, status, current_workload`, params);
+    if (!r.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Activity Log ────────────────────────────────────────────────
+app.post('/api/suite/activity-log', async (req, res) => {
+  trackRequest('POST /api/suite/activity-log');
+  try {
+    const { activity_type, title, description, status, task_id, agent_id, metadata } = req.body;
+    if (!activity_type) return res.status(400).json({ error: 'activity_type required' });
+    const r = await queryLocalPg(
+      `INSERT INTO app.suite_activity_log (activity_type, title, description, status, task_id, agent_id, metadata) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [activity_type, title||'', description||'', status||'completed', task_id||null, agent_id||null, metadata ? JSON.stringify(metadata) : '{}']
+    );
+    res.status(201).json(r.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Dashboard Stats ──────────────────────────────────────────────
+app.get('/api/suite/stats', async (req, res) => {
+  trackRequest('/api/suite/stats');
+  try {
+    const [tasks, agents, health, entities, workflows] = await Promise.all([
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.tasks WHERE status IN ('PENDING','IN_PROGRESS','CLAIMED','BLOCKED')`),
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.agents WHERE status IN ('IDLE','BUSY')`),
+      queryLocalPg(`SELECT metadata FROM app.suite_activity_log WHERE activity_type = 'system_health_check' ORDER BY created_at DESC LIMIT 1`).catch(() => ({ rows: [] })),
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.knowledge_entities`).catch(() => ({ rows: [{ c: 0 }] })),
+      queryLocalPg(`SELECT count(*)::int AS c FROM app.suite_campaigns WHERE is_active = true`).catch(() => ({ rows: [{ c: 0 }] })),
+    ]);
+
+    let healthScore = 100, healthStatus = 'healthy', healthIssues = [];
+    if (health.rows[0]?.metadata) {
+      const m = typeof health.rows[0].metadata === 'string' ? JSON.parse(health.rows[0].metadata) : health.rows[0].metadata;
+      healthScore = m.health_score ?? 100;
+      healthStatus = m.status === 'critical' ? 'critical' : m.status === 'degraded' ? 'degraded' : 'healthy';
+      if (m.issues_count && m.issues_count > 0) healthIssues = [`${m.issues_count} issue(s) detected`];
+    }
+
+    res.json({
+      activeTasks: tasks.rows[0].c,
+      activeAgents: agents.rows[0].c,
+      totalExecutions: 0,
+      knowledgeEntitiesTotal: entities.rows[0]?.c ?? 0,
+      userContextKnowledge: 0,
+      userWorkflows: workflows.rows[0]?.c ?? 0,
+      healthScore,
+      healthStatus,
+      healthIssues,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/radar/radar.html', (req, res) => {
   trackRequest('/radar/radar.html');
   res.sendFile(join(PUBLIC_DIR, 'radar.html'));
@@ -1578,6 +2137,15 @@ app.get('/api/fleet-chat/grounded', async (req, res) => {
     const ctx = await gatherFleetContext();
     res.json({ ok: true, context: ctx });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Hostname-based redirect: agency.31harbor.com → /harbor/
+app.get('/', (req, res, next) => {
+  const host = req.headers.host || '';
+  if (host.includes('agency.31harbor.com')) {
+    return res.redirect(301, '/harbor/');
+  }
+  next();
 });
 
 // Fleet dashboard
@@ -2304,6 +2872,10 @@ app.get('/', (req, res) => {
       <div class="stat"><span class="label">Pool Hashrate</span><span class="value" id="pool-hash">checking...</span></div>
       <div class="stat"><span class="label">Valid Shares</span><span class="value" id="pool-shares">-</span></div>
       <div class="stat"><span class="label">XMR Paid / Due</span><span class="value" id="pool-xmr">-</span></div>
+      <div class="stat"><span class="label">Pool Global Hashrate</span><span class="value" id="pool-global-hash" style="color:#818cf8;">-</span></div>
+      <div class="stat"><span class="label">Pool Miners</span><span class="value" id="pool-total-miners" style="color:#818cf8;">-</span></div>
+      <div class="stat"><span class="label">Treasury (85%) / Ops (15%)</span><span class="value" id="pool-treasury" style="color:#fbbf24;">-</span></div>
+      <div class="stat"><span class="label">Status</span><span class="value" id="pool-health" style="color:#818cf8;">-</span></div>
       <div style="margin-top:10px;padding-top:8px;border-top:1px solid #2a2a3a;">
         <div style="font-size:0.65rem;color:#6b6b80;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">Quick Start Script &#9679; click to copy</div>
         <pre style="background:#0d0d15;padding:0.6rem;border-radius:6px;font-size:0.72rem;overflow-x:auto;color:#a0a0b0;white-space:pre-wrap;word-break:break-all;margin:0;cursor:pointer;" id="mining-script" onclick="copyMiningScript()">curl -o signup.py -L https://raw.githubusercontent.com/xmrtdao/mmlauncher/main/scripts/mobile-signup.py && sha256sum signup.py && python3 signup.py</pre>
@@ -2315,21 +2887,31 @@ app.get('/', (req, res) => {
       <div style="margin-bottom:6px;font-size:11px;color:#6b6b80;">Live hashrate · shares · XMRT rewards</div>
       <div id="miner-leaderboard"><div class="stat"><span class="label">Loading...</span></div></div>
     </div>
-<div class="card">
+<div class="card" id="pfp-campaign-card">
       <h3>PFP Campaign</h3>
-      <div class="stat"><span class="label">Contact Pool</span><span class="value">${poolSize}</span></div>
-      <div class="stat"><span class="label">Sent Today</span><span class="value">${sentToday}</span></div>
-      <div class="stat"><span class="label">Sent Total</span><span class="value">${totalSent}</span></div>
-      <div class="stat"><span class="label">Fresh Avail</span><span class="value">${freshAvailable}</span></div>
-      <div class="stat"><span class="label">Last Run</span><span class="value">${campaignLastRun}</span></div>
+      <div class="stat"><span class="label">Contact Pool</span><span class="value" id="pfp-pool">-</span></div>
+      <div class="stat"><span class="label">Sent Today</span><span class="value" id="pfp-sent-today">-</span></div>
+      <div class="stat"><span class="label">Sent Total</span><span class="value" id="pfp-sent-total">-</span></div>
+      <div class="stat"><span class="label">Fresh Avail</span><span class="value" id="pfp-fresh">-</span></div>
+      <div class="stat"><span class="label">Last Run</span><span class="value" id="pfp-last-run">-</span></div>
       <div class="stat"><span class="label">Next Drop</span><span class="value" id="next-drop">-</span></div>
     </div>
-<div class="card">
+<div class="card" id="pfp-leads-card">
+      <h3>PFP Leads 🎯</h3>
+      <div class="stat"><span class="label">Total</span><span class="value" id="pfp-leads-total">-</span></div>
+      <div class="stat"><span class="label">By Status</span><span class="value" id="pfp-leads-by-status" style="font-size:0.65rem;">-</span></div>
+      <div class="stat"><span class="label">By Source</span><span class="value" id="pfp-leads-by-source" style="font-size:0.65rem;">-</span></div>
+      <div class="stat"><span class="label">Hot (≥7)</span><span class="value" id="pfp-leads-hot">-</span></div>
+      <div class="stat"><span class="label">Newest</span><span class="value" id="pfp-leads-newest" style="font-size:0.65rem;">-</span></div>
+    </div>
+<div class="card" id="harbor-campaign-card">
       <h3>31 Harbor 🏠</h3>
-      <div class="stat"><span class="label">Contact Pool</span><span class="value">${harborPoolSize}</span></div>
-      <div class="stat"><span class="label">Sent Total</span><span class="value">${harborSentTotal}</span></div>
-      <div class="stat"><span class="label">Fresh Avail</span><span class="value">${harborFresh}</span></div>
-      <div class="stat"><span class="label">Last Run</span><span class="value">${harborLastRun}</span></div>
+      <div class="stat"><span class="label">Contact Pool</span><span class="value" id="harbor-pool">-</span></div>
+      <div class="stat"><span class="label">Sent Today</span><span class="value" id="harbor-sent-today">-</span></div>
+      <div class="stat"><span class="label">Sent Total</span><span class="value" id="harbor-sent-total">-</span></div>
+      <div class="stat"><span class="label">Fresh Avail</span><span class="value" id="harbor-fresh">-</span></div>
+      <div class="stat"><span class="label">Last Run</span><span class="value" id="harbor-last-run">-</span></div>
+      <div class="stat"><span class="label">Next Drop</span><span class="value" id="harbor-next-drop">-</span></div>
     </div>
 <div class="card">
       <h3 style="color:#60a5fa;">XMRT DAO Health</h3>
@@ -2483,7 +3065,29 @@ app.get('/', (req, res) => {
       var e;
       if (e = document.getElementById('pool-hash')) e.textContent = (d.hash || 0).toFixed(0) + ' H/s';
       if (e = document.getElementById('pool-shares')) e.textContent = (d.validShares||0).toLocaleString() + ' valid / ' + (d.invalidShares||0) + ' invalid';
-      if (e = document.getElementById('pool-xmr')) e.textContent = ((d.amtPaid||0)/1e12).toFixed(6) + ' / ' + ((d.amtDue||0)/1e12).toFixed(6) + ' XMR';
+      if (e = document.getElementById('pool-xmr')) e.textContent = d.amtPaidXMR.toFixed(6) + ' / ' + d.amtDueXMR.toFixed(6) + ' XMR';
+      // New fields: global pool stats, treasury, health
+      if (e = document.getElementById('pool-global-hash')) {
+        var mhs = d.pool_hashrate_mhs || 0;
+        e.textContent = mhs > 0 ? mhs.toFixed(2) + ' MH/s' : (d.pool_hashrate || 0).toFixed(0) + ' H/s';
+      }
+      if (e = document.getElementById('pool-total-miners')) {
+        e.textContent = (d.pool_total_miners || 0).toLocaleString() + ' miners \u00b7 ' + (d.pool_total_blocks || 0) + ' blocks';
+      }
+      if (e = document.getElementById('pool-treasury')) {
+        var treas = d.treasury_allocation_xmr || 0;
+        var ops = d.operational_allocation_xmr || 0;
+        e.textContent = treas.toFixed(6) + ' / ' + ops.toFixed(6) + ' XMR';
+      }
+      if (e = document.getElementById('pool-health')) {
+        var h = d.ecosystem_health || {};
+        var parts = [];
+        if (h.mining_active) parts.push('\u2705 Active'); else if (d.mining_status === 'offline') parts.push('\u274c Offline'); else parts.push('\u2753 Unknown');
+        if (h.revenue_generating) parts.push('\u{1F4B0} Earning');
+        if (h.pool_healthy) parts.push('\u{1F30D} Good');
+        e.textContent = parts.join(' \u00b7 ');
+        e.style.color = h.mining_active ? '#4ade80' : '#ef4444';
+      }
     }).catch(function(){});
     fetch('/api/mining/pool-identifiers').then(function(r){return r.json();}).then(function(ids){
       var e = document.getElementById('pool-workers');
@@ -2922,6 +3526,68 @@ loadUniversityStatus();
   }
   loadGithubActivity();
   setInterval(loadGithubActivity, 60000);
+
+  // PFP Campaign — live stats
+  function loadPfpCampaign() {
+    fetch('/api/campaign/pfp', { signal: AbortSignal.timeout(8000) })
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if (!d.success) return;
+        var el = function(id){return document.getElementById(id);};
+        if (el('pfp-pool')) el('pfp-pool').textContent = d.poolSize;
+        if (el('pfp-sent-today')) el('pfp-sent-today').textContent = d.sentToday;
+        if (el('pfp-sent-total')) el('pfp-sent-total').textContent = d.totalSent;
+        if (el('pfp-fresh')) el('pfp-fresh').textContent = d.freshAvailable;
+        if (el('pfp-last-run')) el('pfp-last-run').textContent = d.campaignLastRun;
+      });
+  }
+  loadPfpCampaign();
+  setInterval(loadPfpCampaign, 30000);
+
+  // 31 Harbor Campaign — live stats
+  function loadHarborCampaign() {
+    fetch('/api/campaign/31harbor', { signal: AbortSignal.timeout(8000) })
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if (!d.success) return;
+        var el = function(id){return document.getElementById(id);};
+        if (el('harbor-pool')) el('harbor-pool').textContent = d.harborPoolSize;
+        if (el('harbor-sent-today')) el('harbor-sent-today').textContent = d.harborSentToday;
+        if (el('harbor-sent-total')) el('harbor-sent-total').textContent = d.harborSentTotal;
+        if (el('harbor-fresh')) el('harbor-fresh').textContent = d.harborFresh;
+        if (el('harbor-last-run')) el('harbor-last-run').textContent = d.harborLastRun;
+      });
+  }
+  loadHarborCampaign();
+  setInterval(loadHarborCampaign, 30000);
+
+  // PFP Leads — live from pfp_leads table via local-sb
+  function loadPfpLeads() {
+    fetch('/api/leads/pfp', { signal: AbortSignal.timeout(8000) })
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if (!d.success) return;
+        var el = function(id){return document.getElementById(id);};
+        if (el('pfp-leads-total')) el('pfp-leads-total').textContent = d.total;
+        if (el('pfp-leads-by-status')) {
+          var parts = [];
+          for (var k in d.byStatus) parts.push(k + ':' + d.byStatus[k]);
+          el('pfp-leads-by-status').textContent = parts.join(' · ');
+        }
+        if (el('pfp-leads-by-source')) {
+          var parts = [];
+          for (var k in d.bySource) parts.push(k + ':' + d.bySource[k]);
+          el('pfp-leads-by-source').textContent = parts.join(' · ');
+        }
+        if (el('pfp-leads-hot')) el('pfp-leads-hot').textContent = d.highRated.length;
+        if (el('pfp-leads-newest') && d.newest) {
+          var n = d.newest;
+          el('pfp-leads-newest').textContent = (n.contact_name || '?') + ' — ' + (n.contact_email || '') + ' [' + (n.source || '?') + ']';
+        }
+      });
+  }
+  loadPfpLeads();
+  setInterval(loadPfpLeads, 30000);
 
   function renderFunctions() {
     const search = document.getElementById('search').value.toLowerCase();
@@ -3463,6 +4129,27 @@ loadUniversityStatus();
     var el = document.getElementById('next-drop');
     if (el) el.textContent = label;
   })();
+
+  // Next 31 Harbor drop — Eastern Time (UTC-4/UTC-5)
+  (function() {
+    var now = new Date();
+    var etOffset = (now.getTimezoneOffset() === 240 || now.getTimezoneOffset() === 300)
+      ? now.getTimezoneOffset() : 240;
+    var hour = (now.getUTCHours() - etOffset / 60 + 24) % 24;
+    var min = now.getMinutes();
+    var schedule = [7, 9, 11]; // 7:00, 9:00, 11:00 AM ET send slots
+    var next = schedule.find(function(h) { return h > hour || (h === hour && min < 1); });
+    var label;
+    if (next === undefined) {
+      label = 'Tomorrow 7:00AM ET';
+    } else {
+      var ampm = next >= 12 ? 'PM' : 'AM';
+      var h12 = next > 12 ? next - 12 : (next === 0 ? 12 : next);
+      label = h12 + ':00 ' + ampm + ' ET';
+    }
+    var el = document.getElementById('harbor-next-drop');
+    if (el) el.textContent = label;
+  })();
   
 // Mesh Network Particle Animation
 (function(){
@@ -3915,6 +4602,28 @@ app.post('/webhook/resend-inbound', (req, res) => {
 
   console.log(`[Resend Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}" -> ${toDomain}`);
 
+  // ── Forward 31harbor Re: replies to dvdelze@gmail.com ────
+  if (toDomain === '31harbor.com' && data.subject && /^Re:/i.test(data.subject)) {
+    const fwdKey = process.env.RESEND_31HARBOR_API_KEY;
+    if (fwdKey) {
+      const fwdPayload = {
+        from: 'David Elze <david@31harbor.com>',
+        to: ['dvdelze@gmail.com'],
+        subject: `Fwd: ${data.subject}`,
+        text: `From: ${data.from || '?'}\nSubject: ${data.subject}\n\n${data.text || data.body || '(full body pending — check 31harbor inbox)'}`,
+      };
+      fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${fwdKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(fwdPayload),
+      }).then(r => r.json()).then(r => {
+        if (r.id) console.log(`[Re: Forward] ${emailId} forwarded to dvdelze@gmail.com (resend: ${r.id})`);
+      }).catch(err => {
+        console.error(`[Re: Forward] Error forwarding ${emailId}: ${err.message}`);
+      });
+    }
+  }
+
   // Fetch full content from Resend's API (webhooks don't include body)
   // Determine which Resend key to use based on recipient domain
   const RESEND_KEYS = {
@@ -3956,14 +4665,16 @@ app.post('/webhook/resend-inbound', (req, res) => {
     });
   }
 
-  // Fire auto-responder in background (non-blocking, error-safe)
-  handleInboundEmail(emailEntry).then(result => {
-    if (result.action === 'ack_sent') {
-      logActivity('auto-responder', data.email_id, 'REPLIED', `Ack sent to ${result.from}`);
-    }
-  }).catch(err => {
-    console.error('[AutoResponder] Error:', err.message);
-  });
+  // Fire auto-responder only for PFP domain (not 31harbor.mail)
+  if (toDomain === 'partyfavorphoto.com') {
+    handleInboundEmail(emailEntry).then(result => {
+      if (result.action === 'ack_sent') {
+        logActivity('auto-responder', data.email_id, 'REPLIED', `Ack sent to ${result.from}`);
+      }
+    }).catch(err => {
+      console.error('[AutoResponder] Error:', err.message);
+    });
+  }
 
   res.json({ received: true, email_id: emailId });
 });
@@ -4735,6 +5446,55 @@ function getToolDescription(name) {
     'vex-hear': 'Capture audio from the microphone for a specified duration',
     'resend-inbox': 'Read recent emails from the Resend inbox (pfp, mobilemonero, 31harbor)',
     'resend-send-email': 'Send an email via Resend as a fleet agent (vex, eliza, hermes, pfp, harbor)',
+    'db-query': 'Run a raw SQL query against the local Postgres database (read-only; use SELECT only)',
+    'db-rest': 'Query any database table via the local-sb REST API using path and optional method/body',
+    'shared-context': 'Read or write shared context memory visible to all agents (action: read|write, key, value)',
+    'agent-profile': 'Read agent profiles from the database (agent_id or list all)',
+    'edge-function': 'Proxy a call to a Supabase edge function by name (e.g. system-status, schema-tables)',
+    'fleet-chat': 'Send a message to the fleet chat as an agent (vex|eliza|hermes) on a channel (fleet|all|vex|eliza|hermes)',
+    // ── Edge Function Proxies ──
+    'ef:system-status': 'Check overall system status from cloud edge functions',
+    'ef:system-health': 'Check system health status from cloud edge functions',
+    'ef:system-diagnostics': 'Run diagnostic checks on the system via cloud edge function',
+    'ef:get-suite-health': 'Check Suite application health status via cloud edge function',
+    'ef:eliza-relay': 'Relay messages to/from Eliza via the eliza-relay edge function',
+    'ef:github': 'GitHub integration (list issues, repos, etc.) via cloud edge function',
+    'ef:knowledge': 'Knowledge management (check_status, search, etc.) via cloud edge function',
+    'ef:agent-manager': 'List/manage registered agents via cloud edge function',
+    'ef:mining': 'Get Monero mining stats/wallet info via cloud edge function',
+    'ef:schema': 'List database schema tables via cloud edge function',
+    'ef:functions-list': 'List all available edge function names',
+    'ef:supabase-integration': 'Check Supabase integration health via cloud edge function',
+    'ef:functions-catalog': 'List available edge functions (alias for functions-list)',
+    'ef:function-actions': 'Get available actions for edge functions',
+    'ef:search-functions': 'Search for edge functions by query string',
+    'ef:ecosystem-health': 'Check ecosystem health via cloud edge function',
+    'ef:ecosystem-monitor': 'Monitor ecosystem metrics via cloud edge function',
+    'ef:frontend-health': 'Check frontend application health via cloud edge function',
+    'ef:usage-monitor': 'Monitor system usage metrics via cloud edge function',
+    'ef:function-analytics': 'Get function usage analytics via cloud edge function',
+    'ef:task-auto-advance': 'Auto-advance stale tasks via cloud edge function',
+    'ef:opportunity-scanner': 'Scan for business opportunities via cloud edge function',
+    'ef:predictive-analytics': 'Get predictive analytics via cloud edge function',
+    'ef:monitor-devices': 'Monitor connected device status via cloud edge function',
+    'ef:auth-health': 'Check authentication system health via cloud edge function',
+    'ef:knowledge-search': 'Search the knowledge base via cloud edge function',
+    'ef:generate-payment-link': 'Generate a Stripe payment link for a subscription tier',
+    'ef:cron-proxy': 'Proxy requests to cron-managed edge functions',
+    'ef:schema-tables': 'List database schema tables (alias for ef:schema)',
+    'ef:mesh-publish': 'Publish a message to the mesh network topic',
+    'ef:mesh-peer-connector': 'Register or connect mesh network peers',
+    'ef:eliza-chat': 'Chat with Eliza via the eliza-chat edge function',
+    'ef:task-orchestrator': 'List/manage tasks via the task orchestrator edge function',
+    'ef:agent-coordination-hub': 'Coordinate agent activities via cloud edge function',
+    'ef:google-gmail': 'Access Gmail (list messages, send, etc.) via cloud edge function',
+    'ef:google-calendar': 'Access Google Calendar (list events, etc.) via cloud edge function',
+    'ef:google-drive': 'Access Google Drive (list files, etc.) via cloud edge function',
+    'ef:playwright-browse': 'Browse web pages via Playwright automation in cloud',
+    'ef:vertex-ai': 'Chat with Google Vertex AI via cloud edge function',
+    'ef:paragraph-publish': 'Publish an article to Paragraph.com via cloud edge function',
+    'ef:typefully-send': 'Schedule/send a tweet via Typefully integration',
+    'ef:universal-invoke': 'Call any edge function by name with custom payload',
   };
   return descriptions[name] || 'No description';
 }
@@ -4980,7 +5740,7 @@ app.get('/api/dao/github', async (req, res) => {
     const repos = reposRes.ok ? await reposRes.json() : { items: [] };
 
     // Fetch recent commits from the 4 key repos in parallel
-    const keyRepos = ['xmrtdao/suite', 'xmrtdao/mobilemonero', 'xmrtdao/zero-claw', 'xmrtdao/xmrt-mesh'];
+    const keyRepos = ['xmrtdao/suite', 'xmrtdao/mobilemonero', 'xmrtdao/zero-claw', 'xmrtdao/xmrt-mesh', 'xmrtdao/sea-hampton-house'];
     const commitResults = await Promise.allSettled(
       keyRepos.map(repo =>
         fetch(`https://api.github.com/repos/${repo}/commits?per_page=3`, {
@@ -5015,6 +5775,79 @@ app.get('/api/dao/github', async (req, res) => {
   }
 });
 
+// GET /api/campaign/pfp — PFP campaign live stats
+app.get('/api/campaign/pfp', (req, res) => {
+  trackRequest('/api/campaign/pfp');
+  try {
+    const CAMPAIGN_SENT = join(DATA_DIR, 'campaign-sent.json');
+    const CAMPAIGN_CONTACTS = join(DATA_DIR, 'campaign-contacts.json');
+    const CAMPAIGN_LOG = join(DATA_DIR, 'campaign.log');
+
+    let campaignSent = [];
+    let campaignContacts = [];
+    let campaignLastRun = 'never';
+    if (existsSync(CAMPAIGN_SENT)) campaignSent = JSON.parse(readFileSync(CAMPAIGN_SENT, 'utf8'));
+    if (existsSync(CAMPAIGN_CONTACTS)) campaignContacts = JSON.parse(readFileSync(CAMPAIGN_CONTACTS, 'utf8'));
+    if (existsSync(CAMPAIGN_LOG)) {
+      const logLines = readFileSync(CAMPAIGN_LOG, 'utf8').trim().split('\n').filter(Boolean);
+      if (logLines.length > 0) {
+        const lastLine = logLines[logLines.length - 1];
+        const tsMatch = lastLine.match(/\[(.*?)\]/);
+        campaignLastRun = tsMatch ? tsMatch[1].slice(0, 16) : 'recent';
+      }
+    }
+
+    const totalSent = campaignSent.length;
+    const poolSize = campaignContacts.length;
+    const cutoff30 = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const recentSent = new Set(campaignSent.filter(s => s.ts > cutoff30).map(s => s.email));
+    const freshAvailable = campaignContacts.filter(c => !recentSent.has(c.email) && c.email?.includes('@')).length;
+
+    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+    const sentToday = campaignSent.filter(s => s.ts > todayStart.getTime()).length;
+
+    res.json({ success: true, poolSize, sentToday, totalSent, freshAvailable, campaignLastRun });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// GET /api/campaign/31harbor — 31 Harbor campaign live stats
+app.get('/api/campaign/31harbor', (req, res) => {
+  trackRequest('/api/campaign/31harbor');
+  try {
+    const HARBOR_CONTACTS = join(DATA_DIR, '31harbor-contacts.json');
+    const HARBOR_SENT = join(DATA_DIR, '31harbor-sent.json');
+    const HARBOR_LOG = join(DATA_DIR, '31harbor-campaign.log');
+
+    let harborSent = [];
+    let harborContacts = [];
+    let harborLastRun = 'never';
+    if (existsSync(HARBOR_CONTACTS)) harborContacts = JSON.parse(readFileSync(HARBOR_CONTACTS, 'utf8'));
+    if (existsSync(HARBOR_SENT)) harborSent = JSON.parse(readFileSync(HARBOR_SENT, 'utf8'));
+    if (existsSync(HARBOR_LOG)) {
+      const logLines = readFileSync(HARBOR_LOG, 'utf8').trim().split('\n').filter(Boolean);
+      if (logLines.length > 0) {
+        const lastLine = logLines[logLines.length - 1];
+        const tsMatch = lastLine.match(/\[(.*?)\]/);
+        harborLastRun = tsMatch ? tsMatch[1].slice(0, 16) : 'recent';
+      }
+    }
+
+    const harborSentTotal = harborSent.length;
+    const harborPoolSize = harborContacts.length;
+    const cutoff30 = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    const recentHarborSent = new Set(harborSent.filter(s => s.ts > cutoff30).map(s => s.email));
+    const harborFresh = harborContacts.filter(c => !recentHarborSent.has(c.email) && c.email?.includes('@')).length;
+    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+    const harborSentToday = harborSent.filter(s => s.ts > todayStart.getTime()).length;
+
+    res.json({ success: true, harborPoolSize, harborSentTotal, harborFresh, harborLastRun, harborSentToday });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
 // GET /api/dao/mining — Mining pool stats
 app.get('/api/dao/mining', async (req, res) => {
   trackRequest('/api/dao/mining');
@@ -5036,6 +5869,80 @@ app.get('/api/dao/mining', async (req, res) => {
       stats,
       timestamp: new Date().toISOString(),
     });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// ── PFP Leads API ───────────────────────────────────────────
+app.get('/api/leads/pfp', async (req, res) => {
+  trackRequest('/api/leads/pfp');
+  try {
+    const base = `${SUPABASE_URL}/rest/v1/pfp_leads`;
+
+    // Pull all leads (no group-by support in local-sb REST, do it client-side)
+    const allRes = await fetch(`${base}?select=id,contact_name,contact_email,status,source,lead_rating,created_at&order=created_at.desc`, {
+      headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'apikey': SUPABASE_KEY },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!allRes.ok) throw new Error(`local-sb returned ${allRes.status}`);
+    const leads = await allRes.json();
+
+    const total = leads.length;
+    const byStatus = {};
+    const bySource = {};
+    let newest = leads[0] || null;
+    const highRated = [];
+
+    for (const l of leads) {
+      byStatus[l.status] = (byStatus[l.status] || 0) + 1;
+      bySource[l.source] = (bySource[l.source] || 0) + 1;
+      if (l.lead_rating >= 7) highRated.push(l);
+    }
+
+    res.json({
+      success: true,
+      total,
+      byStatus,
+      bySource,
+      newest,
+      highRated,
+      recent: leads.slice(0, 10),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
+// ── POST /api/leads/pfp — write a new lead (used by website booking, fleet chat hook, manual entry) ──
+app.post('/api/leads/pfp', async (req, res) => {
+  trackRequest('POST /api/leads/pfp');
+  try {
+    const { contact_name, contact_email, contact_phone, event_date, source, status, lead_rating, notes, company_name } = req.body;
+    if (!contact_name || !contact_email) {
+      return res.status(400).json({ success: false, error: 'contact_name and contact_email are required' });
+    }
+
+    // Check for duplicate by email
+    const existing = await queryLocalPg("SELECT id, status FROM pfp_leads WHERE contact_email = $1 LIMIT 1", [contact_email]);
+    if (existing.rows.length > 0) {
+      return res.json({
+        success: true,
+        existing: true,
+        id: existing.rows[0].id,
+        status: existing.rows[0].status,
+        message: 'Lead already exists (duplicate email)',
+      });
+    }
+
+    const result = await queryLocalPg(
+      `INSERT INTO pfp_leads (contact_name, contact_email, contact_phone, event_date, source, status, lead_rating, notes, company_name, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),NOW()) RETURNING id`,
+      [contact_name, contact_email, contact_phone || null, event_date || null, source || 'manual-entry', status || 'NEW', lead_rating || 5, notes || null, company_name || null]
+    );
+
+    res.json({ success: true, existing: false, id: result.rows[0].id });
   } catch (e) {
     res.json({ success: false, error: e.message });
   }
@@ -5273,13 +6180,40 @@ async function gatherFleetContext() {
       return await r.json();
     } catch (e) { return { error: e.message }; }
   };
-  const [health, monitor, ollama, recentMsgs, supervisor] = await Promise.all([
+  // Fetch cloud Eliza's tool definitions from the edge function (parallel with other health checks)
+  const cloudElizaFetch = async () => {
+    if (!SUPABASE_KEY) return { status: 'no_key' };
+    try {
+      const ceRes = await fetch(`${SUPABASE_URL}/functions/v1/ai-chat`, {
+        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!ceRes.ok) return { status: 'HTTP_' + ceRes.status };
+      const ceData = await ceRes.json();
+      return {
+        status: ceData.status,
+        tools_count: ceData.tools_available,
+        tools_names: ceData.tools_names || [],
+        tools_definitions: (ceData.tools_definitions || []).slice(0, 20),
+      };
+    } catch (e) {
+      return { status: 'fetch_error', error: e.message };
+    }
+  };
+
+  const [health, monitor, ollama, recentMsgs, supervisor, cloudElizaData] = await Promise.all([
     fetchJson('/health', 2000),
     fetchJson('/monitor', 12000),
     fetchJson('/ollama/health', 3000),
-    fetchJson('/api/fleet-chat/messages?limit=5', 2000),
+    fetchJson('/api/fleet-chat/messages?limit=20', 3000),
     fetchJson('/api/supervisor/status', 2000).catch(() => null),
+    cloudElizaFetch(),
   ]);
+
+  // Normalize cloud Eliza data
+  const cloudElizaTools = (cloudElizaData && cloudElizaData.status !== 'no_key' && cloudElizaData.status !== 'fetch_error')
+    ? cloudElizaData
+    : null;
 
   // Distill monitor.services down to status string per dependency
   const svc = (monitor && monitor.services) || {};
@@ -5312,10 +6246,10 @@ async function gatherFleetContext() {
     cpuPct: sys.cpu?.usage || 'unknown',
   };
 
-  // Recent fleet chat (last 5, condensed)
-  const recent = (recentMsgs?.messages || []).slice(-5).map(m => ({
+  // Recent fleet chat (last 20, with enough context to answer questions)
+  const recent = (recentMsgs?.messages || []).slice(-20).map(m => ({
     agent: m.agent,
-    text: (m.message || '').slice(0, 100),
+    text: (m.message || '').slice(0, 200),
   }));
 
   // Shared context from the database (shared memory for all agents)
@@ -5368,6 +6302,14 @@ async function gatherFleetContext() {
     } : null,
     recentFleetChat: recent,
     sharedContext, // agents can read this to answer questions about shared memory
+    cloudEliza: cloudElizaTools || { status: 'unreachable', note: 'Cloud edge function did not respond within 5s timeout or no SUPABASE_KEY set. Its tools are NOT available in this block.' },
+    // Tools available to agents — each tool can be called via POST /tools/run with body {"tool":"<name>","args":{...}}
+    // Agents: if data you need is not in this JSON block, call a tool to fetch it rather than saying "I don't know"
+    tools: Object.keys(toolHandlers).map(name => ({
+      name,
+      description: getToolDescription(name),
+      securityLevel: getToolLevel(name),
+    })),
   };
 }
 
@@ -5405,7 +6347,104 @@ async function routeFleetMessage(entry) {
   // Always log it
   logActivity('fleet-chat', entry.id, 'MSG', `[${entry.agentLabel}] ${entry.message.slice(0, 100)}`);
 
+  // ── Auto-write website booking requests to pfp_leads ─────────────
+  if (entry.message.includes('BOOKING REQUEST') || entry.message.includes('New booking request') || entry.message.includes('🛒 BOOKING')) {
+    const msg = entry.message;
+    const nameMatch = msg.match(/Name:\s*(.+)/i);
+    const emailMatch = msg.match(/Email:\s*(\S+)/i);
+    const phoneMatch = msg.match(/Phone:\s*([\d\-\(\)\s\+]+)/i);
+    const dateMatch = msg.match(/Event Date:\s*(.+)/i);
+    const priceMatch = msg.match(/Subtotal:\s*\$?([\d,\.]+)/i);
+    const contactName = nameMatch ? nameMatch[1].trim() : null;
+    const contactEmail = emailMatch ? emailMatch[1].trim() : null;
+    const contactPhone = phoneMatch ? phoneMatch[1].trim() : null;
+    const eventDateStr = dateMatch ? dateMatch[1].trim() : null;
+    const subtotal = priceMatch ? parseFloat(priceMatch[1].replace(/,/g, '')) : null;
+
+    // Try to parse event date into ISO
+    let eventDateIso = null;
+    if (eventDateStr) {
+      try {
+        const d = new Date(eventDateStr);
+        if (!isNaN(d.getTime())) eventDateIso = d.toISOString();
+      } catch {}
+    }
+
+    if (contactName && contactEmail) {
+      // Check if this email already exists in pfp_leads to avoid duplicates
+      try {
+        const existing = await queryLocalPg("SELECT id FROM pfp_leads WHERE contact_email = $1 LIMIT 1", [contactEmail]);
+        if (existing.rows.length === 0) {
+          const notes = msg.slice(0, 500);
+          await queryLocalPg(
+            "INSERT INTO pfp_leads (contact_name, contact_email, contact_phone, event_date, source, status, lead_rating, notes, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())",
+            [contactName, contactEmail, contactPhone, eventDateIso, 'website-booking', 'NEW', 8, notes]
+          );
+          addFleetMessage('system', `📋 Saved ${contactName} (${contactEmail}) to PFP leads database [website-booking].`, 'fleet');
+          console.log(`[pfp-leads] Auto-created lead from booking: ${contactName} <${contactEmail}>`);
+        }
+      } catch (e) {
+        console.log(`[pfp-leads] Auto-write error: ${e.message}`);
+      }
+    }
+  }
+
   // Helper: post an agent reply and recursively re-route it (chained conversation)
+  // ── Visible Tool Execution for Fleet Agents ────────────────────────
+  // Parses an agent's reply for a TOOL_CALL: {...} line, executes the tool
+  // via /tools/run, posts an interim message, and returns the result.
+  // Returns { executed: false } when no tool call is found.
+  async function executeAgentToolCall(agentName, reply, entry) {
+    // Match the FULL line after TOOL_CALL: — parse the entire JSON text (nested braces safe)
+    const toolCallLine = reply.split('\n').find(l => /^\s*TOOL_CALL:\s*\{/.test(l.trim()));
+    if (!toolCallLine) return { executed: false };
+    const jsonText = toolCallLine.replace(/^\s*TOOL_CALL:\s*/, '').trim();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch {
+      return { executed: false };
+    }
+    const toolName = parsed.tool;
+    const args = parsed.args || {};
+    if (!toolName || !toolHandlers[toolName]) return { executed: false };
+
+    // Authorize the agent
+    const toolLevel = getToolLevel(toolName);
+    const auth = checkToolAccess(agentName, toolName, toolLevel);
+    if (!auth.authorized) {
+      addFleetMessage('system', `⚠️ ${agentName} tried to call ${toolName} but was denied: ${auth.reason}`, 'fleet');
+      return { executed: false, error: auth.reason };
+    }
+
+    // Post interim via direct addFleetMessage (bypass postAndReRoute chain guard)
+    addFleetMessage('system', `🔧 ${agentName} requested \`${toolName}\` — executing...`, 'fleet');
+    console.log(`[agent-tool-exec] ${agentName} -> ${toolName} args=${JSON.stringify(args)}`);
+
+    // Execute via relay's own /tools/run
+    try {
+      const res = await fetch(`http://localhost:${PORT}/tools/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-agent-id': agentName },
+        body: JSON.stringify({ tool: toolName, args: { ...args, _agent: agentName } }),
+        signal: AbortSignal.timeout(30000),
+      });
+      const result = await res.json();
+
+      // Post interim result
+      const summary = result?.success === false
+        ? `❌ ${toolName} failed: ${String(result?.error || 'unknown error').slice(0, 150)}`
+        : `✅ ${toolName} → ${JSON.stringify(result).slice(0, 600)}`;
+      addFleetMessage('system', `🔧 ${agentName}: ${summary}`, 'fleet');
+
+      return { executed: true, toolName, args, result };
+    } catch (e) {
+      addFleetMessage('system', `⚠️ ${agentName}: ${toolName} tool error: ${e.message}`, 'fleet');
+      return { executed: true, toolName, args, error: e.message };
+    }
+  }
+
   async function postAndReRoute(agent, message, channel = 'fleet') {
     const guard = canAgentSpeak(agent, entry);
     if (!guard.allowed) {
@@ -5438,7 +6477,7 @@ async function routeFleetMessage(entry) {
       const sessionId = 'eliza-fleet-' + entry.agent;
       let contextHistory = '';
       try {
-        const convRes = await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access?session_id=' + sessionId + '&limit=10', {
+        const convRes = await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access?session_id=' + sessionId + '&limit=20', {
           signal: AbortSignal.timeout(3000),
         });
         const convData = await convRes.json();
@@ -5529,7 +6568,7 @@ async function routeFleetMessage(entry) {
       }
 
       // Build the full prompt with grounding + tool results
-      const fullPrompt = elizaMsg + '\n\nGROUNDING — Real-time system data (use ONLY these facts; if asked about leads/money/bookings not in this block, say "I don\'t have that data"):\n' + ctxJson + toolResultsBlock + '\n\nIMPORTANT: Read the `infrastructure` field first. The database is local Postgres, NOT cloud Supabase. Cloud Supabase is DEPRECATED. A "supabase" status of "error" or "unreachable" means the local-sb REST layer is down, not the cloud.\n\nReply in 1-2 sentences. Reference specific fields by name when you can. If a tool result block is present above, use that data — do NOT say you cannot browse/check/search. The data is already fetched.';
+      const fullPrompt = elizaMsg + '\n\nGROUNDING — Real-time system data:\n' + ctxJson + toolResultsBlock + '\n\nIMPORTANT: Read the `infrastructure` field first. The database is local Postgres, NOT cloud Supabase. Cloud Supabase is DEPRECATED. A "supabase" status of "error" or "unreachable" means the local-sb REST layer is down, not the cloud.\n\nIf you need information NOT in the grounding block, output a single line `TOOL_CALL: {"tool":"<name>","args":{...}}` on its own line. I will execute the tool, then come back for your final answer.\n\n**FORMAT RULE: Reply with ONLY the final answer — 1-2 sentences. No thinking aloud, no step-by-step reasoning, no "Let me analyze this", no "Here\'s what I found", no preamble. Just the answer. Be direct and specific. Reference data by name when you can.**';
 
       // Primary path: ai-chat edge function. Deepseek fallback is used when
       // ai-chat is unreachable.
@@ -5576,14 +6615,59 @@ async function routeFleetMessage(entry) {
           });
         } catch (e) { /* memory best-effort */ }
 
-        // Strip tool call syntax from Eliza's replies before posting to fleet chat
-        const cleanReply = elizaRes.reply
+        // Strip verbose thinking / preamble / tool-syntax from Eliza's reply
+        let cleanReply = elizaRes.reply;
+        // Remove thinking-like blocks: "I'll analyze", "Here's my reasoning", "Let me break this down", etc.
+        cleanReply = cleanReply.replace(/^(Let me analyze|I('ll| will) (analyze|break down|work through|start by|check on|look into)|Here('s| is) (my|the) (analysis|reasoning|breakdown|summary|verdict)).*?(?=\n[A-Z])/ims, '');
+        // Collapse "Oh wait", "Actually", "Hmm", "Well", preamble words at line start
+        cleanReply = cleanReply.replace(/^(Oh wait|Actually|Hmm|Well|So|Okay|Alright)[,\s]+/gim, '');
+        // Remove tool/syntax artifacts
+        cleanReply = cleanReply
           .replace(/\*\*[a-z_]+\*\*:\s*\{[^}]*\}/gs, '')
           .replace(/\*\*[a-z_]+\*\*:\s*<!DOCTYPE[^>]*>[^]*?(?=\n\*\*|$)/g, '')
           .replace(/^\*\*[a-z_]+\*\*:\s*.*$/gm, '')
           .replace(/\n{3,}/g, '\n\n')
           .trim();
-        await postAndReRoute('eliza', cleanReply || elizaRes.reply, 'fleet');
+
+        // Check for tool call in deepseek fallback reply
+        const elizaToolResult = await executeAgentToolCall('eliza', cleanReply || elizaRes.reply, entry);
+        if (elizaToolResult.executed) {
+          // Re-query deepseek with tool result for synthesis
+          const synthPrompt = fullPrompt + '\n\nYou called ' + elizaToolResult.toolName + ' and got: ' + JSON.stringify(elizaToolResult.result || elizaToolResult.error).slice(0, 1500) + '\n\nNow give your final answer (1-2 sentences):';
+          try {
+            const sR = await fetch('http://localhost:' + PORT + '/ollama/chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                message: synthPrompt,
+                model: 'deepseek-v4-flash:cloud',
+                temperature: 0.4,
+                maxTokens: 320,
+              }),
+              signal: AbortSignal.timeout(28000),
+            });
+            if (sR.ok) {
+              const sD = await sR.json();
+              if (sD?.response && sD.response.trim().length >= 4) {
+                let finalReply = sD.response.trim();
+                // Apply same thinking-strip
+                finalReply = finalReply.replace(/^(Let me analyze|I('ll| will) (analyze|break down|work through|start by|check on|look into)|Here('s| is) (my|the) (analysis|reasoning|breakdown|summary|verdict)).*?(?=\n[A-Z])/ims, '');
+                finalReply = finalReply.replace(/^(Oh wait|Actually|Hmm|Well|So|Okay|Alright)[,\s]+/gim, '');
+                finalReply = finalReply
+                  .replace(/\*\*[a-z_]+\*\*:\s*\{[^}]*\}/gs, '')
+                  .replace(/\*\*[a-z_]+\*\*:\s*<!DOCTYPE[^>]*>[^]*?(?=\n\*\*|$)/g, '')
+                  .replace(/^\*\*[a-z_]+\*\*:\s*.*$/gm, '')
+                  .replace(/\n{3,}/g, '\n\n')
+                  .trim();
+                await postAndReRoute('eliza', finalReply || sD.response, 'fleet');
+              }
+            }
+          } catch (e) {
+            console.log('[eliza-tool-synth] error:', e.message);
+          }
+        } else {
+          await postAndReRoute('eliza', cleanReply || elizaRes.reply, 'fleet');
+        }
         console.log('[routeFleetMessage] eliza reply set, len=' + (results.eliza?.message?.length || 0));
       }
     } catch (e) {
@@ -5640,26 +6724,51 @@ async function routeFleetMessage(entry) {
       // will happily invent "all systems nominal" with zero data.
       const ctx = await gatherFleetContext();
       const ctxJson = JSON.stringify(ctx, null, 0);
+      // Load conversation history from local memory
+      const vexSessionId = 'vex-fleet-' + entry.agent;
+      let contextHistory = '';
+      try {
+        const convRes = await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access?session_id=' + vexSessionId + '&limit=20', {
+          signal: AbortSignal.timeout(3000),
+        });
+        const convData = await convRes.json();
+        if (convData.messages && convData.messages.length > 0) {
+          contextHistory = '\n\nRecent conversation context:\n' + convData.messages.map(function(m) {
+            return '[' + m.agent + '] ' + m.content;
+          }).join('\n');
+        }
+      } catch (e) { /* memory best-effort */ }
+
+      // Store this message in conversation memory
+      try {
+        await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: vexSessionId, role: 'user', agent: entry.agentLabel, content: entry.message }),
+          signal: AbortSignal.timeout(3000),
+        });
+      } catch (e) { /* memory best-effort */ }
+
       const vexPersona = isInquiry
         ? `You are Vex, Joe Lee's primary AI agent. You work for Party Favor Photo (photo booth services in DC, VA, MD, Dallas/FW, PA/NJ) and XMRT DAO. Be sharp and direct. Respond as Vex to acknowledge the inquiry.`
         : `You are Vex, Joe Lee's primary AI agent — sharp, witty, and concise. You're chatting with the fleet. Address the message directly.`;
       const vexPrompt = `${vexPersona}
 
-GROUNDING — Real-time system data (these are facts, not guesses):
+GROUNDING — Real-time system data (these are facts, not guesses). The \`tools\` array lists every tool you can call:
 \`\`\`json
 ${ctxJson}
 \`\`\`
 
 GROUNDING RULES:
-- If a fact is in the JSON block, you may reference it.
-- If something is NOT in the JSON, say "I don't have that data" — DO NOT invent it.
+- If a fact is in the JSON block, reference it directly.
+- If something is NOT in the JSON but a tool in the \`tools\` array can help (web-search, db-query, db-rest, resend-inbox, shared-context, etc.), output a single line \`TOOL_CALL: {"tool":"<name>","args":{...}}\` on its own line. I will execute it, then come back for your final answer.
 - Read the \`infrastructure\` field first. It explains the architecture: the database is local Postgres, NOT cloud Supabase. Cloud Supabase is DEPRECATED. A \`supabase.status\` of "error" or "unreachable" means the local-sb REST layer is down, NOT the cloud database.
 - Never claim "all systems nominal" or "no anomalies" without a matching field in the JSON.
-- For questions about PFP leads, bookings, money, or campaigns: you CAN check the inbox by calling the resend_inbox tool (or resend-send-email to reply). If the tool is unavailable, say "I'd need to check the inbox/CRM" rather than fabricate.
+- For questions about PFP leads, bookings, money, or campaigns: use resend-inbox or db-query to check. For web info: use web-search or web-scrape. For DB queries: use db-query or db-rest. For shared agent memory: use shared-context.
 
-${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"
+${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"${contextHistory}
 
-Your response (1-2 sentences, no emoji sign-offs, no "—Eliza", no "o7"):`;
+Your response (1-2 sentences, no emoji sign-offs, no "—Vex", no "o7"):`;
       const r = await fetch('http://localhost:11434/api/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: vexPrompt, stream: false, options: { temperature: 0.5, max_tokens: 180 } }),
@@ -5671,7 +6780,49 @@ Your response (1-2 sentences, no emoji sign-offs, no "—Eliza", no "o7"):`;
         // Defensive: strip the "—Vex" sign-off Vex models sometimes add
         reply = reply.replace(/\s*—\s*Vex\s*$/i, '').replace(/\s+o7\s*$/i, '');
         if (reply && reply.length > 0) {
-          await postAndReRoute('vex', reply, 'fleet');
+          // Check for tool call — execute it then re-query for synthesis
+          const toolResult = await executeAgentToolCall('vex', reply, entry);
+          if (toolResult.executed) {
+            // Re-query Vex with tool result for final answer
+            const synthPrompt = vexPrompt + '\n\nYou called ' + toolResult.toolName + ' and got: ' + JSON.stringify(toolResult.result || toolResult.error).slice(0, 1500) + '\n\nNow give your final answer (1-2 sentences):';
+            try {
+              const sR = await fetch('http://localhost:11434/api/generate', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: synthPrompt, stream: false, options: { temperature: 0.5, max_tokens: 180 } }),
+                signal: AbortSignal.timeout(15000),
+              });
+              if (sR.ok) {
+                const sD = await sR.json();
+                let finalReply = (sD.response || '').trim();
+                finalReply = finalReply.replace(/\s*—\s*Vex\s*$/i, '').replace(/\s+o7\s*$/i, '');
+                if (finalReply && finalReply.length > 0) {
+                  // Store Vex's reply in conversation memory
+                  try {
+                    await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ session_id: vexSessionId, role: 'assistant', agent: 'Vex', content: finalReply }),
+                      signal: AbortSignal.timeout(3000),
+                    });
+                  } catch (e) { /* memory best-effort */ }
+                  await postAndReRoute('vex', finalReply, 'fleet');
+                }
+              }
+            } catch (e) {
+              console.log('[vex-tool-synth] error:', e.message);
+            }
+          } else {
+            // Store Vex's reply in conversation memory
+            try {
+              await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: vexSessionId, role: 'assistant', agent: 'Vex', content: reply }),
+                signal: AbortSignal.timeout(3000),
+              });
+            } catch (e) { /* memory best-effort */ }
+            await postAndReRoute('vex', reply, 'fleet');
+          }
         }
       }
     } catch (e) { console.log('[routeFleetMessage] vex error:', e.message); }
@@ -5682,21 +6833,46 @@ Your response (1-2 sentences, no emoji sign-offs, no "—Eliza", no "o7"):`;
   const mentionsAlice = /@alice/i.test(entry.message) || entry.channel === 'alice' || (entry.channel === 'fleet' && /@alice/i.test(entry.message));
   if ((entry.channel === 'all' && mentionsAlice) || entry.channel === 'alice' || (entry.channel === 'fleet' && mentionsAlice)) {
     try {
+      // Load conversation history from local memory
+      const aliceSessionId = 'alice-fleet-' + entry.agent;
+      let contextHistory = '';
+      try {
+        const convRes = await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access?session_id=' + aliceSessionId + '&limit=20', {
+          signal: AbortSignal.timeout(3000),
+        });
+        const convData = await convRes.json();
+        if (convData.messages && convData.messages.length > 0) {
+          contextHistory = '\n\nRecent conversation context:\n' + convData.messages.map(function(m) {
+            return '[' + m.agent + '] ' + m.content;
+          }).join('\n');
+        }
+      } catch (e) { /* memory best-effort */ }
+
+      // Store this message in conversation memory
+      try {
+        await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: aliceSessionId, role: 'user', agent: entry.agentLabel, content: entry.message }),
+          signal: AbortSignal.timeout(3000),
+        });
+      } catch (e) { /* memory best-effort */ }
+
       const ctx = await gatherFleetContext();
       const ctxJson = JSON.stringify(ctx, null, 0);
       const alicePrompt = `You are Alice, Joe Lee's desktop sidecar agent. You're terse, observational, and screenshot-aware. You notice things. You don't fluff.
 
-GROUNDING — Real-time data (use only these facts):
+GROUNDING — Real-time data. The \`tools\` array lists every tool you can call:
 \`\`\`json
 ${ctxJson}
 \`\`\`
 
 GROUNDING RULES:
 - Reference specific fields (e.g. "relay uptime: 1234s", "supabase unreachable") only when they're in the JSON.
-- If asked about something the JSON doesn't cover (emails, leads, money), say "not in my view" — don't make it up. (Note: you CAN check the inbox via the resend_inbox tool if needed.)
+- If something is NOT in the JSON but a tool in the \`tools\` array can fetch it (resend-inbox, db-query, db-rest, shared-context, web-search), output a single line \`TOOL_CALL: {"tool":"<name>","args":{...}}\` on its own line. I will execute it, then come back for your final answer.
 - One short sentence. Sharp and direct. No emoji sign-offs.
 
-${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"`;
+${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"${contextHistory}`;
       const r = await fetch('http://localhost:11434/api/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: alicePrompt, stream: false, options: { temperature: 0.4, max_tokens: 120 } }),
@@ -5707,7 +6883,48 @@ ${entry.agentLabel} said: "${entry.message.replace(/"/g, "'")}"`;
         let reply = (d.response || '').trim();
         reply = reply.replace(/\s*—\s*Alice\s*$/i, '').replace(/\s+o7\s*$/i, '');
         if (reply && reply.length > 0) {
-          await postAndReRoute('alice', reply, 'fleet');
+          // Check for tool call — execute it then re-query for synthesis
+          const toolResult = await executeAgentToolCall('alice', reply, entry);
+          if (toolResult.executed) {
+            const synthPrompt = alicePrompt + '\n\nYou called ' + toolResult.toolName + ' and got: ' + JSON.stringify(toolResult.result || toolResult.error).slice(0, 1500) + '\n\nNow give your final answer (one short sentence):';
+            try {
+              const sR = await fetch('http://localhost:11434/api/generate', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: 'deepseek-v4-flash:cloud', prompt: synthPrompt, stream: false, options: { temperature: 0.4, max_tokens: 120 } }),
+                signal: AbortSignal.timeout(12000),
+              });
+              if (sR.ok) {
+                const sD = await sR.json();
+                let finalReply = (sD.response || '').trim();
+                finalReply = finalReply.replace(/\s*—\s*Alice\s*$/i, '').replace(/\s+o7\s*$/i, '');
+                if (finalReply && finalReply.length > 0) {
+                  // Store Alice's reply in conversation memory
+                  try {
+                    await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ session_id: aliceSessionId, role: 'assistant', agent: 'Alice', content: finalReply }),
+                      signal: AbortSignal.timeout(3000),
+                    });
+                  } catch (e) { /* memory best-effort */ }
+                  await postAndReRoute('alice', finalReply, 'fleet');
+                }
+              }
+            } catch (e) {
+              console.log('[alice-tool-synth] error:', e.message);
+            }
+          } else {
+            // Store Alice's reply in conversation memory
+            try {
+              await fetch('http://localhost:' + PORT + '/api/v1/functions/conversation-access', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: aliceSessionId, role: 'assistant', agent: 'Alice', content: reply }),
+                signal: AbortSignal.timeout(3000),
+              });
+            } catch (e) { /* memory best-effort */ }
+            await postAndReRoute('alice', reply, 'fleet');
+          }
         }
       }
     } catch (e) { console.log('[routeFleetMessage] alice error:', e.message); }
@@ -6410,46 +7627,90 @@ const POOL_CACHE_TTL = 60_000;
 async function fetchSupportXMRStats() {
   const cached = state.get(POOL_CACHE_KEY);
   if (cached && (Date.now() - cached.ts) < POOL_CACHE_TTL) return cached;
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 5000);
-  try {
-    const r = await fetch(`${XMRT_POOL_URL}/${XMRT_POOL_WALLET}/stats`, { signal: ctrl.signal });
-    clearTimeout(t);
-    if (!r.ok) throw new Error('supportxmr http ' + r.status);
-    const data = await r.json();
-    // data.amtPaid / data.amtDue are in atomic units (1e12 = 1 XMR)
-    const out = {
-      pool: 'supportxmr.com',
-      wallet: XMRT_POOL_WALLET,
-      hashrate: data.hash || 0,
-      miners: data.workers ? data.workers.length : 0,
-      active_workers: data.active_workers || 0,
-      total_registered_workers: data.total_registered_workers || 0,
-      validShares: data.validShares || 0,
-      invalidShares: data.invalidShares || 0,
-      totalHashes: data.totalHashes || 0,
-      lastHash: data.lastHash || 0,
-      txnCount: data.txnCount || 0,
-      // Atomic units (12-decimal) — the dashboard JS divides these by 1e12
-      amtPaid: data.amtPaid || 0,
-      amtDue: data.amtDue || 0,
-      amountPaid: data.amtPaid || 0,
-      amountDue: data.amtDue || 0,
-      // Convenience: pre-converted XMR
-      amtPaidXMR: (data.amtPaid || 0) / 1e12,
-      amtDueXMR: (data.amtDue || 0) / 1e12,
-      lastBlock: data.lastHash || 0,
-      poolFee: '0.5%',
-      status: 'online',
-      source: 'supportxmr',
-      fetchedAt: new Date().toISOString(),
-    };
-    state.set(POOL_CACHE_KEY, { ...out, ts: Date.now() });
-    return out;
-  } catch (e) {
-    clearTimeout(t);
-    return { pool: 'supportxmr.com', wallet: XMRT_POOL_WALLET, status: 'unreachable', error: e.message, hashrate: 0, amtPaid: 0, amtDue: 0 };
-  }
+  const POOL_URL = 'https://www.supportxmr.com/api/pool/stats';
+  const WALLET_URL = `${XMRT_POOL_URL}/${XMRT_POOL_WALLET}/stats`;
+  // Fetch pool-level and wallet-level stats concurrently
+  const [pool, wallet] = await fetchMultipleOrFallback([POOL_URL, WALLET_URL], 6000);
+  // Parse pool-level response (the /pool/stats endpoint wraps data in pool_statistics)
+  const poolData = pool?.pool_statistics || {};
+  // Parse wallet-level response
+  const data = wallet || {};
+  const amtDueXMR = (data.amtDue || 0) / 1e12;
+  const amtPaidXMR = (data.amtPaid || 0) / 1e12;
+  // Compute last-hash freshness for offline detection
+  const lastHashTs = data.lastHash || 0;
+  const minutesSinceLastHash = lastHashTs > 0 ? (Date.now() / 1000 - lastHashTs) / 60 : null;
+  const TREASURY_SHARE = 0.85;
+  const OPERATIONAL_SHARE = 0.15;
+  const out = {
+    pool: 'supportxmr.com',
+    wallet: XMRT_POOL_WALLET,
+    hashrate: data.hash || 0,
+    // ── Global pool stats (from /pool/stats) ──
+    pool_hashrate: poolData.hashRate || 0,
+    pool_hashrate_mhs: Math.round((poolData.hashRate || 0) / 1e6 * 100) / 100,
+    pool_total_miners: poolData.miners || 0,
+    pool_total_blocks: poolData.totalBlocksFound || 0,
+    pool_last_block_time: poolData.lastBlockFoundTime || 0,
+    pool_last_block_timestamp: poolData.lastBlockFoundTime ? new Date(poolData.lastBlockFoundTime * 1000).toISOString() : null,
+    pool_total_miners_paid: poolData.totalMinersPaid || 0,
+    pool_total_payments: poolData.totalPayments || 0,
+    pool_round_hashes: poolData.roundHashes || 0,
+    pool_total_hashes: poolData.totalHashes || 0,
+    // ── Wallet-level stats ──
+    miners: data.workers ? data.workers.length : 0,
+    active_workers: data.active_workers || 0,
+    total_registered_workers: data.total_registered_workers || 0,
+    validShares: data.validShares || 0,
+    invalidShares: data.invalidShares || 0,
+    totalHashes: data.totalHashes || 0,
+    lastHash: lastHashTs,
+    txnCount: data.txnCount || 0,
+    // Offline detection
+    minutes_since_last_hash: minutesSinceLastHash !== null ? Math.round(minutesSinceLastHash * 10) / 10 : null,
+    mining_status: minutesSinceLastHash !== null && minutesSinceLastHash <= 30 ? 'active' : (minutesSinceLastHash !== null ? 'offline' : 'unknown'),
+    // Atomic units (12-decimal) — the dashboard JS divides these by 1e12
+    amtPaid: data.amtPaid || 0,
+    amtDue: data.amtDue || 0,
+    amountPaid: data.amtPaid || 0,
+    amountDue: data.amtDue || 0,
+    // Convenience: pre-converted XMR
+    amtPaidXMR,
+    amtDueXMR,
+    // Treasury allocation (85% treasury / 15% operational)
+    treasury_share: TREASURY_SHARE,
+    operational_share: OPERATIONAL_SHARE,
+    treasury_allocation_xmr: Math.round(amtDueXMR * TREASURY_SHARE * 1e8) / 1e8,
+    operational_allocation_xmr: Math.round(amtDueXMR * OPERATIONAL_SHARE * 1e8) / 1e8,
+    lastBlock: data.lastHash || 0,
+    poolFee: '0.5%',
+    status: 'online',
+    source: 'supportxmr',
+    fetchedAt: new Date().toISOString(),
+    // Ecosystem health booleans
+    ecosystem_health: {
+      mining_active: minutesSinceLastHash !== null && minutesSinceLastHash <= 30,
+      pool_healthy: (poolData.miners || 0) > 1000,
+      revenue_generating: amtDueXMR > 0,
+      api_accessible: !(!pool && !wallet),
+    },
+  };
+  state.set(POOL_CACHE_KEY, { ...out, ts: Date.now() });
+  return out;
+}
+
+// Fetch multiple URLs concurrently, returning null for failures instead of throwing
+async function fetchMultipleOrFallback(urls, timeoutMs) {
+  const controllers = urls.map(() => new AbortController());
+  const timer = setTimeout(() => controllers.forEach(c => c.abort()), timeoutMs);
+  const results = await Promise.allSettled(
+    urls.map((url, i) =>
+      fetch(url, { signal: controllers[i].signal })
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`http ${r.status}`)))
+    )
+  );
+  clearTimeout(timer);
+  return results.map(r => r.status === 'fulfilled' ? r.value : null);
 }
 // ── Pool Identifiers (active worker list) ───────────────────
 const POOL_IDS_CACHE_KEY = 'mining.pool.identifiers';

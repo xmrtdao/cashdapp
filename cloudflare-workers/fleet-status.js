@@ -37,7 +37,7 @@ async function getFleetStatus() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jsonrpc: "2.0", id: "1", method: "get_info" }),
       }),
-      supabase: await checkHealth("supabase", "https://vawouugtzwmejxqkeqqj.supabase.co"),
+      supabase: await checkHealth("supabase", "https://relay.mobilemonero.com/health"),
       mtv_lyrics: await checkHealth("mtv_lyrics", "https://mtv-lyrics.mobilemonero.com/health"),
     },
     ts: Date.now(),

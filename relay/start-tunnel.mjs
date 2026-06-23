@@ -24,7 +24,7 @@ const RELAY_PORT = 8080;
 const CONFIG = 'C:\\Users\\PureTrek\\.cloudflared\\config.yml';
 const PERMANENT_URL = 'https://relay.mobilemonero.com';
 
-// Resend API — Two separate accounts
+// Resend API — Three accounts (PFP + XMRT unused + 31harbor)
 const RESEND_API_KEY = (() => {
   try {
     const env = readFileSync(join(__dirname, '.env'), 'utf8');
@@ -46,12 +46,27 @@ const RESEND_XMRT_API_KEY = (() => {
 // points at Supabase (`resend-webhook-proxy` edge function) directly.
 // The XMRT block was removed — if it needs to come back, recreate
 // the webhook in the XMRT Resend account and re-add an entry here.
+const RESEND_31HARBOR_API_KEY = (() => {
+  try {
+    const env = readFileSync(join(__dirname, '.env'), 'utf8');
+    const match = env.match(/^RESEND_31HARBOR_API_KEY=(.+)$/m);
+    return match ? match[1].trim() : null;
+  } catch { return null; }
+})();
+
 const ACCOUNTS = [
   {
     label: 'PFP',
     key: RESEND_API_KEY,
     webhooks: [
-      { id: 'cb2efb70-490c-42a8-bce2-352d3b801620', path: '/webhook/resend-inbound' },
+      { id: 'cb2efb70-490c-42a8-bce2-352d3b801620', path: '/webhook/resend-inbound', baseUrl: PERMANENT_URL },
+    ],
+  },
+  {
+    label: '31harbor',
+    key: RESEND_31HARBOR_API_KEY,
+    webhooks: [
+      { id: 'd443cd29-f51c-4d66-ba65-5170680c96c3', path: '/webhook/resend-inbound', baseUrl: 'https://inbox.31harbor.com' },
     ],
   },
 ];
@@ -69,7 +84,7 @@ async function updateResendWebhooks() {
   for (const acct of ACCOUNTS) {
     if (!acct.key) { log(`  ${acct.label}: No API key — skip`); continue; }
     for (const wh of acct.webhooks) {
-      const endpoint = `${PERMANENT_URL}${wh.path}`;
+      const endpoint = `${wh.baseUrl}${wh.path}`;
       try {
         const res = await fetch(`https://api.resend.com/webhooks/${wh.id}`, {
           method: 'PATCH',

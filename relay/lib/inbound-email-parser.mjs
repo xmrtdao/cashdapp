@@ -57,7 +57,7 @@ function loadEnv() {
 }
 loadEnv();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://vawouugtzwmejxqkeqqj.supabase.co';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'http://127.0.0.1:54321';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const RELAY_PORT = process.env.RELAY_PORT || '8080';
 const ALICE_ID = 'alice-sidecar';

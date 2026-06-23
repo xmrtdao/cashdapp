@@ -45,7 +45,7 @@ async function handleRequest(request) {
       routes: {
         "/health": "GET health check",
         "/relay": "→ relay.mobilemonero.com:9090",
-        "/supabase/*": "→ vawouugtzwmejxqkeqqj.supabase.co",
+        "/supabase/*": "→ relay.mobilemonero.com/supabase",
         "/hf/*": "→ huggingface.co",
         "/github/*": "→ api.github.com",
         "/minimax/*": "→ api.minimaxi.chat",
@@ -58,7 +58,7 @@ async function handleRequest(request) {
   if (path.startsWith("/relay")) {
     targetUrl = "http://relay.mobilemonero.com:9090" + path.slice("/relay".length) + url.search;
   } else if (path.startsWith("/supabase/")) {
-    targetUrl = "https://vawouugtzwmejxqkeqqj.supabase.co" + path.slice("/supabase".length) + url.search;
+    targetUrl = "https://relay.mobilemonero.com" + path.slice("/supabase".length) + url.search;
   } else if (path.startsWith("/hf/")) {
     targetUrl = "https://huggingface.co" + path.slice("/hf".length) + url.search;
   } else if (path.startsWith("/github/")) {

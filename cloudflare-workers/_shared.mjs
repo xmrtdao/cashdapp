@@ -8,7 +8,7 @@
  *   htmlResponse, loginHTML, pageShell, escapeHtml, SUPABASE_URL, CORS, certCache
  */
 
-export const SUPABASE_URL = "https://vawouugtzwmejxqkeqqj.supabase.co/functions/v1";
+export const SUPABASE_URL = "https://relay.mobilemonero.com/functions/v1";
 const CERT_VERIFY_PATH = "/xmrt-university";
 const CACHE_TTL_MS = 60_000;
 

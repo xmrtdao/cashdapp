@@ -20,6 +20,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { startpageSearch, fetchUrl } from './search-provider.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '..', '..', 'relay-data');
@@ -128,27 +129,7 @@ function log(msg) {
   fs.appendFileSync(LOG_FILE, entry);
 }
 
-const SUPABASE_API = 'https://vawouugtzwmejxqkeqqj.supabase.co/functions/v1';
-
 // ── WEB SCRAPING ─────────────────────────────────────────
-function getKey() {
-  return process.env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE_KEY;
-}
-
-async function exploreTopic(seedTopic) {
-  const KEY = getKey();
-  if (!KEY) return { insights: [] };
-  try {
-    const resp = await fetch(`${SUPABASE_API}/explore-curiosity`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ seed_topic: seedTopic })
-    });
-    return await resp.json();
-  } catch {
-    return { insights: [] };
-  }
-}
 
 function extractEmails(text) {
   const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
@@ -185,25 +166,35 @@ function extractNames(text) {
 
 async function scrapeRegion(region, query) {
   log(`Scraping ${region}: ${query}`);
-  const data = await exploreTopic(query);
   const contacts = [];
-  
-  const sources = data.insights || [];
-  for (const s of sources.slice(0, 8)) {
-    const text = `${s.title || ''} ${(s.highlights || []).join(' ')}`;
-    const emails = extractEmails(text);
-    for (const email of emails) {
-      contacts.push({
-        email,
-        source: s.url || region,
-        query,
-        added: new Date().toISOString(),
-        region,
-        topics: (s.discovered_topics || []).join(', '),
-        status: 'pending',
-      });
+
+  try {
+    const urls = await startpageSearch(query);
+    const pageUrls = urls.slice(0, 6);
+
+    for (const url of pageUrls) {
+      try {
+        const html = await fetchUrl(url);
+        const emails = extractEmails(html);
+        for (const email of emails) {
+          contacts.push({
+            email,
+            source: url,
+            query,
+            added: new Date().toISOString(),
+            region,
+            topics: query,
+            status: 'pending',
+          });
+        }
+      } catch {
+        // skip failed URL
+      }
     }
+  } catch {
+    // skip failed search
   }
+
   return contacts;
 }
 
