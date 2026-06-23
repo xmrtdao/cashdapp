@@ -1,0 +1,647 @@
+[
+  {
+    "id": 81,
+    "schedule": "*/30 * * * *",
+    "type": "sql",
+    "name": "batch-vectorize-memories",
+    "sql": "SELECT public.batch_vectorize_memories();",
+    "desc": "Batch vectorizes all new memories"
+  },
+  {
+    "id": 218,
+    "schedule": "3,13,23,33,43,53 * * * *",
+    "type": "ef",
+    "name": "vectorize-memory",
+    "fn": "vectorize-memory",
+    "body": {},
+    "desc": "Real-time memory vectorization"
+  },
+  {
+    "id": 207,
+    "schedule": "8,23,38,53 * * * *",
+    "type": "ef",
+    "name": "summarize-conversation",
+    "fn": "summarize-conversation",
+    "body": {},
+    "desc": "Summarizes conversations for context recall",
+    "disabled": true,
+    "note": "Duplicate of 202 (summarize-conversation-fast, */5). */5 is denser"
+  },
+  {
+    "id": 202,
+    "schedule": "*/5 * * * *",
+    "type": "ef",
+    "name": "summarize-conversation-fast",
+    "fn": "summarize-conversation",
+    "body": {},
+    "desc": "Conversation summarizer (5min cadence) — KEEPER of summarize-conversation family"
+  },
+  {
+    "id": 198,
+    "schedule": "*/15 * * * *",
+    "type": "sql",
+    "name": "check-knowledge-drift",
+    "sql": "SELECT public.check_knowledge_snippet_drift_and_alert();",
+    "desc": "Detects when knowledge goes stale"
+  },
+  {
+    "id": 199,
+    "schedule": "*/15 * * * *",
+    "type": "sql",
+    "name": "repair-knowledge-drift",
+    "sql": "SELECT public.repair_then_alert_knowledge_snippet_drift();",
+    "desc": "Auto-repairs stale knowledge"
+  },
+  {
+    "id": 204,
+    "schedule": "4,24,44 * * * *",
+    "type": "ef",
+    "name": "extract-knowledge",
+    "fn": "extract-knowledge",
+    "body": {},
+    "desc": "Extracts knowledge from conversations"
+  },
+  {
+    "id": 200,
+    "schedule": "*/10 * * * *",
+    "type": "ef",
+    "name": "learning-cycle",
+    "fn": "learning-cycle",
+    "body": {},
+    "desc": "Learning cycle processing"
+  },
+  {
+    "id": 201,
+    "schedule": "*/5 * * * *",
+    "type": "sql",
+    "name": "requeue-failed-vectorize",
+    "sql": "SELECT * FROM public.requeue_safe_failed_vectorize_jobs(3, interval '7 days', 100);",
+    "desc": "Retries failed vectorization"
+  },
+  {
+    "id": 82,
+    "schedule": "0 2 * * *",
+    "type": "sql",
+    "name": "generate-conversation-insights",
+    "sql": "SELECT public.generate_conversation_insights();",
+    "desc": "Deep conversation insight generation (daily 2AM)"
+  },
+  {
+    "id": 105,
+    "schedule": "9,24,39,54 * * * *",
+    "type": "sql",
+    "name": "refresh-conversation-view",
+    "sql": "SELECT count(*) FROM public.recent_conversation_messages;",
+    "desc": "Keeps conversation view current (local-sb: base table, COUNT only)"
+  },
+  {
+    "id": 170,
+    "schedule": "2,17,32,47 * * * *",
+    "type": "ef",
+    "name": "task-auto-advance",
+    "fn": "task-auto-advance",
+    "body": {},
+    "desc": "Auto-advances pending tasks",
+    "disabled": true,
+    "note": "Duplicate of 169 (task-auto-advance-fast, */10)"
+  },
+  {
+    "id": 197,
+    "schedule": "9,39 * * * *",
+    "type": "ef",
+    "name": "task-auto-advance-batch",
+    "fn": "task-auto-advance",
+    "body": {
+      "action": "run_all"
+    },
+    "desc": "Batch task auto-advance",
+    "disabled": true,
+    "note": "Duplicate of 169 (task-auto-advance-fast, */10)"
+  },
+  {
+    "id": 169,
+    "schedule": "*/10 * * * *",
+    "type": "ef",
+    "name": "task-auto-advance-fast",
+    "fn": "task-auto-advance",
+    "body": {},
+    "desc": "Task auto-advance (10min) — KEEPER of task-auto-advance family"
+  },
+  {
+    "id": 83,
+    "schedule": "*/10 * * * *",
+    "type": "ef",
+    "name": "task-orchestrator-assign",
+    "fn": "task-orchestrator",
+    "body": {
+      "action": "auto_assign_tasks"
+    },
+    "desc": "Auto-assigns tasks"
+  },
+  {
+    "id": 84,
+    "schedule": "0,15,30,45 * * * *",
+    "type": "ef",
+    "name": "task-orchestrator-rebalance",
+    "fn": "task-orchestrator",
+    "body": {
+      "action": "rebalance_workload"
+    },
+    "desc": "Rebalances workload across agents"
+  },
+  {
+    "id": 85,
+    "schedule": "0,10,20,30,40,50 * * * *",
+    "type": "ef",
+    "name": "task-orchestrator-blockers",
+    "fn": "task-orchestrator",
+    "body": {
+      "action": "identify_blockers"
+    },
+    "desc": "Identifies task blockers"
+  },
+  {
+    "id": 86,
+    "schedule": "14 * * * *",
+    "type": "ef",
+    "name": "task-orchestrator-report",
+    "fn": "task-orchestrator",
+    "body": {
+      "action": "performance_report"
+    },
+    "desc": "Performance report"
+  },
+  {
+    "id": 181,
+    "schedule": "3,13,23,33,43,53 * * * *",
+    "type": "ef",
+    "name": "suite-task-automation-engine",
+    "fn": "suite-task-automation-engine",
+    "body": {
+      "action": "run_all"
+    },
+    "desc": "Suite task automation engine"
+  },
+  {
+    "id": 168,
+    "schedule": "18,48 * * * *",
+    "type": "ef",
+    "name": "suite-task-automation-alt",
+    "fn": "suite-task-automation-engine",
+    "body": {
+      "action": "run_all"
+    },
+    "desc": "Suite task automation (alt schedule)",
+    "disabled": true,
+    "note": "Duplicate of 181 (suite-task-automation-engine, */10)"
+  },
+  {
+    "id": 182,
+    "schedule": "4,19,34,49 * * * *",
+    "type": "ef",
+    "name": "suite-task-auto-engine",
+    "fn": "suite-task-automation-engine",
+    "body": {
+      "action": "run_all"
+    },
+    "desc": "Suite task automation (quad schedule)",
+    "disabled": true,
+    "note": "Duplicate of 181 (suite-task-automation-engine, */10)"
+  },
+  {
+    "id": 178,
+    "schedule": "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
+    "type": "sql",
+    "name": "agent-work-executor",
+    "sql": "SELECT app.run_agent_work_executor(5);",
+    "desc": "Runs agent work executor (every 5min)"
+  },
+  {
+    "id": 179,
+    "schedule": "0 * * * *",
+    "type": "sql",
+    "name": "github-issue-scanner",
+    "sql": "SELECT app.run_github_issue_scanner();",
+    "desc": "Scans GitHub for new issues"
+  },
+  {
+    "id": 87,
+    "schedule": "0 */6 * * *",
+    "type": "ef",
+    "name": "ecosystem-monitor-evaluate",
+    "fn": "ecosystem-monitor",
+    "body": {
+      "action": "self_evaluate"
+    },
+    "desc": "Ecosystem self-evaluation (every 6h)",
+    "disabled": true,
+    "note": "Overlap with 95+97 (daily 11am). 6h cadence redundant with daily self_evaluate"
+  },
+  {
+    "id": 95,
+    "schedule": "0 11 * * *",
+    "type": "ef",
+    "name": "ecosystem-monitor-daily",
+    "fn": "ecosystem-monitor",
+    "body": {},
+    "desc": "Daily ecosystem monitor",
+    "disabled": true,
+    "note": "Duplicate of 97 (ecosystem-monitor-tasks). 97 does same + generates tasks"
+  },
+  {
+    "id": 97,
+    "schedule": "0 11 * * *",
+    "type": "ef",
+    "name": "ecosystem-monitor-tasks",
+    "fn": "ecosystem-monitor",
+    "body": {
+      "generate_tasks": true
+    },
+    "desc": "Ecosystem monitor with task generation — KEEPER of ecosystem-monitor family"
+  },
+  {
+    "id": 89,
+    "schedule": "*/10 * * * *",
+    "type": "ef",
+    "name": "code-monitor-daemon",
+    "fn": "code-monitor-daemon",
+    "body": {
+      "action": "monitor"
+    },
+    "desc": "Code monitor daemon (10min)"
+  },
+  {
+    "id": 153,
+    "schedule": "*/10 * * * *",
+    "type": "sql",
+    "name": "check-agent-heartbeats",
+    "sql": "SELECT util.check_agent_heartbeats();",
+    "desc": "Checks agent heartbeats"
+  },
+  {
+    "id": 174,
+    "schedule": "*/5 * * * *",
+    "type": "sql",
+    "name": "capture-lock-blockers",
+    "sql": "SELECT util.capture_lock_blockers();",
+    "desc": "Captures lock blockers"
+  },
+  {
+    "id": 192,
+    "schedule": "*/10 * * * *",
+    "type": "ef",
+    "name": "video-job-processor",
+    "fn": "video-job-processor",
+    "body": {},
+    "desc": "Processes video jobs (every 10min)"
+  },
+  {
+    "id": 205,
+    "schedule": "6,21,36,51 * * * *",
+    "type": "ef",
+    "name": "monitor-device-connections",
+    "fn": "monitor-device-connections",
+    "body": {},
+    "desc": "Monitors device connections (every 15min)"
+  },
+  {
+    "id": 206,
+    "schedule": "9 */2 * * *",
+    "type": "ef",
+    "name": "predictive-analytics",
+    "fn": "predictive-analytics",
+    "body": {},
+    "desc": "Runs predictive analytics (every 2h)"
+  },
+  {
+    "id": 141,
+    "schedule": "0 9 * * *",
+    "type": "sql",
+    "name": "trigger-daily-discussion",
+    "sql": "SELECT public.trigger_daily_discussion_post();",
+    "desc": "Triggers daily discussion post"
+  },
+  {
+    "id": 90,
+    "schedule": "0 8 * * *",
+    "type": "ef",
+    "name": "morning-discussion-post",
+    "fn": "morning-discussion-post",
+    "body": {},
+    "desc": "Morning discussion post",
+    "disabled": true,
+    "note": "Requires cloud Supabase functions.invoke('github-integration') — not available in local stack. Re-enable when cloud Supabase is reachable."
+  },
+  {
+    "id": 88,
+    "schedule": "0 15 * * *",
+    "type": "ef",
+    "name": "daily-discussion-post",
+    "fn": "daily-discussion-post",
+    "body": {},
+    "desc": "Daily discussion post",
+    "disabled": true,
+    "note": "Requires cloud Supabase functions.invoke('github-integration') — not available in local stack. Re-enable when cloud Supabase is reachable."
+  },
+  {
+    "id": 91,
+    "schedule": "0 9 * * *",
+    "type": "ef",
+    "name": "progress-update-post",
+    "fn": "progress-update-post",
+    "body": {},
+    "desc": "Progress update post",
+    "disabled": true,
+    "note": "Requires cloud Supabase functions.invoke('github-integration') — not available in local stack. Re-enable when cloud Supabase is reachable."
+  },
+  {
+    "id": 92,
+    "schedule": "0 20 * * *",
+    "type": "ef",
+    "name": "evening-summary-post",
+    "fn": "evening-summary-post",
+    "body": {},
+    "desc": "Evening summary post",
+    "disabled": true,
+    "note": "Requires cloud Supabase functions.invoke('github-integration') — not available in local stack. Re-enable when cloud Supabase is reachable."
+  },
+  {
+    "id": 93,
+    "schedule": "0 16 * * 5",
+    "type": "ef",
+    "name": "weekly-retrospective-post",
+    "fn": "weekly-retrospective-post",
+    "body": {},
+    "desc": "Weekly retrospective post (Fri 4PM)",
+    "disabled": true,
+    "note": "Requires cloud Supabase functions.invoke('github-integration') — not available in local stack. Re-enable when cloud Supabase is reachable."
+  },
+  {
+    "id": 94,
+    "schedule": "0 14 * * 3",
+    "type": "ef",
+    "name": "community-spotlight-post",
+    "fn": "community-spotlight-post",
+    "body": {},
+    "desc": "Community spotlight post (Wed)",
+    "disabled": true,
+    "note": "Requires cloud Supabase functions.invoke('github-integration') — not available in local stack. Re-enable when cloud Supabase is reachable."
+  },
+  {
+    "id": 195,
+    "schedule": "0 0 * * *",
+    "type": "ef",
+    "name": "daily-news-finder",
+    "fn": "daily-news-finder",
+    "body": {},
+    "desc": "Daily news finder (midnight)"
+  },
+  {
+    "id": 211,
+    "schedule": "0 5 * * *",
+    "type": "ef",
+    "name": "superduper-design-brand",
+    "fn": "superduper-design-brand",
+    "body": {},
+    "desc": "Superduper brand design agent"
+  },
+  {
+    "id": 215,
+    "schedule": "25 */2 * * *",
+    "type": "ef",
+    "name": "superduper-integration",
+    "fn": "superduper-integration",
+    "body": {},
+    "desc": "Superduper integration agent"
+  },
+  {
+    "id": 208,
+    "schedule": "15 */4 * * *",
+    "type": "ef",
+    "name": "superduper-business-growth",
+    "fn": "superduper-business-growth",
+    "body": {},
+    "desc": "Superduper business growth agent"
+  },
+  {
+    "id": 212,
+    "schedule": "0 9 * * 1-5",
+    "type": "ef",
+    "name": "superduper-development-coach",
+    "fn": "superduper-development-coach",
+    "body": {},
+    "desc": "Superduper dev coach (weekdays)"
+  },
+  {
+    "id": 216,
+    "schedule": "18 * * * *",
+    "type": "ef",
+    "name": "superduper-research-intelligence",
+    "fn": "superduper-research-intelligence",
+    "body": {},
+    "desc": "Superduper research intelligence"
+  },
+  {
+    "id": 209,
+    "schedule": "22 */6 * * *",
+    "type": "ef",
+    "name": "superduper-communication-outreach",
+    "fn": "superduper-communication-outreach",
+    "body": {},
+    "desc": "Superduper comms outreach"
+  },
+  {
+    "id": 213,
+    "schedule": "30 8 * * 1-5",
+    "type": "ef",
+    "name": "superduper-domain-experts",
+    "fn": "superduper-domain-experts",
+    "body": {},
+    "desc": "Superduper domain experts (weekdays)"
+  },
+  {
+    "id": 217,
+    "schedule": "0 2 * * *",
+    "type": "ef",
+    "name": "superduper-router",
+    "fn": "superduper-router",
+    "body": {},
+    "desc": "Superduper router (daily 2AM)",
+    "disabled": true,
+    "note": "Requires x-eliza-key or Authorization header. Re-enable when INTERNAL_ELIZA_KEY is set or cron uses service-role key."
+  },
+  {
+    "id": 210,
+    "schedule": "0 7,19 * * *",
+    "type": "ef",
+    "name": "superduper-content-media",
+    "fn": "superduper-content-media",
+    "body": {},
+    "desc": "Superduper content media"
+  },
+  {
+    "id": 214,
+    "schedule": "0 6 * * *",
+    "type": "ef",
+    "name": "superduper-finance-investment",
+    "fn": "superduper-finance-investment",
+    "body": {},
+    "desc": "Superduper finance investment"
+  },
+  {
+    "id": 191,
+    "schedule": "0 * * * *",
+    "type": "ef",
+    "name": "opportunity-scanner",
+    "fn": "opportunity-scanner",
+    "body": {},
+    "desc": "Opportunity scanner (hourly)",
+    "disabled": true,
+    "note": "Duplicate of 152 (opportunity-scanner-fast, */10). */10 is denser than hourly"
+  },
+  {
+    "id": 152,
+    "schedule": "*/10 * * * *",
+    "type": "ef",
+    "name": "opportunity-scanner-fast",
+    "fn": "opportunity-scanner",
+    "body": {},
+    "desc": "Opportunity scanner (10min) — KEEPER of opportunity-scanner family"
+  },
+  {
+    "id": 102,
+    "schedule": "*/10 * * * *",
+    "type": "ef",
+    "name": "api-key-health-monitor",
+    "fn": "api-key-health-monitor",
+    "body": {},
+    "desc": "API key health monitor"
+  },
+  {
+    "id": 172,
+    "schedule": "*/10 * * * *",
+    "type": "ef",
+    "name": "system-status",
+    "fn": "system-status",
+    "body": {},
+    "desc": "System status check (disabled on cloud)"
+  },
+  {
+    "id": 78,
+    "schedule": "2 * * * *",
+    "type": "sql",
+    "name": "cleanup-webhook-logs",
+    "sql": "DELETE FROM public.webhook_logs WHERE created_at < now() - interval '30 days'; DELETE FROM public.conversation_sessions WHERE created_at < now() - interval '30 days';",
+    "desc": "Cleanup old logs and sessions (hourly)"
+  },
+  {
+    "id": 103,
+    "schedule": "3,13,23,33,43,53 * * * *",
+    "type": "sql",
+    "name": "prune-http-responses",
+    "sql": "SELECT public.prune_net_http_response(3, 5000);",
+    "desc": "Prune old net_http responses"
+  },
+  {
+    "id": 104,
+    "schedule": "8 * * * *",
+    "type": "sql",
+    "name": "prune-http-responses-force",
+    "sql": "SELECT public.prune_net_http_response_until_clear(3);",
+    "desc": "Force-prune http responses until clear"
+  },
+  {
+    "id": 173,
+    "schedule": "*/15 * * * *",
+    "type": "sql",
+    "name": "cleanup-stale-device-sessions",
+    "sql": "SELECT cleanup_stale_device_sessions();",
+    "desc": "Cleanup stale device sessions"
+  },
+  {
+    "id": 175,
+    "schedule": "8 3 * * *",
+    "type": "sql",
+    "name": "purge-lock-diagnostics",
+    "sql": "SELECT util.purge_old_lock_diagnostics();",
+    "desc": "Purge old lock diagnostics (daily 3:08AM)"
+  },
+  {
+    "id": 221,
+    "schedule": "0 3 * * 0",
+    "type": "sql",
+    "name": "purge-cron-execution-logs",
+    "sql": "DELETE FROM cron_execution_log WHERE created_at < now() - interval '30 days';",
+    "desc": "Purge old cron execution logs (weekly)"
+  },
+  {
+    "id": 79,
+    "schedule": "4,9,14,19,24,29,34,39,44,49,54,59 * * * *",
+    "type": "sql",
+    "name": "process-scheduled-actions",
+    "sql": "UPDATE public.scheduled_actions SET next_execution = now() WHERE is_active = true AND next_execution <= now() AND (next_execution IS NULL OR next_execution <= now());",
+    "desc": "Process scheduled actions queue"
+  },
+  {
+    "id": 80,
+    "schedule": "3,18,33,48 * * * *",
+    "type": "sql",
+    "name": "timeout-stale-tasks",
+    "sql": "UPDATE public.task_executions SET status = 'timeout', error_message = 'Task execution timeout', execution_end = now() WHERE status = 'running' AND execution_start < now() - interval '30 minutes';",
+    "desc": "Timeout stale running tasks"
+  },
+  {
+    "id": 149,
+    "schedule": "0 0 1 * *",
+    "type": "ef",
+    "name": "workflow-template-manager-monthly",
+    "fn": "workflow-template-manager",
+    "body": {
+      "action": "execute_template",
+      "data": {
+        "template_name": "monthly_retrospective"
+      }
+    },
+    "desc": "Monthly workflow template execution",
+    "disabled": true,
+    "note": "Function works (returns 404 'Template not found: monthly_retrospective'). Needs INSERT into public.workflow_templates (also seed public.workflow_template_categories with the FK). Re-enable after rows exist."
+  },
+  {
+    "id": 150,
+    "schedule": "0 0 * * 0",
+    "type": "ef",
+    "name": "workflow-template-manager-weekly",
+    "fn": "workflow-template-manager",
+    "body": {
+      "action": "execute_template",
+      "data": {
+        "template_name": "weekly_planning"
+      }
+    },
+    "desc": "Weekly workflow template execution",
+    "disabled": true,
+    "note": "Function works (returns 404 'Template not found: weekly_planning'). Needs INSERT into public.workflow_templates. Re-enable after rows exist."
+  },
+  {
+    "id": 224,
+    "schedule": "0 * * * *",
+    "type": "ef",
+    "name": "cron-proxy",
+    "fn": "cron-proxy",
+    "body": {
+      "path": "system-status"
+    },
+    "desc": "Cron proxy relay (hourly) — proxies system-status by default"
+  },
+  {
+    "id": 196,
+    "schedule": "* * * * *",
+    "type": "ef",
+    "name": "event-dispatcher",
+    "fn": "event-dispatcher",
+    "body": {},
+    "desc": "Event dispatcher (every minute)",
+    "disabled": true,
+    "note": "Not a cron job — should be called by event-router with real event payloads. Every 60s with empty body is a no-op."
+  }
+]
