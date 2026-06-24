@@ -131,19 +131,26 @@ function log(msg) {
 
 // ── WEB SCRAPING ─────────────────────────────────────────
 
+// Image extensions that are NOT valid TLDs — reject emails whose domain TLD is an image extension
+const IMAGE_EXTENSIONS = new Set(['png','jpg','jpeg','gif','webp','svg','bmp','tiff','tif','avif','heic','heif','raw','psd','eps','ico']);
+
 function extractEmails(text) {
   const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
   const emails = text.match(emailRegex) || [];
   // Filter out common non-contact emails
-  return emails.filter(e => 
-    !e.includes('example.com') && 
-    !e.includes('facebook.com') && 
-    !e.includes('twitter.com') &&
-    !e.includes('youtube.com') &&
-    !e.includes('instagram.com') &&
-    !e.includes('.gov') &&
-    !e.includes('.mil')
-  );
+  return emails.filter(e => {
+    const parts = e.split('@');
+    if (parts.length !== 2) return false;
+    const tld = parts[1].split('.').pop().toLowerCase().replace(/[^a-z]/g, '');
+    if (IMAGE_EXTENSIONS.has(tld)) return false;
+    return !e.includes('example.com') &&
+      !e.includes('facebook.com') &&
+      !e.includes('twitter.com') &&
+      !e.includes('youtube.com') &&
+      !e.includes('instagram.com') &&
+      !e.includes('.gov') &&
+      !e.includes('.mil');
+  });
 }
 
 function extractNames(text) {

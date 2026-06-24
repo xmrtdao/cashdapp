@@ -49,12 +49,25 @@ try { contacts = JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf8')); } catch { c
 let sentHistory = [];
 try { sentHistory = JSON.parse(fs.readFileSync(SENT_FILE, 'utf8')); } catch { sentHistory = []; }
 
+// Image extensions that are NOT valid TLDs — reject emails whose domain TLD is an image extension
+const IMAGE_EXTENSIONS = new Set(['png','jpg','jpeg','gif','webp','svg','bmp','tiff','tif','avif','heic','heif','raw','psd','eps','ico']);
+
+function isRealEmail(email) {
+  const e = email.toLowerCase().trim();
+  if (!e.includes('@')) return false;
+  const parts = e.split('@');
+  if (parts.length !== 2) return false;
+  const tld = parts[1].split('.').pop().toLowerCase().replace(/[^a-z]/g, '');
+  if (IMAGE_EXTENSIONS.has(tld)) return false;
+  return true;
+}
+
 // Filter out already-sent emails (last 30 days) and suppressed
 const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
 const recentSent = new Set(sentHistory.filter(s => s.ts > cutoff).map(s => s.email));
 const suppressed = loadSuppression();
 
-let available = contacts.filter(c => !recentSent.has(c.email) && c.email.includes('@'));
+let available = contacts.filter(c => !recentSent.has(c.email) && isRealEmail(c.email));
 
 if (suppressed.size > 0) {
   const blocked = available.filter(c => suppressed.has(c.email));
