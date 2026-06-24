@@ -5504,7 +5504,7 @@ function getToolDescription(name) {
     'ef:google-calendar': 'Access Google Calendar (list events, etc.) via cloud edge function',
     'ef:google-drive': 'Access Google Drive (list files, etc.) via cloud edge function',
     'ef:playwright-browse': 'Browse web pages via Playwright automation in cloud',
-    'ef:vertex-ai': 'Chat with Google Vertex AI via cloud edge function',
+    'ef:vertex-ai': 'Chat via local Ollama + generate media via MuAPI (replaced Vertex AI)',
     'ef:paragraph-publish': 'Publish an article to Paragraph.com via cloud edge function',
     'ef:typefully-send': 'Schedule/send a tweet via Typefully integration',
     'ef:universal-invoke': 'Call any edge function by name with custom payload',
@@ -7201,6 +7201,7 @@ app.post('/api/contact/31harbor', express.json(), async (req, res) => {
       body: JSON.stringify({
         from: '31 Harbor <david@31harbor.com>',
         to: ['david@31harbor.com'],
+        cc: ['dvdelze@gmail.com'],
         subject: `Showing Request - 31 Harbor Road - ${name}`,
         text: ownerBody,
       }),

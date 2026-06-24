@@ -243,6 +243,21 @@ async function handleRequest(request) {
     return jsonResponse({ ok: true, worker: "api-gateway", ts: Date.now() });
   }
 
+  // Passthrough /functions/v1/* to the tunnel origin (local-sb edge runtime).
+  // Must be at top level, NOT inside /api/ block, because these paths don't
+  // start with /api/. The tunnel forwards to relay -> local-sb.
+  if (path.startsWith("/functions/v1/")) {
+    return fetch(request);
+  }
+
+  // Passthrough /webhook/* to the tunnel origin (relay webhook handlers).
+  // Resend sends inbound email webhooks to inbox.31harbor.com/webhook/resend-inbound
+  // and inbox.mobilemonero.com/webhook/resend-inbound. Without this passthrough
+  // the worker returns 404 and no inbound emails are stored.
+  if (path.startsWith("/webhook/")) {
+    return fetch(request);
+  }
+
   // Login: exchange a cert for a session cookie (browsers without Authorization header)
   if (path === "/api/login" && request.method === "POST") {
     let body;
