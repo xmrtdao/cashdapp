@@ -258,6 +258,13 @@ async function handleRequest(request) {
     return fetch(request);
   }
 
+  // Passthrough /api/contact/* to the tunnel origin (relay contact form endpoints).
+  // Contact forms (31harbor, cuttlefishclaws) POST here from static sites and
+  // must reach the relay without cert auth. The relay handles Resend sending.
+  if (path.startsWith("/api/contact/")) {
+    return fetch(request);
+  }
+
   // Login: exchange a cert for a session cookie (browsers without Authorization header)
   if (path === "/api/login" && request.method === "POST") {
     let body;
