@@ -7180,6 +7180,51 @@ app.options('/api/contact/31harbor', (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.status(200).end();
 });
+
+// POST /api/contact/cuttlefishclaws — CAC presale reservation form
+app.options('/api/contact/cuttlefishclaws', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.status(200).end();
+});
+app.post('/api/contact/cuttlefishclaws', express.json(), async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  trackRequest('/api/contact/cuttlefishclaws');
+  const { name, email, type, referral } = req.body || {};
+  if (!name || !email) return res.status(400).json({ error: 'name and email required' });
+
+  const RESEND_KEY = process.env.RESEND_31HARBOR_API_KEY;
+  if (!RESEND_KEY) return res.status(500).json({ error: 'Resend key not configured' });
+
+  const typeLine = type ? `\nType: ${type}` : '';
+  const refLine = referral ? `\nReferral: ${referral}` : '';
+  const body = `New CAC presale reservation from cuttlefishclaws.com\n\nName: ${name}\nEmail: ${email}${typeLine}${refLine}`;
+
+  try {
+    const apiRes = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'Cuttlefish Labs <david@31harbor.com>',
+        to: ['dvdelze@gmail.com'],
+        subject: `CAC Presale Reservation - ${name}`,
+        text: body,
+      }),
+    });
+    const data = await apiRes.json();
+
+    if (apiRes.ok) {
+      logActivity('contact-cuttlefishclaws', data.id, 'SENT', `CAC reservation from ${name} <${email}>`);
+      res.json({ success: true, id: data.id });
+    } else {
+      res.status(500).json({ error: data });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/contact/31harbor', express.json(), async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   trackRequest('/api/contact/31harbor');
