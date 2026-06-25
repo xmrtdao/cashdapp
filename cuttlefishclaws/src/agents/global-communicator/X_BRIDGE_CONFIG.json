@@ -1,0 +1,60 @@
+{
+  "agent": "GlobalCommunicator",
+  "version": "v1.0",
+  "did": "did:ethr:global-communicator-v1",
+  "x_handle": "",
+  "x_api_mode": "opentweet_primary",
+  "x_api_fallback": "official_x_api_pro",
+  "rate_limit": {
+    "max_posts_per_hour": 1,
+    "milestone_override": true,
+    "dm_limit_per_day": 50
+  },
+  "monitoring": {
+    "mentions": true,
+    "hashtags": [
+      "#TributaryAI",
+      "#CAC",
+      "#AgentEconomy",
+      "#CuttlefishClaw",
+      "#TributaryAIJP",
+      "#CAC日本",
+      "#AIエージェント",
+      "#分散型AI"
+    ],
+    "keywords": [
+      "Tributary AI",
+      "Cuttlefish Labs",
+      "DAO-REIT",
+      "constitutional AI",
+      "CAC token",
+      "TributaryキャンパスAI"
+    ]
+  },
+  "languages": {
+    "priority": "ja",
+    "supported": ["ja","en","ko","zh","es","fr","de","pt","ar","hi","ru","it"],
+    "auto_detect": true,
+    "bilingual_default": true
+  },
+  "llm_routing": {
+    "realtime_nuance": "grok",
+    "polished_copy": "claude",
+    "translation": "grok_primary_claude_fallback"
+  },
+  "onboarding_cta": {
+    "step_1": "Chat with GlobalCommunicator",
+    "step_2": "Buy CAC (prepaid compute credential)",
+    "step_3": "Get NFC Card + KYA verification",
+    "step_4": "Join the campus"
+  },
+  "constitutional_pipeline": {
+    "draft": true,
+    "constitutional_check": true,
+    "trib_approval_if_score_below": 85,
+    "founder_veto": true,
+    "post": true
+  },
+  "status": "standby",
+  "activate_on": "KYA_complete + CAC_active + x_handle_set"
+}

@@ -1457,6 +1457,20 @@ if (existsSync(join(HOTTIE_DIR, 'index.html'))) {
   console.log(`  HottieHouse SPA: NOT FOUND at ${HOTTIE_DIR} — skipping`);
 }
 
+// ── Cuttlefish Claws SPA (Vite build) ──
+const CUTTLEFISH_DIR = join(__dirname, '..', 'cuttlefishclaws', 'dist');
+if (existsSync(join(CUTTLEFISH_DIR, 'index.html'))) {
+  app.use('/cuttlefishclaws', express.static(CUTTLEFISH_DIR, { maxAge: '5m' }));
+  app.get('/cuttlefishclaws/*', (req, res) => {
+    const filePath = join(CUTTLEFISH_DIR, req.path.replace(/^\/cuttlefishclaws\//, ''));
+    if (existsSync(filePath)) return res.sendFile(filePath);
+    res.sendFile(join(CUTTLEFISH_DIR, 'index.html'));
+  });
+  console.log(`  CuttlefishClaws SPA: ${CUTTLEFISH_DIR}`);
+} else {
+  console.log(`  CuttlefishClaws SPA: NOT FOUND at ${CUTTLEFISH_DIR} — skipping`);
+}
+
 // ── 31Harbor Agency Dashboard (Vite build, per-company themed SPAs) ──
 const AGENCY_DIR = join(__dirname, '..', '31harbor-agency-dashboard', 'dist');
 if (existsSync(join(AGENCY_DIR, 'index.html'))) {
