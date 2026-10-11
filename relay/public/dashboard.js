@@ -1336,13 +1336,13 @@ loadAgentExperienceCard();
       }
       var now = Date.now();
       el.innerHTML = d.workers.slice(0,10).map(function(w) {
-        var lastSeen = new Date(w.last_seen).getTime();
-        var minutesAgo = Math.round((now - lastSeen) / 60000);
-        var isOnline = minutesAgo < 10;
+        var lastSeen = w.last_seen ? new Date(w.last_seen).getTime() : null;
+        var minutesAgo = lastSeen ? Math.round((now - lastSeen) / 60000) : null;
+        var isOnline = minutesAgo !== null && minutesAgo < 10;
         var statusDot = isOnline ? '<span style="color:#8FC97A;">●</span>' : '<span style="color:#9AA091;">○</span>';
         var hashDisplay = w.current_hash > 0 ? w.current_hash + ' H/s' : '-';
         var sharesDisplay = w.total_shares > 0 ? w.total_shares.toLocaleString() : '0';
-        var timeAgo = minutesAgo < 1 ? 'just now' : minutesAgo + 'm ago';
+        var timeAgo = minutesAgo === null ? 'pool-registered' : (minutesAgo < 1 ? 'just now' : minutesAgo + 'm ago');
         return '<div class="stat"><span class="label">' + statusDot + ' ' + w.worker.slice(0,16) + '<br><span style="font-size:0.65rem;color:#9AA091;">' + hashDisplay + ' · ' + timeAgo + '</span></span><span class="value">' + sharesDisplay + ' shares<br><span style="font-size:0.65rem;color:#DC8A1E;">' + w.xmrt_earned + ' XMRT</span></span></div>';
       }).join('');
     }).catch(function(){
@@ -1362,7 +1362,7 @@ loadAgentExperienceCard();
           apiFetch('/mining/heartbeat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ worker: 'vex-laptop', hashrate: Math.round(h) })
+            body: JSON.stringify({ worker: 'vex-laptop', hashrate: Math.round(h), shares: d.shares_good || 0 })
           }).catch(function(){});
         }
       }).catch(function(){});

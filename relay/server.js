@@ -16318,6 +16318,10 @@ app.get('/api/mining/local-xmrig', async (req, res) => {
           hashrate: data.hashrate?.total?.[0] || 0,
           threads: data.threads || [],
           uptime: data.uptime || 0,
+          // XMRig's accepted-share counters — the "approved shares submitted"
+          // the leaderboard ranks by.
+          shares_good: data.results?.shares_good || 0,
+          shares_total: data.results?.shares_total || 0,
           source: 'xmrig',
         });
       }
@@ -16328,6 +16332,7 @@ app.get('/api/mining/local-xmrig', async (req, res) => {
     const local = workers['vex-laptop'] || workers['xmrt-laptop'] || null;
     return res.json({
       hashrate: local ? local.current_hash : 0,
+      shares_good: local ? local.total_shares : 0,
       last_seen: local ? local.last_seen : null,
       source: 'heartbeat',
     });
@@ -16337,12 +16342,19 @@ app.get('/api/mining/local-xmrig', async (req, res) => {
 });
 
 // ── Mining Leaderboard ──
-// Combines live worker heartbeats with a static seed list so the card
-// is never empty during boot/demo. Workers seen in the last 24h are kept.
+// Real workers only, ranked by approved shares submitted (most first).
+// Worker rows come from two real sources, merged by worker name:
+//   1. heartbeat store — fleet clients POST /mining/heartbeat with the
+//      share count their miner reports accepted by the pool;
+//   2. SupportXMR identifiers — workers the pool itself lists for the
+//      XMRT-DAO wallet (they appear with 0 fleet-reported shares until
+//      their client starts heartbeating).
+// The old static seed entries (XMRT-Charger-01 / XMRT-Stick-01) were
+// fictional and were removed on 2026-10-11.
 app.get('/mining/leaderboard', async (req, res) => {
   const liveWorkers = getMiningWorkers();
   const now = Date.now();
-  const cutoff = 24 * 60 * 60 * 1000;
+  const cutoff = 7 * 24 * 60 * 60 * 1000; // 7d — the board ranks by lifetime approved shares, so a worker that mined last week still belongs on it
 
   // Live entries from heartbeats
   const live = Object.values(liveWorkers)
@@ -16356,19 +16368,33 @@ app.get('/mining/leaderboard', async (req, res) => {
       source: 'live',
     }));
 
-  // Static seed (so the card is never empty)
-  const seed = [
-    { worker: 'XMRT-Charger-01', current_hash: 495, total_shares: 12450, xmrt_earned: 0.0312, last_seen: new Date(now - 60_000).toISOString(), source: 'seed' },
-    { worker: 'XMRT-Stick-01',   current_hash: 220, total_shares: 5970,  xmrt_earned: 0.0111, last_seen: new Date(now - 120_000).toISOString(), source: 'seed' },
-  ];
-
-  // Merge: live entries override seed by worker name
   const merged = new Map();
-  for (const w of seed) merged.set(w.worker, w);
   for (const w of live) merged.set(w.worker, w);
 
+  // Pool-registered workers (SupportXMR identifiers for the XMRT-DAO wallet).
+  // A worker the pool knows but the fleet has not heartbeat-reported yet
+  // still belongs on the board — ranked by shares, so it sorts by its
+  // fleet-reported count (0 until the first heartbeat lands).
+  try {
+    const ids = await fetchSupportXMRIdentifiers();
+    for (const id of (ids.identifiers || [])) {
+      const name = typeof id === 'string' ? id : (id.identifier || id.name || id.worker || '');
+      if (!name || merged.has(name)) continue;
+      merged.set(name, {
+        worker: name,
+        current_hash: 0,
+        total_shares: 0,
+        xmrt_earned: 0,
+        last_seen: null,
+        source: 'pool',
+      });
+    }
+  } catch (_) { /* pool unreachable — heartbeats alone still render */ }
+
+  // Rank by approved shares submitted, most first; hashrate breaks ties.
   const workers = Array.from(merged.values())
-    .sort((a, b) => (b.current_hash || 0) - (a.current_hash || 0));
+    .sort((a, b) => (b.total_shares || 0) - (a.total_shares || 0)
+      || (b.current_hash || 0) - (a.current_hash || 0));
 
   // Pull live fleet totals from SupportXMR for the wallet summary header
   let fleet = null;

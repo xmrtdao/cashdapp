@@ -304,12 +304,15 @@ export function createCampusHandler(deps) {
        Deliberately NOT inside a min-width query. Priority order that only
        applies above a breakpoint means a phone gets a different sequence from
        a desktop, and "what matters first" should not depend on the screen.
-       Campus Command leads on both because it carries the supervisor panel -
-       the thing you most want to see when something has broken - and its
-       Agent Vault is collapsed for the same reason. */
+       Order (2026-10-11, owner directive): Browser first (the aside entry
+       point), then Comms, Trust, Galaxy, Task Pipeline, Campus Watch,
+       Campus Command, then the rest. Task Pipeline and Campus Watch were
+       promoted out of Campus Command into their own cards so the pipeline
+       and the watchdog read at the top level. */
     .tile-p1 { order: 1; } .tile-p2 { order: 2; } .tile-p3 { order: 3; }
     .tile-p4 { order: 4; } .tile-p5 { order: 5; } .tile-p6 { order: 6; }
     .tile-p7 { order: 7; } .tile-p8 { order: 8; } .tile-p9 { order: 9; }
+    .tile-p10 { order: 10; } .tile-p11 { order: 11; } .tile-p12 { order: 12; }
 
     /* ── Collapsed archives ────────────────────────────────────────────────
        Agent Vault (1,810px of completed artifacts) and Edge Functions
@@ -934,11 +937,14 @@ export function createCampusHandler(deps) {
   </div>
 
   <nav class="nexus-nav">
-    <a href="#command">Command</a>
+    <a href="#browser">Browser</a>
     <a href="#comms">Comms</a>
     <a href="#trust">Trust</a>
     <a href="#galaxy">Galaxy</a>
-    <a href="#dao">DAO</a>
+    <a href="#tasks">Tasks</a>
+    <a href="#watch">Watch</a>
+    <a href="#command">Command</a>
+    <a href="#dao">Tools</a>
     <a href="#mining">Mining</a>
     <a href="#campaigns">Campaigns</a>
     <a href="#mail">Mail</a>
@@ -1018,7 +1024,7 @@ export function createCampusHandler(deps) {
 </div>
 
 <!-- ⚓ Quarterdeck — Consolidated Command Center -->
-<div class="card tile-full tile-p1" id="command" style="border-color:rgba(255,107,53,0.2);">
+<div class="card tile-full tile-p7" id="command" style="border-color:rgba(255,107,53,0.2);">
   <h3 style="color:var(--accent-orange);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     🏛️ Campus Command
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— The Campus domain: rations, watch, bulletin, and vessels</span>
@@ -1034,44 +1040,9 @@ export function createCampusHandler(deps) {
     </div>
   </div>
 
-  <!-- Middle row: Campus Watch + Activity Log -->
+  <!-- Middle row: Activity Log (Campus Watch was promoted to its own
+       top-level tile (#watch, p6) on 2026-10-11, restart control included) -->
   <div class="quarterdeck-mid">
-    <!-- Campus Watch -->
-    <div style="background:var(--bg-card);border-radius:6px;padding:8px;border:1px solid var(--border);">
-      <h4 style="color:var(--accent-yellow);font-size:0.75rem;margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.05em;">🔭 Campus Watch <span style="color:var(--text-dim);font-weight:400;font-size:0.6rem;">— Eliza's Topside Watchdog</span></h4>
-      <div id="quarterdeck-supervisor">
-        <div class="stat"><span class="label">Supervisor</span><span class="value" id="qds-supervisor" style="color:#948d9e;">checking...</span></div>
-        <div class="stat"><span class="label">Stack Health</span><span class="value" id="qds-health-score" style="color:#948d9e;">-</span></div>
-        <div class="stat"><span class="label">Services Up</span><span class="value" id="qds-services-up" style="color:#948d9e;">-</span></div>
-        <div class="stat"><span class="label">Services Down</span><span class="value" id="qds-services-down" style="color:#948d9e;">-</span></div>
-        <div class="stat"><span class="label">Flapping</span><span class="value" id="qds-flapping" style="color:#948d9e;">-</span></div>
-        <div class="stat"><span class="label">Task Issues</span><span class="value" id="qds-task-issues" style="color:#948d9e;">-</span></div>
-        <div class="stat"><span class="label">Last Check</span><span class="value" id="qds-last-check" style="color:#948d9e;">-</span></div>
-        <div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.6rem;color:var(--text-dim);">
-          <div style="margin-bottom:2px;color:#8b8ba0;">Consolidated Services</div>
-          <div id="qds-services-tracker" style="line-height:1.6;">-</div>
-        </div>
-        <!-- Owner restart control. Rows are built by dashboard.js from the same
-             /api/supervisor/status payload as the chips above, so this list can
-             never name a service the supervisor is not actually watching. -->
-        <div id="restart-control" style="margin-top:6px;padding-top:6px;border-top:1px solid #1e1e2e;">
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
-            <span style="color:#8b8ba0;font-size:0.6rem;letter-spacing:0.05em;">RESTART CONTROL</span>
-            <span style="color:#4a4a5e;font-size:0.55rem;">owner</span>
-            <span style="margin-left:auto;font-size:0.55rem;color:#948d9e;">3/hour/service</span>
-          </div>
-          <div id="qds-restart-list" style="display:flex;flex-direction:column;gap:1px;">
-            <div style="color:#948d9e;font-size:0.6rem;">loading services&hellip;</div>
-          </div>
-        </div>
-        <div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.65rem;color:var(--text-dim);">
-          <span style="color:#60a5fa;">⚡ relay</span> v7.0.0 · <span id="qds-relay-uptime">${uptimeStr}</span> · <span id="qds-tools">${toolCount}</span> tools · <span id="qds-handlers">${handlerCount}</span> handlers · <span id="qds-requests">${requestCounts.total}</span> req
-        </div>
-      </div>
-      <div style="margin-top:4px;font-size:0.6rem;color:#948d9e;">
-        <a href="/api/supervisor/status" style="color:#60a5fa;">API</a> · <span id="qds-refresh" style="color:#4ade80;">● polling</span>
-      </div>
-    </div>
     <!-- Activity Log (centralized log viewer) -->
     <div style="background:var(--bg-card);border-radius:6px;padding:8px;border:1px solid var(--border);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -1133,13 +1104,9 @@ export function createCampusHandler(deps) {
     </div>
   </div>
 
-    <!-- Full-width kanban task board row -->
-    <div style="grid-column:1/-1;margin-bottom:10px;">
-      <div style="background:#0a0a14;border-radius:6px;padding:8px;border:1px solid #1e1e2e;max-height:340px;overflow:hidden;">
-        <h4 style="color:#60a5fa;font-size:0.75rem;margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.05em;">📋 Task Pipeline <span style="color:var(--text-dim);font-weight:400;font-size:0.6rem;">— Fleet Task Board</span></h4>
-        <div id="task-pipeline-content" style="height:290px;overflow-y:auto;font-size:0.55rem;"></div>
-      </div>
-    </div>
+    <!-- Task Pipeline was promoted to its own top-level tile (#tasks, p5)
+         on 2026-10-11 — the owner wants the fleet task board read at the
+         top level, not buried inside Campus Command. -->
 
     <!-- Agent Vault — Agent Chests -->
     <!-- Collapsed by default. This rendered 1,810px — more than every other
@@ -1190,47 +1157,22 @@ export function createCampusHandler(deps) {
   </div>
 </div>
 
-<!-- 🏛️ DAO & Ecosystem -->
-<div class="card tile tile-p5" id="dao">
+<!-- 🔧 Tools — formerly "DAO & Ecosystem". The Health, Membership, and
+     Ecosystem sections were removed on 2026-10-11 (owner directive): Health
+     duplicates Campus Watch, Membership was Whop pricing links, and the
+     Ecosystem links live on the public site. What remains is the live tool
+     registry, which is the part that is actually consulted. -->
+<div class="card tile tile-p8" id="dao">
   <h3 style="color:var(--accent-teal);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    🏛️ DAO & Ecosystem
-    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Health · Membership · Ecosystem · Tools</span>
+    🔧 Tools
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Relay tool registry · Edge Functions</span>
   </h3>
-  <div class="subgrid-4">
-    <div style="background:var(--bg-card);border-radius:6px;padding:8px;">
-      <div style="font-size:0.65rem;color:#4ade80;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">❤️‍🔥 Health</div>
-      <div class="stat"><span class="label">Local DB</span><span class="value" id="dao-health-status">checking...</span></div>
-      <div class="stat"><span class="label">Health Score</span><span class="value" id="dao-health-score">-</span></div>
-      <div class="stat"><span class="label">Fn Calls / 24h</span><span class="value" id="dao-fn-calls">-</span></div>
-      <div class="stat"><span class="label">Agents</span><span class="value" id="dao-agent-count">-</span></div>
-      <div class="stat"><span class="label">Tasks</span><span class="value" id="dao-task-count">-</span></div>
-      <div class="stat"><span class="label">Services</span><span class="value" id="dao-service-status">-</span></div>
-    </div>
-    <div style="background:#0d0d15;border-radius:6px;padding:8px;">
-      <div style="font-size:0.65rem;color:#4ade80;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">🎫 Membership</div>
-      <div class="stat"><span class="label"><a href="https://whop.com/xmrt-dao" target="_blank" style="color:#4ade80;text-decoration:none;">Free Tier</a></span><span class="value">free</span></div>
-      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_W6r4uqGWNaKHp" target="_blank" style="color:#ff6b35;text-decoration:none;">Premium</a></span><span class="value">$9.99/mo</span></div>
-      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_Wj1nh8AJhdsLN" target="_blank" style="color:#ff6b35;text-decoration:none;">Premium Yearly</a></span><span class="value">$99.99/yr</span></div>
-      <div class="stat"><span class="label"><a href="https://whop.com/checkout/plan_n853GD3f5IXm0" target="_blank" style="color:#60a5fa;text-decoration:none;">Supporter</a></span><span class="value">$19.99</span></div>
-      <div style="margin-top:4px;font-size:0.6rem;color:#948d9e;">Premium: 2x rewards · governance · early hardware</div>
-    </div>
-    <div style="background:#0d0d15;border-radius:6px;padding:8px;">
-      <div style="font-size:0.65rem;color:#4ade80;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">🌐 Ecosystem</div>
-      <div class="stat"><span class="label"><a href="https://xmrtsolutions.vercel.app" target="_blank" style="color:#60a5fa;text-decoration:none;">XMRT Token Faucet</a></span><span class="value">testnet</span></div>
-      <div class="stat"><span class="label"><a href="https://coldcash.vercel.app" target="_blank" style="color:#60a5fa;text-decoration:none;">ColdCash</a></span><span class="value">private payments</span></div>
-      <div class="stat"><span class="label"><a href="https://pipuente.vercel.app" target="_blank" style="color:#60a5fa;text-decoration:none;">PiPuente</a></span><span class="value">cross-chain bridge</span></div>
-      <div class="stat"><span class="label"><a href="https://paragraph.com/@xmrt" target="_blank" style="color:#60a5fa;text-decoration:none;">Paragraph Blog</a></span><span class="value">DAO journal</span></div>
-      <div class="stat"><span class="label"><a href="https://sepolia.etherscan.io/token/0x77307DFbc436224d5e6f2048d2b6bDfA66998a15" target="_blank" style="color:#60a5fa;text-decoration:none;">XMRT Token</a></span><span class="value">0x7730...8a15</span></div>
-      <div class="stat"><span class="label"><a href="https://github.com/xmrtdao" target="_blank" style="color:#60a5fa;text-decoration:none;">GitHub Org</a></span><span class="value">59 repos</span></div>
-    </div>
-    <div style="background:#0d0d15;border-radius:6px;padding:8px;">
-      <div style="font-size:0.65rem;color:#4ade80;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">🔧 Tools</div>
-      <div class="stat"><span class="label">Relay Tools</span><span class="value" id="dao-tool-count">${toolCount}</span></div>
-      <div class="stat"><span class="label">Edge Functions</span><span class="value" id="dao-fn-count">-</span></div>
-      ${localFunctions.length > 0 ? '<div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.6rem;color:#4ade80;">Local: ' + localFunctions.map(f => f.name).join(', ') + '</div>' : ''}
-      <div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.6rem;color:#948d9e;">
-        <a href="/health" style="color:#4ade80;">Health</a> · <a href="/status" style="color:#60a5fa;">Status</a> · <a href="/tools" style="color:#60a5fa;">Tools</a> · <a href="/monitor" style="color:#60a5fa;">Monitor</a>
-      </div>
+  <div style="background:#0d0d15;border-radius:6px;padding:8px;">
+    <div class="stat"><span class="label">Relay Tools</span><span class="value" id="dao-tool-count">${toolCount}</span></div>
+    <div class="stat"><span class="label">Edge Functions</span><span class="value" id="dao-fn-count">-</span></div>
+    ${localFunctions.length > 0 ? '<div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.6rem;color:#4ade80;">Local: ' + localFunctions.map(f => f.name).join(', ') + '</div>' : ''}
+    <div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.6rem;color:#948d9e;">
+      <a href="/health" style="color:#4ade80;">Health</a> · <a href="/status" style="color:#60a5fa;">Status</a> · <a href="/tools" style="color:#60a5fa;">Tools</a> · <a href="/monitor" style="color:#60a5fa;">Monitor</a>
     </div>
   </div>
 </div>
@@ -1276,8 +1218,62 @@ export function createCampusHandler(deps) {
   </div>
 </div>
 
+<!-- 📋 Task Pipeline — promoted out of Campus Command (2026-10-11) -->
+<div class="card tile tile-p5" id="tasks">
+  <h3 style="color:#60a5fa;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    📋 Task Pipeline
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Fleet Task Board</span>
+  </h3>
+  <div style="background:#0a0a14;border-radius:6px;padding:8px;border:1px solid #1e1e2e;max-height:340px;overflow:hidden;">
+    <div id="task-pipeline-content" style="height:290px;overflow-y:auto;font-size:0.55rem;"></div>
+  </div>
+</div>
+
+<!-- 🔭 Campus Watch — promoted out of Campus Command (2026-10-11),
+     restart control included. -->
+<div class="card tile tile-p6" id="watch">
+  <h3 style="color:var(--accent-yellow);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    🔭 Campus Watch
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Eliza's Topside Watchdog</span>
+  </h3>
+  <div style="background:var(--bg-card);border-radius:6px;padding:8px;border:1px solid var(--border);">
+    <div id="quarterdeck-supervisor">
+      <div class="stat"><span class="label">Supervisor</span><span class="value" id="qds-supervisor" style="color:#948d9e;">checking...</span></div>
+      <div class="stat"><span class="label">Stack Health</span><span class="value" id="qds-health-score" style="color:#948d9e;">-</span></div>
+      <div class="stat"><span class="label">Services Up</span><span class="value" id="qds-services-up" style="color:#948d9e;">-</span></div>
+      <div class="stat"><span class="label">Services Down</span><span class="value" id="qds-services-down" style="color:#948d9e;">-</span></div>
+      <div class="stat"><span class="label">Flapping</span><span class="value" id="qds-flapping" style="color:#948d9e;">-</span></div>
+      <div class="stat"><span class="label">Task Issues</span><span class="value" id="qds-task-issues" style="color:#948d9e;">-</span></div>
+      <div class="stat"><span class="label">Last Check</span><span class="value" id="qds-last-check" style="color:#948d9e;">-</span></div>
+      <div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.6rem;color:var(--text-dim);">
+        <div style="margin-bottom:2px;color:#8b8ba0;">Consolidated Services</div>
+        <div id="qds-services-tracker" style="line-height:1.6;">-</div>
+      </div>
+      <!-- Owner restart control. Rows are built by dashboard.js from the same
+           /api/supervisor/status payload as the chips above, so this list can
+           never name a service the supervisor is not actually watching. -->
+      <div id="restart-control" style="margin-top:6px;padding-top:6px;border-top:1px solid #1e1e2e;">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
+          <span style="color:#8b8ba0;font-size:0.6rem;letter-spacing:0.05em;">RESTART CONTROL</span>
+          <span style="color:#4a4a5e;font-size:0.55rem;">owner</span>
+          <span style="margin-left:auto;font-size:0.55rem;color:#948d9e;">3/hour/service</span>
+        </div>
+        <div id="qds-restart-list" style="display:flex;flex-direction:column;gap:1px;">
+          <div style="color:#948d9e;font-size:0.6rem;">loading services&hellip;</div>
+        </div>
+      </div>
+      <div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.65rem;color:var(--text-dim);">
+        <span style="color:#60a5fa;">⚡ relay</span> v7.0.0 · <span id="qds-relay-uptime">${uptimeStr}</span> · <span id="qds-tools">${toolCount}</span> tools · <span id="qds-handlers">${handlerCount}</span> handlers · <span id="qds-requests">${requestCounts.total}</span> req
+      </div>
+    </div>
+    <div style="margin-top:4px;font-size:0.6rem;color:#948d9e;">
+      <a href="/api/supervisor/status" style="color:#60a5fa;">API</a> · <span id="qds-refresh" style="color:#4ade80;">● polling</span>
+    </div>
+  </div>
+</div>
+
 <!-- 💰 Mining & Rewards -->
-<div class="card tile tile-p6" id="mining">
+<div class="card tile tile-p9" id="mining">
   <h3 style="color:var(--accent-yellow);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     💰 Mining & Rewards
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Pool Stats · Leaderboard · Heartbeat</span>
@@ -1295,7 +1291,7 @@ export function createCampusHandler(deps) {
     </div>
     <div style="background:#0d0d15;border-radius:6px;padding:8px;">
       <div style="font-size:0.65rem;color:#fbbf24;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">🏆 Leaderboard</div>
-      <div style="margin-bottom:4px;font-size:10px;color:#948d9e;">Live hashrate · shares · XMRT rewards</div>
+      <div style="margin-bottom:4px;font-size:10px;color:#948d9e;">Real workers · ranked by approved shares submitted</div>
       <div id="miner-leaderboard"><div class="stat"><span class="label">Loading...</span></div></div>
     </div>
     <div style="background:#0d0d15;border-radius:6px;padding:8px;">
@@ -1310,7 +1306,7 @@ export function createCampusHandler(deps) {
 </div>
 
 <!-- 📯 Campaigns & Leads -->
-<div class="card tile tile-p7" id="campaigns">
+<div class="card tile tile-p10" id="campaigns">
   <h3 style="color:#60a5fa;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     📯 Campaigns & Leads
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— PFP Campaign · PFP Leads · 31 Harbor</span>
@@ -1346,7 +1342,7 @@ export function createCampusHandler(deps) {
 </div>
 
 <!-- 📬 Incoming Mail -->
-<div class="card tile tile-p8" id="mail">
+<div class="card tile tile-p11" id="mail">
   <h3 style="color:var(--accent-red);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     📬 Incoming Mail
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Resend inboxes</span>
@@ -1361,7 +1357,7 @@ export function createCampusHandler(deps) {
 <!-- Browser tile — summons the dynamic aside pane with the browser chrome.
      The pane itself is not new (aside-push loopback below); what this adds
      is the manual on-demand entry point and the harness shortcuts. -->
-<div class="card tile tile-p8" id="browser">
+<div class="card tile tile-p1" id="browser">
   <h3 style="color:var(--accent-orange);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     🌐 Browser
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— contained pane · drives the harnesses</span>
@@ -1377,7 +1373,7 @@ export function createCampusHandler(deps) {
 </div>
 
 <!-- Campus Forum Full Board -->
-<div id="board-full" class="card tile-wide tile-p9" style="margin-top:0.5rem;">
+<div id="board-full" class="card tile-wide tile-p12" style="margin-top:0.5rem;">
   <h3 style="color:var(--accent-yellow);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     📜 Campus Forum <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Full Bulletin Board</span>
   </h3>
