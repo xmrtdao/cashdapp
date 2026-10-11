@@ -47,6 +47,42 @@ const isEmail = (q) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(q || '').trim())
 
 const SOURCE_TIMEOUT_MS = 3000;
 
+// Module-level observability: every resolver instance records into this one
+// bucket so the /api/entity-resolver/metrics endpoint can report across all
+// callers (Eliza recall, relay-tool, entity-sync listener). In-memory only —
+// resets on relay restart, which is fine for operational metrics.
+const METRICS = {
+  started_at: new Date().toISOString(),
+  calls: 0,
+  hits: 0,          // queries that returned at least one match
+  misses: 0,        // queries with zero matches
+  partials: 0,      // queries where a source timed out/failed
+  conflicts: 0,     // matches whose conflict_state is 'conflict'
+  total_ms: 0,
+  max_ms: 0,
+  last_queries: [], // ring buffer of the 20 most recent {query, matches, ms, partial, at}
+};
+
+export function getResolverMetrics() {
+  return {
+    ...METRICS,
+    avg_ms: METRICS.calls ? Math.round(METRICS.total_ms / METRICS.calls) : 0,
+    last_queries: [...METRICS.last_queries],
+  };
+}
+
+function recordMetrics(q, result) {
+  METRICS.calls++;
+  if (result.matches.length) METRICS.hits++; else METRICS.misses++;
+  if (result.partial) METRICS.partials++;
+  METRICS.conflicts += result.matches.filter(m => m.conflict_state === 'conflict').length;
+  METRICS.total_ms += result.ms;
+  if (result.ms > METRICS.max_ms) METRICS.max_ms = result.ms;
+  METRICS.last_queries.push({ query: q, matches: result.matches.length, ms: result.ms, partial: result.partial, at: new Date().toISOString() });
+  if (METRICS.last_queries.length > 20) METRICS.last_queries.shift();
+}
+
+
 async function timed(sourceName, promise, degraded) {
   let timer;
   try {
@@ -271,13 +307,15 @@ export function createResolver({ query, logger = console }) {
       .sort((a, b) => (b.member_count - a.member_count) || (a.display_name || '').localeCompare(b.display_name || ''))
       .slice(0, limit);
     if (degraded.length) logger.warn?.(`[entity-resolver] partial result for query (degraded: ${degraded.map(d => d.source).join(', ')})`);
-    return {
+    const result = {
       query: q,
       matches,
       partial: degraded.length > 0,
       degraded,
       ms: Date.now() - started,
     };
+    recordMetrics(q, result);
+    return result;
   }
 
   return { resolveEntity };

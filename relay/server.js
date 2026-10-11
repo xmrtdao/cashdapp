@@ -116,7 +116,7 @@ import {
 import { getFullSnapshot, getSystemResources, checkExternalServices } from './tools/monitor.mjs';
 import { startHarnessProxies } from './harness-proxy.mjs';
 import { startEntitySyncListener } from './lib/entity-sync-listener.mjs';
-import { createResolver as createEntityResolver } from './lib/entity-resolver.mjs';
+import { createResolver as createEntityResolver, getResolverMetrics } from './lib/entity-resolver.mjs';
 import { videoEditor } from './tools/video-editor.mjs';
 import { videoBrief, probe as probeMedia, detectShots, contactSheet, loudness, waveform } from './tools/perception.mjs';
 import {
@@ -17268,6 +17268,13 @@ function galaxyCore(graph, rootId, { maxNodes = 90 } = {}) {
     omittedEdges: graph.edges.length - edges.length,
   };
 }
+
+// /api/entity-resolver/metrics — observability for the unified entity
+// resolver (Eliza recall path, relay-tool, entity-sync listener). Counters
+// live in lib/entity-resolver.mjs and reset on relay restart.
+app.get('/api/entity-resolver/metrics', (req, res) => {
+  res.json({ success: true, metrics: getResolverMetrics() });
+});
 
 app.get('/api/suite/telemetry', async (req, res) => {
   const startedAt = Date.now();
