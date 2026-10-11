@@ -12857,6 +12857,34 @@ app.get('/api/jobby/outreach', async (req, res) => {
  * that are blocking or waiting on an answer, because that is the list a person
  * can act on. `prepared` counts packets written; it never implies they were sent.
  */
+// /api/jobby/fleet-stats — owner-dashboard aggregate over all Jobby clients:
+// how many applications exist per status, and the most recent few. Powers the
+// Nexus "Applications Tracker" tile; per-client detail stays behind the
+// session-scoped /api/jobby/applications.
+app.get('/api/jobby/fleet-stats', async (req, res) => {
+  trackRequest('GET /api/jobby/fleet-stats');
+  try {
+    const byStatus = await queryLocalPg(
+      `SELECT status, COUNT(*)::int AS n FROM app.job_applications GROUP BY status ORDER BY n DESC`
+    );
+    const recent = await queryLocalPg(
+      `SELECT company, role, status, updated_at FROM app.job_applications ORDER BY updated_at DESC LIMIT 6`
+    );
+    const clients = await queryLocalPg(
+      `SELECT COUNT(DISTINCT client_id)::int AS n FROM app.job_applications`
+    );
+    res.json({
+      success: true,
+      total: byStatus.rows.reduce((a, r) => a + r.n, 0),
+      by_status: byStatus.rows,
+      clients: clients.rows[0]?.n || 0,
+      recent: recent.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/jobby/applications', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   trackRequest('GET /api/jobby/applications');
@@ -16596,8 +16624,9 @@ for (const key of EMAIL_INBOX_KEYS) registerInboxRoutes(key);
  * configuration - one careless edit in the registry would otherwise become
  * markup injection in the dashboard.
  */
-function resendTileHtml() {
-  return EMAIL_INBOX_KEYS.map((key) => {
+function resendTileHtml(onlyKey = null) {
+  const keys = onlyKey ? EMAIL_INBOX_KEYS.filter(k => k === onlyKey) : EMAIL_INBOX_KEYS;
+  return keys.map((key) => {
     const entry = EMAIL_DOMAINS[key];
     const label = String(entry.label)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

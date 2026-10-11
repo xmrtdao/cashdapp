@@ -1352,6 +1352,53 @@ loadAgentExperienceCard();
   }
   setTimeout(function() { loadMiningLeaderboard(); setInterval(loadMiningLeaderboard, 15000); }, 5000);
 
+  // ── Jobby McJobberson tenant tiles ──
+  // Job Opportunities: public feeds via /api/jobby/board (anonymous-safe).
+  function loadJobbyBoard() {
+    var el = document.getElementById('jobby-board-content');
+    if (!el) return;
+    apiFetch('/api/jobby/board', { signal: AbortSignal.timeout(20000) }).then(function(r){return r.json();}).then(function(d){
+      var c = d.count || { n: 0, worth: 0, feeds: 0, companies: 0 };
+      var html = '<div class="stat"><span class="label">Tracked openings</span><span class="value">' + (c.n || 0) + '</span></div>'
+        + '<div class="stat"><span class="label">Worth applying</span><span class="value" style="color:#4ade80;">' + (c.worth || 0) + '</span></div>'
+        + '<div class="stat"><span class="label">Feeds / Companies</span><span class="value">' + (c.feeds || 0) + ' / ' + (c.companies || 0) + '</span></div>';
+      var jobs = (d.jobs || []).slice(0, 4);
+      if (jobs.length) {
+        html += '<div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;">' + jobs.map(function(j){
+          var title = (j.title || j.role || 'Opening');
+          var co = j.company ? ' · ' + j.company : '';
+          return '<div style="padding:1px 0;color:#c0c0d0;">• ' + String(title).slice(0, 42) + co + '</div>';
+        }).join('') + '</div>';
+      }
+      html += '<div style="margin-top:4px;font-size:0.6rem;color:#948d9e;">Unverified feed data — confirm an opening is live before applying.</div>';
+      el.innerHTML = html;
+    }).catch(function(){ el.innerHTML = '<div class="stat"><span class="label">Job board unavailable</span></div>'; });
+  }
+  // Applications Tracker: fleet-wide aggregate via /api/jobby/fleet-stats.
+  function loadJobbyApps() {
+    var el = document.getElementById('jobby-apps-content');
+    if (!el) return;
+    apiFetch('/api/jobby/fleet-stats', { signal: AbortSignal.timeout(20000) }).then(function(r){return r.json();}).then(function(d){
+      if (!d.success) { el.innerHTML = '<div class="stat"><span class="label">' + (d.error || 'unavailable') + '</span></div>'; return; }
+      var html = '<div class="stat"><span class="label">Applications</span><span class="value">' + d.total + '</span></div>'
+        + '<div class="stat"><span class="label">Clients</span><span class="value">' + d.clients + '</span></div>'
+        + (d.by_status || []).map(function(s){
+            return '<div class="stat"><span class="label">' + s.status + '</span><span class="value">' + s.n + '</span></div>';
+          }).join('');
+      var recent = (d.recent || []).slice(0, 4);
+      if (recent.length) {
+        html += '<div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;">' + recent.map(function(a){
+          var when = a.updated_at ? new Date(a.updated_at).toLocaleDateString() : '';
+          return '<div style="padding:1px 0;color:#c0c0d0;">• ' + String(a.company || '?').slice(0, 24) + ' — ' + String(a.role || '?').slice(0, 24)
+            + ' <span style="color:#948d9e;">(' + a.status + (when ? ', ' + when : '') + ')</span></div>';
+        }).join('') + '</div>';
+      }
+      el.innerHTML = html;
+    }).catch(function(){ el.innerHTML = '<div class="stat"><span class="label">Applications unavailable</span></div>'; });
+  }
+  setTimeout(function() { loadJobbyBoard(); setInterval(loadJobbyBoard, 60000); }, 5800);
+  setTimeout(function() { loadJobbyApps(); setInterval(loadJobbyApps, 60000); }, 6400);
+
   // Local XMRig heartbeat (vex-laptop auto-reports hashrate)
   function localMinerHeartbeat() {
     apiFetch('/api/mining/local-xmrig', { signal: AbortSignal.timeout(25000) })
@@ -1930,6 +1977,12 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
   var boardStatusFilter = "all"; // all, active, in-progress, completed, archived
   var boardLastPostCount = 0;
     var boardLoadSeq = 0;
+  // board-status lived in a tile that no longer exists; the full board uses
+  // board-status-full. One guarded accessor so a failed fetch can never throw
+  // inside its own error handler again.
+  function boardStatusEl() {
+    return document.getElementById('board-status-full') || document.getElementById('board-status');
+  }
     function loadBoard() {
       var seq = Date.now();
       boardLoadSeq = seq;
@@ -1941,8 +1994,8 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
         var prevPosts = boardLastPostCount;
         boardData = d;
         renderBoardTopics();
-        document.getElementById("board-status").textContent = "● loaded";
-        document.getElementById("board-status").style.color = "#8FC97A";
+        boardStatusEl().textContent = "● loaded";
+        boardStatusEl().style.color = "#8FC97A";
         var newCount = boardData.topics.length;
         var totalPosts = boardData.topics.reduce(function(sum, t) { return sum + (t.posts || []).length; }, 0);
         if (newCount !== prevCount || totalPosts !== prevPosts) {
@@ -1952,8 +2005,8 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
         boardLastPostCount = totalPosts;
       })
       .catch(function(e){
-        document.getElementById("board-status").textContent = "● error: " + e.message;
-        document.getElementById("board-status").style.color = "#E4695A";
+        boardStatusEl().textContent = "● error: " + e.message;
+        boardStatusEl().style.color = "#E4695A";
       });
   }
   
@@ -2154,8 +2207,8 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
         }
       })
       .catch(function(e) {
-        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
-        document.getElementById('board-status').style.color = '#E4695A';
+        boardStatusEl().textContent = '\u2716 error: ' + e.message;
+        boardStatusEl().style.color = '#E4695A';
       });
   }
   
@@ -2175,7 +2228,7 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
         }
       })
       .catch(function(e) {
-        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+        boardStatusEl().textContent = '\u2716 error: ' + e.message;
       });
   }
 
@@ -2204,16 +2257,16 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
             if (boardData.topics[i].id === d.topic.id) boardData.topics[i].title = d.topic.title;
           }
           loadBoard();
-          document.getElementById('board-status').textContent = '\u2713 renamed';
-          document.getElementById('board-status').style.color = '#8FC97A';
+          boardStatusEl().textContent = '\u2713 renamed';
+          boardStatusEl().style.color = '#8FC97A';
         } else {
-          document.getElementById('board-status').textContent = '\u2716 rename failed: ' + (d.error || 'unknown');
-          document.getElementById('board-status').style.color = '#E4695A';
+          boardStatusEl().textContent = '\u2716 rename failed: ' + (d.error || 'unknown');
+          boardStatusEl().style.color = '#E4695A';
         }
       })
       .catch(function(e) {
-        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
-        document.getElementById('board-status').style.color = '#E4695A';
+        boardStatusEl().textContent = '\u2716 error: ' + e.message;
+        boardStatusEl().style.color = '#E4695A';
       });
   }
 
@@ -2236,7 +2289,7 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
         }
       })
       .catch(function(e) {
-        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+        boardStatusEl().textContent = '\u2716 error: ' + e.message;
       });
   }
   
@@ -2261,8 +2314,8 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
         }
       })
       .catch(function(e) {
-        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
-        document.getElementById('board-status').style.color = '#E4695A';
+        boardStatusEl().textContent = '\u2716 error: ' + e.message;
+        boardStatusEl().style.color = '#E4695A';
       });
   }
   
@@ -2279,7 +2332,7 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
         }
       })
       .catch(function(e) {
-        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
+        boardStatusEl().textContent = '\u2716 error: ' + e.message;
       });
   }
   
@@ -2305,8 +2358,8 @@ setTimeout(function() { loadInboxTiles(); setInterval(loadInboxTiles, 15000); },
         }
       })
       .catch(function(e) {
-        document.getElementById('board-status').textContent = '\u2716 error: ' + e.message;
-        document.getElementById('board-status').style.color = '#E4695A';
+        boardStatusEl().textContent = '\u2716 error: ' + e.message;
+        boardStatusEl().style.color = '#E4695A';
       });
   }
 

@@ -175,7 +175,7 @@ export function createCampusHandler(deps) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>XMRT Nexus — Command Center</title>
+  <title>XMRT Nexus GSI — Command &amp; Control Center</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@400;500;600;700;800&family=Barlow:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap');
     :root {
@@ -294,6 +294,43 @@ export function createCampusHandler(deps) {
     @media (min-width: 1280px) {
       .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; }
     }
+
+    /* ── Tenant sections (2026-10-11) ─────────────────────────────────────
+       The page is the central Nexus for several brands: XMRT Nexus core,
+       Suite, Mobilemonero, Party Favor Photo, 31 Harbor, and Jobby
+       McJobberson. Each brand gets a labelled section with its own 2-column
+       grid, so a section's tiles always pair into full rows — a tile can
+       never be stranded in a half-empty row of the page-level 4-column grid
+       the way they were when everything shared one grid. */
+    .tenant-section { grid-column: 1 / -1; border: 1px solid var(--border); border-radius: 10px;
+      padding: 10px 12px 12px; background: rgba(10,10,20,0.35); }
+    .tenant-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid #1e1e2e; }
+    .tenant-head img { height: 28px; width: auto; border-radius: 6px; }
+    .tenant-head .tenant-name { font-family: 'Saira Condensed', sans-serif; font-size: 1.05rem;
+      letter-spacing: 0.04em; color: var(--text-primary); text-transform: uppercase; }
+    .tenant-head .tenant-tag { font-size: 0.65rem; color: var(--text-dim); }
+    .tenant-head .tenant-link { font-size: 0.65rem; color: #60a5fa; text-decoration: none; }
+    /* Jobby's desk: the marketing agent keeps a presence in every tenant. */
+    .jobby-desk { margin-left: auto; font-size: 0.62rem; color: #c084fc;
+      border: 1px solid rgba(192,132,252,0.25); border-radius: 6px; padding: 2px 8px;
+      background: rgba(192,132,252,0.06); }
+    .tenant-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.6rem; }
+    .tenant-grid > .span2 { grid-column: 1 / -1; }
+    @media (min-width: 720px) {
+      .tenant-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+    }
+    /* Cards inside a tenant grid are plain grid items — the page-level
+       .tile/.tile-wide span rules target the outer grid only. Cards that
+       were authored as wide/full keep that meaning inside the 2-column
+       tenant grid: they take the whole row. (Without the explicit rule the
+       neutralizer above also stripped tile-full, which parked the tall
+       Campus Command card in one column and left an empty well beside it.) */
+    .tenant-grid > .card { grid-column: auto; }
+    .tenant-grid > .card.tile-wide,
+    .tenant-grid > .card.tile-full,
+    .tenant-grid > .card.span2 { grid-column: 1 / -1; }
+
 
     /* Priority order. Set with 'order' on the grid children rather than by
        rearranging the HTML, so the source still reads top-to-bottom in
@@ -926,9 +963,9 @@ export function createCampusHandler(deps) {
 <body>
 <div class="scanline"></div>
 <canvas id="mesh-bg"></canvas>
-  <h1><span class="campus-logo"><img src="/images/xmrtdao.png" alt="XMRT DAO"></span> XMRT Nexus <span>Command Center</span></h1>
+  <h1>XMRT Nexus GSI <span>Command &amp; Control Center</span></h1>
   <div class="subtitle">
-    <span style="color:var(--accent-orange);font-weight:600;">XMRT DAO</span> · <span title="XMRT Nexus — the Cuttlefish Protocol command center. Constitutional AI agents, TrustGraph scoring, and the Tributary AI Campus." style="cursor:help;border-bottom:1px dotted #ff8800;">XMRT Nexus</span> v11.0.0 · 
+    <span style="color:var(--accent-orange);font-weight:600;">XMRT DAO</span> · <span title="XMRT Nexus — the Cuttlefish Protocol command center. Constitutional AI agents, TrustGraph scoring, and the Tributary AI Campus." style="cursor:help;border-bottom:1px dotted #ff8800;">XMRT Nexus</span> v12.0.0 · 
     <a href="https://relay.mobilemonero.com">relay.mobilemonero.com</a> ·
     <a href="https://github.com/xmrtdao/mobilemonero" target="_blank">GitHub</a>
   </div>
@@ -937,17 +974,12 @@ export function createCampusHandler(deps) {
   </div>
 
   <nav class="nexus-nav">
-    <a href="#browser">Browser</a>
-    <a href="#comms">Comms</a>
-    <a href="#trust">Trust</a>
-    <a href="#galaxy">Galaxy</a>
-    <a href="#tasks">Tasks</a>
-    <a href="#watch">Watch</a>
-    <a href="#command">Command</a>
-    <a href="#dao">Tools</a>
-    <a href="#mining">Mining</a>
-    <a href="#campaigns">Campaigns</a>
-    <a href="#mail">Mail</a>
+    <a href="#section-core">Nexus</a>
+    <a href="#section-suite">Suite</a>
+    <a href="#section-mobilemonero">Mobilemonero</a>
+    <a href="#section-pfp">PFP</a>
+    <a href="#section-harbor">31 Harbor</a>
+    <a href="#section-jobby">Jobby</a>
     <a href="#board-full">Forum</a>
     <a href="#fn-catalog">Functions</a>
   </nav>
@@ -982,7 +1014,15 @@ export function createCampusHandler(deps) {
   
   <div class="main-split">
   <div class="grid">
-<div class="card chat-card tile-wide tile-p2" id="comms">
+  <!-- ═══ TENANT: XMRT Nexus core — comms, trust, fleet ops ═══ -->
+  <section class="tenant-section" id="section-core">
+    <div class="tenant-head">
+      <span class="tenant-name">🏛️ XMRT Nexus</span>
+      <span class="tenant-tag">— Core operations · campus comms · trust · fleet</span>
+      <span class="jobby-desk">🪑 Jobby's desk — campus-wide marketing on call</span>
+    </div>
+    <div class="tenant-grid">
+<div class="card chat-card tile-wide tile-p1" id="comms">
       <h3 style="color:var(--accent-orange);">Campus Comms <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Vex · Eliza-Cloud · Hermes</span></h3>
       <div id="fleet-chat-msgs" style="height:180px;overflow-y:auto;background:#0a0400;border-radius:6px;padding:8px;margin-bottom:6px;font-size:12px;line-height:1.5;">
         <div style="color:var(--text-dim);text-align:center;padding:20px 0;font-size:12px;">Campus comms active. All agents hear every broadcast.</div>
@@ -1005,7 +1045,7 @@ export function createCampusHandler(deps) {
     </div>
 
 <!-- 📈 Trust Trajectory — Full-width chart -->
-<div class="card tile-wide tile-p3" id="trust">
+<div class="card tile-wide tile-p2" id="trust">
   <h3 style="color:#a78bfa;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     📈 Trust Trajectory
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Real-time TrustGraph scores over time · Hover any point for details</span>
@@ -1024,7 +1064,7 @@ export function createCampusHandler(deps) {
 </div>
 
 <!-- ⚓ Quarterdeck — Consolidated Command Center -->
-<div class="card tile-full tile-p7" id="command" style="border-color:rgba(255,107,53,0.2);">
+<div class="card tile-full tile-p6" id="command" style="border-color:rgba(255,107,53,0.2);">
   <h3 style="color:var(--accent-orange);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     🏛️ Campus Command
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— The Campus domain: rations, watch, bulletin, and vessels</span>
@@ -1162,7 +1202,7 @@ export function createCampusHandler(deps) {
      duplicates Campus Watch, Membership was Whop pricing links, and the
      Ecosystem links live on the public site. What remains is the live tool
      registry, which is the part that is actually consulted. -->
-<div class="card tile tile-p8" id="dao">
+<div class="card tile tile-p5" id="dao">
   <h3 style="color:var(--accent-teal);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     🔧 Tools
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Relay tool registry · Edge Functions</span>
@@ -1178,7 +1218,7 @@ export function createCampusHandler(deps) {
 </div>
 
 <!-- 🪐 xmrt-galaxy — Knowledge Graph -->
-<div class="card tile tile-p4" id="galaxy">
+<div class="card tile-wide tile-p3" id="galaxy">
   <h3 style="color:var(--accent-purple);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     🪐 xmrt-galaxy
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— ecosystem map with live trust scores</span>
@@ -1218,20 +1258,11 @@ export function createCampusHandler(deps) {
   </div>
 </div>
 
-<!-- 📋 Task Pipeline — promoted out of Campus Command (2026-10-11) -->
-<div class="card tile tile-p5" id="tasks">
-  <h3 style="color:#60a5fa;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    📋 Task Pipeline
-    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Fleet Task Board</span>
-  </h3>
-  <div style="background:#0a0a14;border-radius:6px;padding:8px;border:1px solid #1e1e2e;max-height:340px;overflow:hidden;">
-    <div id="task-pipeline-content" style="height:290px;overflow-y:auto;font-size:0.55rem;"></div>
-  </div>
-</div>
+<!-- 📋 Task Pipeline moved into the Suite tenant section (2026-10-11). -->
 
 <!-- 🔭 Campus Watch — promoted out of Campus Command (2026-10-11),
      restart control included. -->
-<div class="card tile tile-p6" id="watch">
+<div class="card tile tile-p4" id="watch">
   <h3 style="color:var(--accent-yellow);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     🔭 Campus Watch
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Eliza's Topside Watchdog</span>
@@ -1271,9 +1302,62 @@ export function createCampusHandler(deps) {
     </div>
   </div>
 </div>
+    </div><!-- /tenant-grid core -->
+  </section>
+
+  <!-- ═══ TENANT: Suite — AI council dashboard ═══ -->
+  <section class="tenant-section" id="section-suite">
+    <div class="tenant-head">
+      <span class="tenant-name">🧠 Suite</span>
+      <span class="tenant-tag">— AI Council of Executives · chat · contained browser · task pipeline</span>
+      <a class="tenant-link" href="/suite/dashboard" target="_blank">suite dashboard ↗</a>
+      <span class="jobby-desk">🪑 Jobby's desk — Suite growth &amp; outreach</span>
+    </div>
+    <div class="tenant-grid">
+<!-- Browser tile — summons the dynamic aside pane with the browser chrome.
+     The pane itself is not new (aside-push loopback below); what this adds
+     is the manual on-demand entry point and the harness shortcuts. -->
+<div class="card" id="browser">
+  <h3 style="color:var(--accent-orange);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    🌐 Browser
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— contained pane · drives the harnesses</span>
+  </h3>
+  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">
+    <button onclick="openBrowserPane()" style="padding:6px 14px;border-radius:6px;border:none;background:#ff6b35;color:white;cursor:pointer;font-size:12px;font-weight:600;">Open Browser</button>
+    <button onclick="openBrowserPane('http://127.0.0.1:4130/','OpenCode')" title="OpenCode coding agent, embedded via the loopback auth proxy" style="padding:6px 14px;border-radius:6px;border:1px solid #3a3a5a;background:transparent;color:#ff6b35;cursor:pointer;font-size:12px;">⌨️ opencode</button>
+    <button onclick="openBrowserPane('http://127.0.0.1:4131/','DSH')" title="DeepSeek harness, embedded via the loopback auth proxy" style="padding:6px 14px;border-radius:6px;border:1px solid #3a3a5a;background:transparent;color:#ff6b35;cursor:pointer;font-size:12px;">🌊 dsh</button>
+  </div>
+  <div style="margin-top:6px;font-size:10px;color:#948d9e;">
+    Agents push pages here with <code>aside-push</code> → <code>/browser?u=…</code> · harnesses are loopback, view from the host laptop
+  </div>
+</div>
+
+<!-- 📋 Task Pipeline — promoted out of Campus Command (2026-10-11) -->
+<div class="card" id="tasks">
+  <h3 style="color:#60a5fa;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    📋 Task Pipeline
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Fleet Task Board</span>
+  </h3>
+  <div style="background:#0a0a14;border-radius:6px;padding:8px;border:1px solid #1e1e2e;max-height:340px;overflow:hidden;">
+    <div id="task-pipeline-content" style="height:290px;overflow-y:auto;font-size:0.55rem;"></div>
+  </div>
+</div>
+    </div><!-- /tenant-grid suite -->
+  </section>
+
+  <!-- ═══ TENANT: Mobilemonero — mining & rewards ═══ -->
+  <section class="tenant-section" id="section-mobilemonero">
+    <div class="tenant-head">
+      <img src="/images/xmrtdao.png" alt="Mobilemonero">
+      <span class="tenant-name">Mobilemonero</span>
+      <span class="tenant-tag">— XMRT mobile mining · pool · rewards</span>
+      <a class="tenant-link" href="https://mobilemonero.com" target="_blank">mobilemonero.com ↗</a>
+      <span class="jobby-desk">🪑 Jobby's desk — mining fleet recruitment</span>
+    </div>
+    <div class="tenant-grid">
 
 <!-- 💰 Mining & Rewards -->
-<div class="card tile tile-p9" id="mining">
+<div class="card tile-wide" id="mining">
   <h3 style="color:var(--accent-yellow);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     💰 Mining & Rewards
     <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Pool Stats · Leaderboard · Heartbeat</span>
@@ -1305,11 +1389,36 @@ export function createCampusHandler(deps) {
   </div>
 </div>
 
-<!-- 📯 Campaigns & Leads -->
-<div class="card tile tile-p10" id="campaigns">
+<!-- 📬 Mobilemonero inbox -->
+<div class="card span2" id="mail-mobilemonero">
+  <h3 style="color:var(--accent-red);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    📬 Mobilemonero Mail
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— mobilemonero.com inbox</span>
+  </h3>
+  <div class="intel-split">
+    <div class="intel-left" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+      ${resendTileHtml('mobilemonero')}
+    </div>
+  </div>
+</div>
+    </div><!-- /tenant-grid mobilemonero -->
+  </section>
+
+  <!-- ═══ TENANT: Party Favor Photo — campaigns, leads, mail ═══ -->
+  <section class="tenant-section" id="section-pfp">
+    <div class="tenant-head">
+      <img src="/images/pfp.png" alt="Party Favor Photo">
+      <span class="tenant-name">Party Favor Photo</span>
+      <span class="tenant-tag">— photo booth bookings · campaigns · leads</span>
+      <a class="tenant-link" href="https://partyfavorphoto.com" target="_blank">partyfavorphoto.com ↗</a>
+      <span class="jobby-desk">🪑 Jobby's desk — PFP: ${sentToday} sent today · last run ${campaignLastRun}</span>
+    </div>
+    <div class="tenant-grid">
+<!-- 📯 PFP Campaigns & Leads -->
+<div class="card span2" id="campaigns">
   <h3 style="color:#60a5fa;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    📯 Campaigns & Leads
-    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— PFP Campaign · PFP Leads · 31 Harbor</span>
+    📯 PFP Campaigns &amp; Leads
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— outreach · lead pipeline</span>
   </h3>
   <div class="subgrid-3">
     <div style="background:#0d0d15;border-radius:6px;padding:8px;">
@@ -1330,50 +1439,104 @@ export function createCampusHandler(deps) {
       <div class="stat"><span class="label">Newest</span><span class="value" id="pfp-leads-newest" style="font-size:0.65rem;">-</span></div>
     </div>
     <div style="background:#0d0d15;border-radius:6px;padding:8px;">
-      <div style="font-size:0.65rem;color:#60a5fa;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">🏠 31 Harbor</div>
-      <div class="stat"><span class="label">Contact Pool</span><span class="value" id="harbor-pool">${harborPoolSize}</span></div>
-      <div class="stat"><span class="label">Sent Today</span><span class="value" id="harbor-sent-today">${harborSentToday}</span></div>
-      <div class="stat"><span class="label">Sent Total</span><span class="value" id="harbor-sent-total">${harborSentTotal}</span></div>
-      <div class="stat"><span class="label">Fresh Avail</span><span class="value" id="harbor-fresh">${harborFresh}</span></div>
-      <div class="stat"><span class="label">Last Run</span><span class="value" id="harbor-last-run">${harborLastRun}</span></div>
-      <div class="stat"><span class="label">Next Drop</span><span class="value" id="harbor-next-drop">-</span></div>
+      <div style="font-size:0.65rem;color:#f87171;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">📬 PFP Mail</div>
+      ${resendTileHtml('pfp')}
     </div>
   </div>
 </div>
+    </div><!-- /tenant-grid pfp -->
+  </section>
 
-<!-- 📬 Incoming Mail -->
-<div class="card tile tile-p11" id="mail">
+  <!-- ═══ TENANT: 31 Harbor — software studio outreach ═══ -->
+  <section class="tenant-section" id="section-harbor">
+    <div class="tenant-head">
+      <span class="tenant-name">🏠 31 Harbor</span>
+      <span class="tenant-tag">— software studio · Suite referrals · campaigns</span>
+      <a class="tenant-link" href="https://31harbor.com" target="_blank">31harbor.com ↗</a>
+      <span class="jobby-desk">🪑 Jobby's desk — 31 Harbor: ${harborSentToday} sent today · last run ${harborLastRun}</span>
+    </div>
+    <div class="tenant-grid">
+<!-- 📯 31 Harbor Campaign -->
+<div class="card" id="campaigns-harbor">
+  <h3 style="color:#60a5fa;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    📯 31 Harbor Campaign
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— outreach pipeline</span>
+  </h3>
+  <div style="background:#0d0d15;border-radius:6px;padding:8px;">
+    <div class="stat"><span class="label">Contact Pool</span><span class="value" id="harbor-pool">${harborPoolSize}</span></div>
+    <div class="stat"><span class="label">Sent Today</span><span class="value" id="harbor-sent-today">${harborSentToday}</span></div>
+    <div class="stat"><span class="label">Sent Total</span><span class="value" id="harbor-sent-total">${harborSentTotal}</span></div>
+    <div class="stat"><span class="label">Fresh Avail</span><span class="value" id="harbor-fresh">${harborFresh}</span></div>
+    <div class="stat"><span class="label">Last Run</span><span class="value" id="harbor-last-run">${harborLastRun}</span></div>
+    <div class="stat"><span class="label">Next Drop</span><span class="value" id="harbor-next-drop">-</span></div>
+  </div>
+</div>
+
+<!-- 📬 31 Harbor inbox -->
+<div class="card" id="mail-harbor">
   <h3 style="color:var(--accent-red);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    📬 Incoming Mail
-    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Resend inboxes</span>
+    📬 31 Harbor Mail
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— 31harbor.com inbox</span>
   </h3>
   <div class="intel-split">
     <div class="intel-left" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
-      ${resendTileHtml()}
+      ${resendTileHtml('31harbor')}
     </div>
   </div>
 </div>
+    </div><!-- /tenant-grid harbor -->
+  </section>
 
-<!-- Browser tile — summons the dynamic aside pane with the browser chrome.
-     The pane itself is not new (aside-push loopback below); what this adds
-     is the manual on-demand entry point and the harness shortcuts. -->
-<div class="card tile tile-p1" id="browser">
-  <h3 style="color:var(--accent-orange);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    🌐 Browser
-    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— contained pane · drives the harnesses</span>
+  <!-- ═══ TENANT: Jobby McJobberson — jobs & applications ═══ -->
+  <section class="tenant-section" id="section-jobby">
+    <div class="tenant-head">
+      <span class="tenant-name">💼 Jobby McJobberson</span>
+      <span class="tenant-tag">— job opportunities · application tracking · the campus marketing agent</span>
+      <a class="tenant-link" href="https://jobbymcjobberson.com" target="_blank">jobbymcjobberson.com ↗</a>
+    </div>
+    <div class="tenant-grid">
+<!-- 💼 Job Opportunities — public job feeds via /api/jobby/board -->
+<div class="card" id="jobby-jobs">
+  <h3 style="color:#c084fc;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    💼 Job Opportunities
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— public feeds · unverified until checked</span>
   </h3>
-  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">
-    <button onclick="openBrowserPane()" style="padding:6px 14px;border-radius:6px;border:none;background:#ff6b35;color:white;cursor:pointer;font-size:12px;font-weight:600;">Open Browser</button>
-    <button onclick="openBrowserPane('http://127.0.0.1:4130/','OpenCode')" title="OpenCode coding agent, embedded via the loopback auth proxy" style="padding:6px 14px;border-radius:6px;border:1px solid #3a3a5a;background:transparent;color:#ff6b35;cursor:pointer;font-size:12px;">⌨️ opencode</button>
-    <button onclick="openBrowserPane('http://127.0.0.1:4131/','DSH')" title="DeepSeek harness, embedded via the loopback auth proxy" style="padding:6px 14px;border-radius:6px;border:1px solid #3a3a5a;background:transparent;color:#ff6b35;cursor:pointer;font-size:12px;">🌊 dsh</button>
-  </div>
-  <div style="margin-top:6px;font-size:10px;color:#948d9e;">
-    Agents push pages here with <code>aside-push</code> → <code>/browser?u=…</code> · harnesses are loopback, view from the host laptop
+  <div id="jobby-board-content" style="font-size:0.65rem;">
+    <div class="stat"><span class="label">Loading job board...</span></div>
   </div>
 </div>
 
+<!-- 📮 Applications Tracker — submitted applications across all clients -->
+<div class="card" id="jobby-apps">
+  <h3 style="color:#c084fc;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    📮 Applications Tracker
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— submitted · pending · outcomes</span>
+  </h3>
+  <div id="jobby-apps-content" style="font-size:0.65rem;">
+    <div class="stat"><span class="label">Loading applications...</span></div>
+  </div>
+</div>
+
+<!-- 📬 Jobby inbox -->
+<div class="card span2" id="mail-jobby">
+  <h3 style="color:var(--accent-red);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    📬 Jobby Mail
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— jobbymcjobberson.com inbox</span>
+  </h3>
+  <div class="intel-split">
+    <div class="intel-left" style="grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+      ${resendTileHtml('jobby')}
+    </div>
+  </div>
+</div>
+    </div><!-- /tenant-grid jobby -->
+  </section>
+
+
+<!-- Browser tile moved into the Suite tenant section (2026-10-11). -->
+
 <!-- Campus Forum Full Board -->
-<div id="board-full" class="card tile-wide tile-p12" style="margin-top:0.5rem;">
+<div id="board-full" class="card tile-full" style="margin-top:0.5rem;">
   <h3 style="color:var(--accent-yellow);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
     📜 Campus Forum <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Full Bulletin Board</span>
   </h3>
