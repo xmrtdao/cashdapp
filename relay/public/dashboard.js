@@ -1399,6 +1399,31 @@ loadAgentExperienceCard();
   setTimeout(function() { loadJobbyBoard(); setInterval(loadJobbyBoard, 60000); }, 5800);
   setTimeout(function() { loadJobbyApps(); setInterval(loadJobbyApps, 60000); }, 6400);
 
+  // Jobby's desks: refresh every tenant chip with his real per-brand numbers.
+  // PFP/31 Harbor chips are server-rendered with campaign counters; this adds
+  // his latest fleet action, and fills the core/suite/mobilemonero chips.
+  function loadJobbyDesks() {
+    apiFetch('/api/jobby/desks', { signal: AbortSignal.timeout(20000) }).then(function(r){return r.json();}).then(function(d){
+      if (!d.success || !d.desks) return;
+      var j = d.desks.jobby || {};
+      var mm = d.desks.mobilemonero || {};
+      var tail = (j.actions_24h !== undefined)
+        ? ' · ' + j.actions_24h + ' actions/24h · last ' + (j.last_activity || 'never')
+        : '';
+      var core = document.getElementById('desk-core');
+      if (core && j.actions_24h !== undefined) core.textContent = '🪑 Jobby\'s desk — campus marketing' + tail;
+      var suite = document.getElementById('desk-suite');
+      if (suite && j.actions_24h !== undefined) suite.textContent = '🪑 Jobby\'s desk — Suite growth' + tail;
+      var mmEl = document.getElementById('desk-mm');
+      if (mmEl && mm.workers_24h !== undefined) mmEl.textContent = '🪑 Jobby\'s desk — fleet recruitment · ' + mm.workers_24h + ' miners/24h · ' + (mm.total_shares_24h || 0).toLocaleString() + ' shares';
+      ['desk-pfp', 'desk-harbor'].forEach(function(id){
+        var el = document.getElementById(id);
+        if (el && tail && el.textContent.indexOf('actions/24h') === -1) el.textContent = el.textContent + tail;
+      });
+    }).catch(function(){});
+  }
+  setTimeout(function() { loadJobbyDesks(); setInterval(loadJobbyDesks, 60000); }, 7000);
+
   // Local XMRig heartbeat (vex-laptop auto-reports hashrate)
   function localMinerHeartbeat() {
     apiFetch('/api/mining/local-xmrig', { signal: AbortSignal.timeout(25000) })

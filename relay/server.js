@@ -12857,6 +12857,61 @@ app.get('/api/jobby/outreach', async (req, res) => {
  * that are blocking or waiting on an answer, because that is the list a person
  * can act on. `prepared` counts packets written; it never implies they were sent.
  */
+// /api/jobby/desks — per-tenant marketing activity for the "Jobby's desk"
+// chips in each Nexus tenant section header. Jobby is the de facto marketing
+// agent, so every brand section shows his real numbers for that brand rather
+// than a static label.
+app.get('/api/jobby/desks', async (req, res) => {
+  trackRequest('GET /api/jobby/desks');
+  const desks = {};
+  const timeAgo = (ts) => {
+    if (!ts) return 'never';
+    const m = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60000));
+    if (m < 1) return 'just now';
+    if (m < 60) return m + 'm ago';
+    const h = Math.round(m / 60);
+    if (h < 24) return h + 'h ago';
+    return Math.round(h / 24) + 'd ago';
+  };
+
+  // Fleet-wide Jobby activity (core/suite desks)
+  try {
+    const act = await queryLocalPg(
+      `SELECT
+         (SELECT COUNT(*)::int FROM public.eliza_activity_log
+           WHERE agent_id = 'jobby' AND created_at > NOW() - INTERVAL '24 hours') AS n24,
+         (SELECT MAX(created_at) FROM public.eliza_activity_log
+           WHERE agent_id = 'jobby') AS last_at,
+         (SELECT title FROM public.eliza_activity_log
+           WHERE agent_id = 'jobby' ORDER BY created_at DESC LIMIT 1) AS last_title`
+    );
+    const r = act.rows[0] || {};
+    desks.jobby = {
+      actions_24h: r.n24 || 0,
+      last_activity_at: r.last_at || null,
+      last_activity: timeAgo(r.last_at),
+      last_title: r.last_title || null,
+    };
+  } catch (e) {
+    desks.jobby = { error: e.message };
+  }
+
+  // Mobilemonero: miners seen in the last 24h (recruitment desk)
+  try {
+    const workers = Object.values(getMiningWorkers());
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const recent = workers.filter(w => w.last_seen && new Date(w.last_seen).getTime() > cutoff);
+    desks.mobilemonero = {
+      workers_24h: recent.length,
+      total_shares_24h: recent.reduce((a, w) => a + (w.total_shares || 0), 0),
+    };
+  } catch (e) {
+    desks.mobilemonero = { error: e.message };
+  }
+
+  res.json({ success: true, desks, ts: new Date().toISOString() });
+});
+
 // /api/jobby/fleet-stats — owner-dashboard aggregate over all Jobby clients:
 // how many applications exist per status, and the most recent few. Powers the
 // Nexus "Applications Tracker" tile; per-client detail stays behind the

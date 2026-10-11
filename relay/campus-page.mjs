@@ -1019,7 +1019,7 @@ export function createCampusHandler(deps) {
     <div class="tenant-head">
       <span class="tenant-name">🏛️ XMRT Nexus</span>
       <span class="tenant-tag">— Core operations · campus comms · trust · fleet</span>
-      <span class="jobby-desk">🪑 Jobby's desk — campus-wide marketing on call</span>
+      <span class="jobby-desk" id="desk-core">🪑 Jobby's desk — campus-wide marketing on call</span>
     </div>
     <div class="tenant-grid">
 <div class="card chat-card tile-wide tile-p1" id="comms">
@@ -1311,7 +1311,7 @@ export function createCampusHandler(deps) {
       <span class="tenant-name">🧠 Suite</span>
       <span class="tenant-tag">— AI Council of Executives · chat · contained browser · task pipeline</span>
       <a class="tenant-link" href="/suite/dashboard" target="_blank">suite dashboard ↗</a>
-      <span class="jobby-desk">🪑 Jobby's desk — Suite growth &amp; outreach</span>
+      <span class="jobby-desk" id="desk-suite">🪑 Jobby's desk — Suite growth &amp; outreach</span>
     </div>
     <div class="tenant-grid">
 <!-- Browser tile — summons the dynamic aside pane with the browser chrome.
@@ -1352,7 +1352,7 @@ export function createCampusHandler(deps) {
       <span class="tenant-name">Mobilemonero</span>
       <span class="tenant-tag">— XMRT mobile mining · pool · rewards</span>
       <a class="tenant-link" href="https://mobilemonero.com" target="_blank">mobilemonero.com ↗</a>
-      <span class="jobby-desk">🪑 Jobby's desk — mining fleet recruitment</span>
+      <span class="jobby-desk" id="desk-mm">🪑 Jobby's desk — mining fleet recruitment</span>
     </div>
     <div class="tenant-grid">
 
@@ -1411,7 +1411,7 @@ export function createCampusHandler(deps) {
       <span class="tenant-name">Party Favor Photo</span>
       <span class="tenant-tag">— photo booth bookings · campaigns · leads</span>
       <a class="tenant-link" href="https://partyfavorphoto.com" target="_blank">partyfavorphoto.com ↗</a>
-      <span class="jobby-desk">🪑 Jobby's desk — PFP: ${sentToday} sent today · last run ${campaignLastRun}</span>
+      <span class="jobby-desk" id="desk-pfp">🪑 Jobby's desk — PFP: ${sentToday} sent today · last run ${campaignLastRun}</span>
     </div>
     <div class="tenant-grid">
 <!-- 📯 PFP Campaigns & Leads -->
@@ -1453,7 +1453,7 @@ export function createCampusHandler(deps) {
       <span class="tenant-name">🏠 31 Harbor</span>
       <span class="tenant-tag">— software studio · Suite referrals · campaigns</span>
       <a class="tenant-link" href="https://31harbor.com" target="_blank">31harbor.com ↗</a>
-      <span class="jobby-desk">🪑 Jobby's desk — 31 Harbor: ${harborSentToday} sent today · last run ${harborLastRun}</span>
+      <span class="jobby-desk" id="desk-harbor">🪑 Jobby's desk — 31 Harbor: ${harborSentToday} sent today · last run ${harborLastRun}</span>
     </div>
     <div class="tenant-grid">
 <!-- 📯 31 Harbor Campaign -->
