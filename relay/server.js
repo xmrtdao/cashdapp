@@ -14430,9 +14430,9 @@ app.post('/api/fleet-chat/push-notify', async (req, res) => {
 });
 
 // Contact form endpoints. /api/contact/31harbor (showing requests) is retired
-// — see its handler. Cuttlefish Labs notifications below still send as
-// david@31harbor.com to the principals' gmail; that is Cuttlefish mail, not
-// 31Harbor campaign mail (harbor sender is hello@31harbor.com).
+// — see its handler. Cuttlefish Labs notifications below send as hello@ to
+// the principals' gmail (david@ retired 2026-10-16); that is Cuttlefish mail,
+// not 31Harbor campaign mail (harbor sender is hello@31harbor.com).
 app.options('/api/contact/31harbor', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -14465,7 +14465,7 @@ app.post('/api/contact/cuttlefishclaws', express.json(), async (req, res) => {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        from: 'Cuttlefish Labs <david@31harbor.com>',
+        from: 'Cuttlefish Labs <hello@31harbor.com>',
         to: ['dvdelze@gmail.com', 'xmrtnet@gmail.com'],
         subject: `CAC Presale Reservation - ${name}`,
         text: body,
@@ -14509,7 +14509,7 @@ app.post('/api/contact/cuttlefishclaws/inquiry', express.json(), async (req, res
       method: 'POST',
       headers: { 'Authorization': `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        from: 'Cuttlefish Labs <david@31harbor.com>',
+        from: 'Cuttlefish Labs <hello@31harbor.com>',
         to: ['dvdelze@gmail.com', 'xmrtnet@gmail.com'],
         subject: `DAO-REIT Investor Inquiry - ${name}`,
         text: body,
@@ -14602,7 +14602,7 @@ app.post('/api/contact/cuttlefishclaws/chat', express.json(), async (req, res) =
           method: 'POST',
           headers: { 'Authorization': `Bearer ${RESEND_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            from: 'Cuttlefish Labs <david@31harbor.com>',
+            from: 'Cuttlefish Labs <hello@31harbor.com>',
             to: ['dvdelze@gmail.com', 'xmrtnet@gmail.com'],
             subject: `Agent Chat - ${agentId}`,
             text: emailBody,
