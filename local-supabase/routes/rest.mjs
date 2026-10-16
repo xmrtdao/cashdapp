@@ -39,6 +39,40 @@ function isLiteral(v) {
   return null;
 }
 
+// Column-type cache for array serialization (fullTable -> Map(col -> udt_name)).
+// pg serializes JS arrays as PG array literals ({a,b}), which is correct for
+// native array columns (text[], integer[]) but a syntax error for json/jsonb.
+// Without this lookup every jsonb-array write fails; with a failed lookup we
+// fall back to the old behavior so native arrays keep working.
+const _colTypesCache = new Map();
+async function getColumnTypes(pool, schema, table) {
+  const key = `${schema}.${table}`;
+  if (_colTypesCache.has(key)) return _colTypesCache.get(key);
+  const map = new Map();
+  try {
+    const r = await pool.query(
+      'SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2',
+      [schema, table]
+    );
+    for (const row of r.rows) map.set(row.column_name, row.udt_name);
+  } catch { /* fall back to legacy behavior below */ }
+  _colTypesCache.set(key, map);
+  return map;
+}
+
+function serializeValue(val, udtName) {
+  if (Array.isArray(val)) {
+    // Native PG arrays keep PG-literal form; everything else (json/jsonb)
+    // needs the JSON form or Postgres rejects the write.
+    if ((udtName || '').startsWith('_')) {
+      return '{' + val.map(v => typeof v === 'string' ? `"${v.replace(/"/g, '\\"')}"` : v).join(',') + '}';
+    }
+    return JSON.stringify(val);
+  }
+  if (typeof val === 'object' && val !== null) return JSON.stringify(val);
+  return val;
+}
+
 function parseFilters(params) {
   const filters = [];
   let i = 1;
@@ -119,7 +153,15 @@ function parseFilters(params) {
         continue;
       }
       
-      const m = String(v).match(/^([a-zA-Z_]+)\.(.*)$/);
+      // PostgREST negation prefix: ?col=not.eq.x / not.is.null / not.in.(a,b).
+      // Without this, `not` falls through to the plain-eq branch below and
+      // matches the literal string 'not.is.null' against the column, which
+      // silently returns zero rows instead of erroring.
+      let vv = String(v);
+      let neg = false;
+      if (vv.startsWith('not.')) { neg = true; vv = vv.slice(4); }
+      const wrap = (sql) => neg ? `NOT (${sql})` : sql;
+      const m = vv.match(/^([a-zA-Z_]+)\.(.*)$/);
       if (m && OP_MAP[m[1]]) {
         const op = m[1];
         const raw = m[2];
@@ -135,16 +177,16 @@ function parseFilters(params) {
             continue;
           }
           const ph = list.map(() => `$${i++}`).join(',');
-          acc.push({ sql: `"${k}" IN (${ph})`, args: list, paramsUsed: list.length });
+          acc.push({ sql: wrap(`"${k}" IN (${ph})`), args: list, paramsUsed: list.length });
         } else {
           const lit = isLiteral(raw);
           if (lit) {
-            acc.push({ sql: `"${k}" ${OP_MAP[op]} ${lit.sql}` });
+            acc.push({ sql: wrap(`"${k}" ${OP_MAP[op]} ${lit.sql}`) });
           } else if (['cs', 'cd', 'ov', 'contains'].includes(op)) {
             // jsonb operators: the right-hand operand must be cast to jsonb
-            acc.push({ sql: `"${k}" ${OP_MAP[op]} $${i++}::jsonb`, args: [raw], paramsUsed: 1 });
+            acc.push({ sql: wrap(`"${k}" ${OP_MAP[op]} $${i++}::jsonb`), args: [raw], paramsUsed: 1 });
           } else {
-            acc.push({ sql: `"${k}" ${OP_MAP[op]} $${i++}`, args: [raw], paramsUsed: 1 });
+            acc.push({ sql: wrap(`"${k}" ${OP_MAP[op]} $${i++}`), args: [raw], paramsUsed: 1 });
           }
         }
       } else {
@@ -439,7 +481,8 @@ export default function makeRestRouter({ dbUrl }) {
           const placeholders = cols.map((_, ci) => `$${ri * cols.length + ci + 1}`);
           return `(${placeholders.join(',')})`;
         }).join(',');
-        const args = rows.flatMap((row) => cols.map((c) => row[c]));
+        const postColTypes = await getColumnTypes(pool, resolvedSchema, bareTable);
+        const args = rows.flatMap((row) => cols.map((c) => serializeValue(row[c], postColTypes.get(c))));
 
         // PostgREST upsert support. Triggered by EITHER:
         //   ?on_conflict=col1,col2            (URL param — what supabase-js sends
@@ -521,21 +564,11 @@ export default function makeRestRouter({ dbUrl }) {
             // pg serializes JS arrays as PG array literals ({1,2,3}) instead of
             // JSON ([1,2,3]). For jsonb columns we need the JSON form, so
             // stringify any array/object value before passing to pg.query().
-            const setArgs = cols.map((c) => {
-              const val = body[c];
-              // pg serializes JS arrays as PG array literals ({1,2,3}) instead of
-              // JSON ([1,2,3]). For jsonb columns we need the JSON form, so
-              // stringify any array/object value before passing to pg.query().
-              // But for integer[] / text[] columns, we need PG array format.
-              if (Array.isArray(val)) {
-                // Convert JS array to PG array literal: [1,2,3] -> {1,2,3}
-                return '{' + val.map(v => typeof v === 'string' ? `"${v.replace(/"/g, '\\"')}"` : v).join(',') + '}';
-              }
-              if (typeof val === 'object' && val !== null) {
-                return JSON.stringify(val);
-              }
-              return val;
-            });
+            // Column-aware serialization: native array columns keep PG-literal
+            // form, json/jsonb (and unknown) columns get JSON. serializeValue
+            // falls back to the legacy PG-literal form when the lookup fails.
+            const colTypes = await getColumnTypes(pool, resolvedSchema, bareTable);
+            const setArgs = cols.map((c) => serializeValue(body[c], colTypes.get(c)));
             const whereSqlRenumbered = renumberPlaceholders(whereSql, cols.length);
             const sql = `UPDATE ${fullTable} SET ${sets.join(', ')} ${whereSqlRenumbered} RETURNING ${selectCols}`;
             const r = await client.query(sql, [...setArgs, ...whereArgs]);
