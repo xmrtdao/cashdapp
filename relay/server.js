@@ -25,6 +25,7 @@ process.on('unhandledRejection', (err) => {
  */
 
 import express from 'express';
+import compression from 'compression';
 import { readFileSync, existsSync, mkdirSync, writeFile, writeFileSync, readdirSync, statSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -124,6 +125,7 @@ import {
   get as getMedia, list as listMedia, remove as removeMedia,
 } from './tools/media-registry.mjs';
 import { paragraphPublish } from './tools/paragraph-publisher.mjs';
+import * as paragraphManager from './tools/paragraph-manager.mjs';
 import * as state from './lib/state.mjs';
 import * as shareLog from './lib/share-log.mjs';
 import { createTaskRunner } from './lib/task-runner.mjs';
@@ -1132,6 +1134,14 @@ const toolHandlers = {
     return { success: true, mediaId: r.entry.id, path: w.path };
   },
   'paragraph-publish': paragraphPublish,
+  'paragraph-posts-list': paragraphManager.paragraphPostsList,
+  'paragraph-post-get': paragraphManager.paragraphPostGet,
+  'paragraph-post-create': paragraphManager.paragraphPostCreate,
+  'paragraph-post-update': paragraphManager.paragraphPostUpdate,
+  'paragraph-post-set-status': paragraphManager.paragraphPostSetStatus,
+  'paragraph-post-delete': paragraphManager.paragraphPostDelete,
+  'paragraph-publication-get': paragraphManager.paragraphPublicationGet,
+  'paragraph-api-capabilities': paragraphManager.paragraphApiCapabilities,
 
   'muapi-generate-image': async (args) => {
     const prompt = args?.prompt || args?.p || '';
@@ -3752,7 +3762,7 @@ const toolHandlers = {
       const data = await res.json();
       // If the Resend key is over quota, suggest using a different agent
       if (data?.error?.statusCode === 429) {
-        return { success: false, error: 'Resend daily quota exceeded for this domain. Try agent: "pfp" (bookings@partyfavorphoto.com) or agent: "harbor" (david@31harbor.com) instead. Quota resets at midnight UTC.' };
+        return { success: false, error: 'Resend daily quota exceeded for this domain. Try agent: "pfp" (bookings@partyfavorphoto.com) or agent: "harbor" (hello@31harbor.com) instead. Quota resets at midnight UTC.' };
       }
       return data;
     } catch (err) { return { success: false, error: err.message }; }
@@ -4107,6 +4117,38 @@ function guessHandlerFromTitle(title) {
 // ── Express App ─────────────────────────────────────────────
 const app = express();
 
+// ── Response compression ─────────────────────────────────────
+// Added 2026-10-12. The Suite SPA's main bundle is ~11.7 MB of JS and was being
+// served UNCOMPRESSED — express.static does not gzip, and no compression
+// middleware was installed. Verified against the live endpoint: a request
+// sending `Accept-Encoding: gzip, deflate, br` came back with no
+// Content-Encoding at all and Content-Length: 11747476.
+//
+// Through Cloudflare that large an uncompressed body breaks the transfer:
+// browsers failed the load with
+//   GET /suite/assets/index-*.js net::ERR_HTTP2_PROTOCOL_ERROR
+// while a plain fetch of the same URL still completed. The page then never
+// executed, so the dashboard showed nothing at all.
+//
+// gzip takes this bundle to roughly 3 MB, comfortably inside what the edge
+// will carry. This is registered BEFORE express.static so static assets are
+// covered.
+//
+// The threshold is raised from the 1 KB default because the relay serves a lot
+// of small JSON responses that are already tiny; compressing those costs CPU
+// for no gain. Already-compressed formats are skipped by the library.
+app.use(compression({
+  threshold: 1024,
+  // Don't try to gzip things that are already compressed on disk.
+  filter: (req, res) => {
+    const type = res.getHeader('Content-Type');
+    if (typeof type === 'string' && /image|video|audio|zip|gzip|br|woff2?/i.test(type)) {
+      return false;
+    }
+    return compression.filter(req, res);
+  },
+}));
+
 // Raw body capture for requests without Content-Type (some agents omit it)
 // Standard JSON parser — fleet chat endpoint has its own fallback for missing Content-Type
 //
@@ -4278,6 +4320,31 @@ function rateLimit(ip, path) {  const now = Date.now();
 
 app.use(async (req, res, next) => {
   // Public API endpoints (no auth required)
+
+  // WHOLE-HOST exemption for the two client-facing PFP hostnames.
+  //
+  // The path list below can only enumerate prefixes, and a studio link is not a
+  // predictable path: prints.partyfavorphoto.com/<booking-token> serves the
+  // studio by Host-header routing, so the token is whatever the funnel issued.
+  // `req.path === '/'` is public, which is why the bare domain worked, but
+  // `req.path === '/a9gjZiQJtkezC5XaiTpzcs5xLOkQf8TX'` matched nothing and was
+  // answered 401 "Authentication required".
+  //
+  // The failure is entirely silent from the client's side of a healthy-looking
+  // funnel: the booking completes, the confirmation page renders, the studio
+  // link is correct, and every client who clicks it is turned away by the
+  // relay's own auth middleware. Found by walking the real link on
+  // 2026-10-14, not by reading code.
+  //
+  // Host-scoped rather than path-scoped on purpose. These two hosts serve only
+  // client-facing product surfaces and are already deliberately exempt from
+  // Cloudflare Access; nothing privileged is reachable through them.
+  const pfpClientHost = String(req.headers.host || '').split(':')[0].toLowerCase();
+  if (pfpClientHost === 'prints.partyfavorphoto.com' ||
+      pfpClientHost === 'book.partyfavorphoto.com') {
+    return next();
+  }
+
   if (req.method === 'OPTIONS' ||
       req.path === '/' ||
       req.path === '/ping' ||
@@ -4291,6 +4358,24 @@ app.use(async (req, res, next) => {
       // recorded - while the endpoint looked complete.
       req.path === '/webhook/stripe' ||
       req.path.startsWith('/functions/v1/') ||
+      // PFP Prints Studio (prints.partyfavorphoto.com). A booked client is an
+      // anonymous browser on a public link: they have no RELAY_API_KEY and no
+      // Cloudflare Access JWT, and requiring either is precisely the login page
+      // this product must not have. Every request arrives through the Cloudflare
+      // tunnel carrying CF-* headers, which is what exposed the gap — locally the
+      // same call succeeded, so it only broke for real clients.
+      // Same failure shape as the Stripe omission documented above: the endpoint
+      // looked finished and answered 401 to every real caller.
+      req.path.startsWith('/studio/') ||
+      req.path.startsWith('/api/visual/pfp/') ||
+      // PFP Booking funnel (book.partyfavorphoto.com). Same reasoning as the
+      // studio above: a prospective client is an anonymous browser with no
+      // RELAY_API_KEY and no Cloudflare Access JWT. Nothing here is secret to
+      // reach — the booking token in the URL is the credential, exactly as it
+      // is for the studio link. The one endpoint that can change money is the
+      // Stripe webhook, which authenticates with the Stripe signature over the
+      // raw body rather than with a session.
+      req.path.startsWith('/api/pfp-book/') ||
       req.path === '/api/suite/validate-token' || req.path === '/api/login' || req.path === '/api/auth/cert-login' ||
       req.path.startsWith('/api/suite/') ||
       req.path.startsWith('/rest/v1/') ||
@@ -4727,6 +4812,82 @@ if (existsSync(join(BOOKINGS_DIR, 'index.html'))) {
 } else {
   console.log(`  PFP Bookings SPA: NOT FOUND at ${BOOKINGS_DIR} — skipping`);
 }
+
+// ── PFP Prints — client-facing print studio (prints.partyfavorphoto.com) ──
+// The client arrives on a booking UUID and shapes their template with Eliza.
+// Generation is priced and budget-guarded inside PFPDesigner; a failure opens
+// a task and never auto-retries.
+const PFP_PRINTS_DIR = join(__dirname, 'public', 'pfp-prints');
+const PFP_BRAND_DIR = join(__dirname, '..', 'partyfavorphoto', 'assets');
+// The studio's API is mounted TWICE on purpose.
+//
+//  * /api/visual/pfp/* is the canonical path and works everywhere the relay is
+//    reachable directly (localhost, the other tunnel hostnames, tooling).
+//  * /studio/* is the path the CLIENT uses on prints.partyfavorphoto.com.
+//    A zone-level Cloudflare Access policy intercepts /api/* on that hostname
+//    and answers "Authentication required" before the request ever reaches us;
+//    I do not have a token with Access:Apps:Edit, so /studio/* is the path the
+//    zone does not gate. Same router — not a second implementation.
+//
+// Both mounts are registered BEFORE the host-scoped studio middleware below,
+// otherwise that middleware would short-circuit /studio/* to index.html.
+let pfpPrintsRouter = null;
+try {
+  pfpPrintsRouter = (await import('./routes/pfp-prints.mjs')).default;
+  app.use('/api/visual/pfp', pfpPrintsRouter);
+  app.use('/studio', pfpPrintsRouter);
+  console.log('  PFP Prints API: /api/visual/pfp  and  /studio');
+} catch (e) {
+  console.warn('  PFP Prints API: FAILED to mount -', e.message);
+}
+
+// The client follows a bare link like prints.partyfavorphoto.com, so the host
+// root has to serve the studio — otherwise they land on the relay dashboard.
+// Host-scoped, not path-scoped: taking the root from every other hostname on
+// this same origin would be a far worse break.
+const PFP_PRINTS_HOST = 'prints.partyfavorphoto.com';
+app.use((req, res, next) => {
+  const host = String(req.headers.host || '').split(':')[0].toLowerCase();
+  if (host !== PFP_PRINTS_HOST) return next();
+  if (req.path.startsWith('/api/') || req.path.startsWith('/studio/')) return next();
+  return res.sendFile(join(PFP_PRINTS_DIR, 'index.html'));
+});
+
+// Real brand assets, so the studio wears the actual PFP identity.
+app.get('/api/visual/pfp/brand/logo.png', (_req, res) =>
+  res.sendFile(join(PFP_BRAND_DIR, 'logo.png')));
+console.log(`  PFP Prints studio: ${existsSync(join(PFP_PRINTS_DIR, 'index.html')) ? PFP_PRINTS_DIR : 'NOT FOUND - skipping'}`);
+
+// ── PFP Booking funnel (book.partyfavorphoto.com) ──
+//
+// A SEPARATE HOSTNAME, deliberately. The studio is a client who has already
+// paid and is refining a template; the booking funnel is a stranger deciding
+// whether to trust us with money. They are different audiences with different
+// risk, and one Cloudflare Access policy or one blocked path should not be able
+// to take out both.
+//
+// Mounted twice for the same reason as the studio: /api/pfp-book is canonical
+// and works from anywhere the relay is reachable, /book is the path a zone-level
+// Cloudflare Access policy on this hostname does not intercept.
+const PFP_BOOK_DIR = join(__dirname, 'public', 'pfp-book');
+let pfpBookRouter = null;
+try {
+  pfpBookRouter = (await import('./routes/pfp-booking.mjs')).default;
+  app.use('/api/pfp-book', pfpBookRouter);
+  app.use('/book', pfpBookRouter);
+  console.log('  PFP Booking API: /api/pfp-book  and  /book');
+} catch (e) {
+  console.warn('  PFP Booking API: FAILED to mount -', e.message);
+}
+
+const PFP_BOOK_HOST = 'book.partyfavorphoto.com';
+app.use((req, res, next) => {
+  const host = String(req.headers.host || '').split(':')[0].toLowerCase();
+  if (host !== PFP_BOOK_HOST) return next();
+  if (req.path.startsWith('/api/') || req.path.startsWith('/book/')) return next();
+  return res.sendFile(join(PFP_BOOK_DIR, 'index.html'));
+});
+console.log(`  PFP Booking site: ${existsSync(join(PFP_BOOK_DIR, 'index.html')) ? PFP_BOOK_DIR : 'NOT FOUND - skipping'}`);
 
 // ── Elze Contract Suite™ ──
 // Landing page at /elze, Analyzer at /elze/analyzer, Writer at /elze/writer
@@ -6764,6 +6925,20 @@ app.post('/webhook/resend-inbound', async (req, res) => {
     }
   }
 
+  // If this reply belongs to a candidate with an open check-in, close it.
+  // The candidate's own words close the question so the loop can speak again.
+  if (candidateClientId) {
+    try {
+      const { answerCheckin } = await import('./jobby/checkin.mjs');
+      const answered = await answerCheckin(candidateClientId, data.text || data.body || '');
+      if (answered) {
+        console.log(`[Resend Inbound] check-in answered for client ${candidateClientId}: ${answered.kind}`);
+      }
+    } catch (e) {
+      console.warn('[Resend Inbound] check-in close failed:', e.message);
+    }
+  }
+
   const emailEntry = {
     email_id: emailId,
     from: data.from,
@@ -6844,12 +7019,13 @@ app.post('/webhook/resend-inbound', async (req, res) => {
   console.log(`[Resend Inbound] Email from ${data.from}: "${data.subject || '(no subject)'}" -> ${toDomain}`);
 
   // ── Forward 31harbor Re: replies ────
-  // DISABLED: was forwarding to dvdelze@gmail.com which is no longer wanted
+  // DISABLED: was forwarding to dvdelze@gmail.com which is no longer wanted.
+  // david@ retired 2026-10-16 (real-estate client off the system).
   if (false && toDomain === '31harbor.com' && data.subject && /^Re:/i.test(data.subject)) {
     const fwdKey = process.env.RESEND_31HARBOR_API_KEY;
     if (fwdKey) {
       const fwdPayload = {
-        from: 'David Elze <david@31harbor.com>',
+        from: '31 Harbor <hello@31harbor.com>',
         to: ['dvdelze@gmail.com'],
         subject: `Fwd: ${data.subject}`,
         text: `From: ${data.from || '?'}\nSubject: ${data.subject}\n\n${data.text || data.body || '(full body pending — check 31harbor inbox)'}`,
@@ -6984,7 +7160,7 @@ app.post('/webhook/resend-inbound', async (req, res) => {
     const isAutoReply = subjLower.includes('automatic reply') || subjLower.includes('out of office') || subjLower.includes('auto-reply');
     const isSystem = fromEmail.includes('noreply@') || fromEmail.includes('notifications@') || fromEmail.includes('google') || fromEmail.includes('uber');
 
-    if (!isAutoReply && !isSystem && fromEmail && !fromEmail.includes('david@31harbor.com')) {
+    if (!isAutoReply && !isSystem && fromEmail && !fromEmail.includes('david@31harbor.com') && !fromEmail.includes('joe@31harbor.com') && !fromEmail.includes('cody@31harbor.com') && !fromEmail.includes('hello@31harbor.com')) {
       const companyId = toDomain === '31harbor.com' ? 'harbor' : 'party';
       // Check if this sender already exists as a lead
       queryLocalPg(
@@ -13009,6 +13185,59 @@ app.get('/api/jobby/applications', async (req, res) => {
   }
 });
 
+/** POST /api/jobby/cycle — run one Jobby heartbeat tick for the current client. */
+app.post('/api/jobby/cycle', async (req, res) => {
+  trackRequest('POST /api/jobby/cycle');
+  try {
+    const { client, error, status } = await resolveJobbyClient(req, res, { create: false });
+    if (error) return res.status(status).json({ error });
+    const { runCycle } = await import('./jobby/loop.mjs');
+    const { createHeartbeat, defaultWorkerId } = await import('./jobby/loop.mjs');
+    const pool = await import('./lib/db.mjs').then(m => m.getSharedPool());
+
+    const workerId = defaultWorkerId();
+    const result = await runCycle({
+      pool,
+      clientId: client.id,
+      workerId,
+      steps: {
+        source: { run: async ({ clientId, pool }) => {
+          const { runSource } = await import('./jobby/sourcing.mjs');
+          return runSource({ pool, clientId });
+        }, only: ['source'] },
+        packet: { run: async ({ clientId, pool }) => {
+          const { preparePacket } = await import('./jobby/applications.mjs');
+          const { rows } = await pool.query(
+            `SELECT id FROM app.job_applications WHERE client_id = $1 AND status = 'pending' AND packet IS NULL ORDER BY created_at LIMIT 1`,
+            [clientId]
+          );
+          if (!rows[0]) return { ok: true, note: 'no unprepared applications' };
+          return preparePacket({ clientId, applicationId: rows[0].id, pool });
+        }, only: ['packet'] },
+        research: { run: async ({ clientId, pool }) => {
+          const { addOpportunity } = await import('./jobby/tools.mjs');
+          const { rows } = await pool.query(
+            `SELECT id FROM app.job_opportunities WHERE client_id = $1 AND status = 'researched' LIMIT 1`,
+            [clientId]
+          );
+          if (!rows[0]) return { ok: true, note: 'no researched opportunities' };
+          return { ok: true, note: 'opportunity already researched' };
+        }, only: ['research'] },
+        send: { run: async ({ clientId, pool }) => {
+          const { canSend } = await import('./jobby/store.mjs');
+          const gate = await canSend(clientId);
+          if (!gate.allowed) return { ok: false, reason: gate.reason };
+          return { ok: true, note: `send gate: ${gate.reason}` };
+        }, only: ['send'] },
+      },
+    });
+    res.json({ success: true, ...result });
+  } catch (e) {
+    console.error('[jobby] cycle error:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 /** OPTIONS preflight for the portal's cross-origin calls. */
 app.options('/api/jobby/:which', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -14056,6 +14285,8 @@ app.post('/api/fleet-chat/email-webhook', async (req, res) => {
     'eliza@partyfavorphoto.com': 'eliza',
     'hermes@partyfavorphoto.com': 'hermes',
     'david@31harbor.com': 'vex',
+    'joe@31harbor.com': 'vex',
+    'cody@31harbor.com': 'vex',
     'info@31harbor.com': 'vex',
     'hello@31harbor.com': 'vex',
   };
@@ -14145,7 +14376,7 @@ app.post('/api/fleet-chat/email-webhook', async (req, res) => {
     'eliza': 'Eliza Cloud <eliza@partyfavorphoto.com>',
     'hermes': 'Hermes Mobile <hermes@mobilemonero.com>',
     'pfp': 'Party Favor Photo <bookings@partyfavorphoto.com>',
-    'harbor': '31 Harbor <david@31harbor.com>',
+    'harbor': '31 Harbor <hello@31harbor.com>',
     // Jobby sends job-search outreach on a client's behalf. It sends as the
     // agent, not as the candidate: a verified sending domain for the candidate
     // is the only way to change that, and that is a decision for the client,
@@ -14158,7 +14389,7 @@ app.post('/api/fleet-chat/email-webhook', async (req, res) => {
   // it resolves the From from a client row inside the module, so there is no
   // request, internal or otherwise, that can name a From.
   const from = AGENT_FROM[agent];
-  if (!from) return res.status(400).json({ error: `Unknown agent: ${agent}. Try 'pfp' for bookings@partyfavorphoto.com or 'harbor' for david@31harbor.com` });
+  if (!from) return res.status(400).json({ error: `Unknown agent: ${agent}. Try 'pfp' for bookings@partyfavorphoto.com or 'harbor' for hello@31harbor.com` });
 
   try {
     const sent = await sendViaResend({
@@ -14198,8 +14429,10 @@ app.post('/api/fleet-chat/push-notify', async (req, res) => {
   }
 });
 
-// POST /api/contact/31harbor — Contact form endpoint for 31harbor.com
-// Sends inquiry to david@31harbor.com and confirmation to the submitter
+// Contact form endpoints. /api/contact/31harbor (showing requests) is retired
+// — see its handler. Cuttlefish Labs notifications below still send as
+// david@31harbor.com to the principals' gmail; that is Cuttlefish mail, not
+// 31Harbor campaign mail (harbor sender is hello@31harbor.com).
 app.options('/api/contact/31harbor', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -15159,6 +15392,13 @@ app.post('/api/cashdapp/user', express.json(), async (req, res) => {
 app.post('/api/contact/31harbor', express.json(), async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   trackRequest('/api/contact/31harbor');
+  // RETIRED 2026-10-16: this endpoint mailed Amagansett showing requests for
+  // the halted real-estate listing (distribution halted July 2026 per David
+  // Elze directive; david@ retired as the real-estate client). The archived
+  // listing page still POSTs here; it is refused rather than served.
+  // The 31Harbor company contact path is the consult link, not this route.
+  logActivity('contact-31harbor', 'retired', 'REFUSED', 'showing-request endpoint retired; listing distribution halted');
+  return res.status(410).json({ error: 'This contact endpoint is retired.' });
   const { name, email, phone, message } = req.body || {};
   if (!name || !email) return res.status(400).json({ error: 'name and email required' });
 
@@ -18269,3 +18509,14 @@ registerUniversityBridge(app, {
   trackRequest: typeof trackRequest === 'function' ? trackRequest : () => {},
   logActivity: typeof logActivity === 'function' ? logActivity : () => {},
 });
+
+// Export functions for use by other modules (e.g., cron-engine-v2.mjs)
+export {
+  ensureCandidateMailbox,
+  sendViaResend,
+  resolveJobbySender,
+  isCandidateMailbox,
+  domainOf,
+  formatFrom,
+  displayNameFor,
+};
