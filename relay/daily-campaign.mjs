@@ -59,7 +59,7 @@ async function query(sql, params) {
 function logLine(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
   console.log(msg);
-  try { appendFileSync(LOG_FILE, line + '\n'); }
+  try { fs.appendFileSync(LOG_FILE, line + '\n'); }
   catch (e) { console.error(`campaign.log write failed: ${e.message}`); }
 }
 
