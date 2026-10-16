@@ -322,6 +322,8 @@ Deno.serve({ port }, wrapped);
         // OpenCode Zen — tier 1 of the edge-function AI cascade
         OPENCODE_API_KEY: process.env.OPENCODE_API_KEY || '',
         OPENCODE_BASE_URL: process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1',
+        OPENCODE_MODELS: process.env.OPENCODE_MODELS || 'space-bunny-free',
+        OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || '',
         DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
         ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
         OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
