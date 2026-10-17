@@ -1244,6 +1244,12 @@ loadAgentExperienceCard();
                         }).join('');
                 // Only auto-scroll to bottom if user was already near the bottom BEFORE the update
                 if (wasNearBottom) msgsEl.scrollTop = msgsEl.scrollHeight;
+                // Hand the same array to the announcer. It decides what is
+                // speakable from the `announce` flag the relay set, so there is
+                // exactly one answer to "what gets read aloud" rather than two.
+                if (window.FleetAnnouncer && window.FleetAnnouncer.ingest) {
+                  try { window.FleetAnnouncer.ingest(msgs); } catch(e) { console.warn('[fleet-announcer] ingest failed', e); }
+                }
       })
       .catch(function(){ if(msgsEl) msgsEl.innerHTML = '<div style="color:#E4695A;text-align:center;padding:20px 0;font-size:12px;">⚠ Comms temporarily offline</div>'; });
   }

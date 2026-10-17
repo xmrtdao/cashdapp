@@ -129,6 +129,11 @@ import * as paragraphManager from './tools/paragraph-manager.mjs';
 import * as state from './lib/state.mjs';
 import * as shareLog from './lib/share-log.mjs';
 import { createTaskRunner } from './lib/task-runner.mjs';
+import {
+  announcerStatus, setMuted as announcerSetMuted,
+  checkAnnouncement as announcerCheck, claimAnnouncement as announcerClaim,
+  noteSuppressed as announcerNoteSuppressed, markSpoken as announcerMarkSpoken,
+} from './lib/announcer.mjs';
 import { handleInboundEmail } from './lib/auto-responder.mjs';
 import { ensureLocalDb, restFetch as localRestFetch, query as localQuery, LOCAL_DB_ENABLED } from './lib/localDb.mjs';
 import { createMeshRouter, initMeshNode, publishToMesh, getMeshMessageLog, getMeshStatus } from './lib/mesh-router.mjs';
@@ -1601,6 +1606,90 @@ const toolHandlers = {
     state.set('nexusAside', null);
     return { success: true };
   },
+
+  // ── fleet-announce: speak to the operator ──
+  //
+  // The escalation path. An agent that has found something it cannot fix alone
+  // should not have to wait for a human to read the board: this makes the
+  // operator's dashboard speak a short summary out loud through the browser's
+  // own speech synthesis. Free, offline, and on the machine they are sitting at.
+  //
+  // It cannot override the operator. If they have switched the voice off, this
+  // returns `{ spoken: false, operatorMuted: true }` and records the attempt for
+  // the badge on their dashboard — the agent is told no, and the human finds out
+  // an agent tried. That asymmetry is the whole contract: agents may always ask,
+  // only the human decides.
+  //
+  // Rate limits (cooldown per agent, fleet budget per 30 min, urgent budget per
+  // hour) live in lib/announcer.mjs. A refusal is reported, never thrown, so an
+  // agent can read the reason and put it in its own log.
+  'fleet-announce': async (args) => {
+    // Identity comes from `_agent`, which /tools/run injects from the request's
+    // authenticated speaker — never from `args.agent`, which the caller chose.
+    // An escalation is rate-limited per agent and attributed in the audit trail,
+    // so letting a caller name a different agent would let one agent spend
+    // another's cooldown or hide behind a name that is not its own.
+    const agent = String(args?._speaker || args?._agent?.id || args?.agent || 'unknown').slice(0, 60);
+    const text = String(args?.message || args?.text || '').trim();
+    if (!text) return { success: false, error: 'message is required — say what you need the operator to know' };
+    if (text.length > 2000) return { success: false, error: `message too long (${text.length} chars); keep an announcement under 2000` };
+
+    const urgency = args?.urgency === 'urgent' ? 'urgent' : 'normal';
+    // A `!announce` prefix is stripped server-side; stripping it here too means
+    // the spoken text does not begin with a stray bang read as "exclamation".
+    const clean = text.replace(/^!(announce|escalate)\b\s*(!urgent\b\s*)?/i, '').trim();
+    const speech = args?.speech ? String(args.speech).trim() : clean;
+
+    // Check before posting so a refusal costs nothing and cannot leave a
+    // half-announcement on the board.
+    const check = announcerCheck({ agent, urgency });
+    if (!check.allowed) {
+      announcerNoteSuppressed({ agent, urgency, reason: check.reason, detail: check.detail, text: clean });
+      console.log(`[fleet-announce] refused ${agent} (${check.reason}): ${check.detail}`);
+      return {
+        success: false, spoken: false, suppressed: true,
+        reason: check.reason, detail: check.detail,
+        retryInMs: check.retryInMs ?? null, operatorMuted: check.reason === 'muted',
+        hint: check.reason === 'muted'
+          ? 'The operator has the voice switched off. Post to fleet chat instead and they will read it — do not retry the voice.'
+          : check.reason === 'cooldown'
+            ? `Another announcement from ${agent} is still cooling down. Post to fleet chat instead.`
+            : 'Fleet announcement budget is spent for now. Post to fleet chat instead.',
+      };
+    }
+
+    const res = await fetch(`http://127.0.0.1:${process.env.PORT || 8080}/api/fleet-chat/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-agent-id': agent },
+      body: JSON.stringify({
+        agent,
+        message: `📢 ${clean}`,
+        speech,
+        urgency,
+        announce: true,
+        channel: 'fleet',
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.success === false) {
+      return { success: false, spoken: false, error: data.error || `relay refused (HTTP ${res.status})`, detail: data };
+    }
+    // `!announce` is an allow-listed marker for the ANNOUNCER_AGENTS set; an
+    // escalation from an arbitrary agent carries its own marker instead so the
+    // board renders it as one.
+    return {
+      success: true,
+      spoken: true,
+      id: data.message?.id,
+      urgency,
+      cooldownMs: 10 * 60 * 1000,
+    };
+  },
+
+  // Read-only: is the operator listening, and has anything been suppressed?
+  // Cheap enough for an agent to check before deciding whether to escalate.
+  'fleet-announce-status': async () => announcerStatus(),
 
   'service_control': async (args) => {
     const action = args?.action;
@@ -4625,17 +4714,67 @@ app.get('/browser', (req, res) => {
 //
 // Deriving the stamp from mtime+size means the version bumps itself on every
 // edit. Nothing to remember to update, so nothing can forget.
-let dashboardJsVersionCache = null;
-function dashboardJsVersion() {
+let dashboardJsVersionCache = {};
+function dashboardJsVersion(file = 'dashboard.js') {
   try {
-    const st = statSync(join(PUBLIC_DIR, 'dashboard.js'));
+    const st = statSync(join(PUBLIC_DIR, file));
     const v = st.mtimeMs + '.' + st.size;
-    if (v !== dashboardJsVersionCache) dashboardJsVersionCache = v;
+    if (v !== dashboardJsVersionCache[file]) dashboardJsVersionCache[file] = v;
     return v;
   } catch {
-    return dashboardJsVersionCache || '0';
+    return dashboardJsVersionCache[file] || '0';
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Operator control of the fleet's outside voice
+//
+// Two rules, and both are load-bearing:
+//
+// 1. The switch requires the relay API key. Agents reach the relay through
+//    /tools/run without it. If muting took the same credential an agent can
+//    present, then "the operator's mute" would be a preference an agent could
+//    undo, and the escalation path would be worthless.
+//
+// 2. Mute is a server-side fact, not a browser flag. The dashboard's button
+//    posts here; the decision lives in lib/announcer.mjs and is consulted again
+//    at the moment any announcement is posted. A browser that ignores the flag,
+//    a stale tab, or a second window cannot un-mute the fleet.
+// ═══════════════════════════════════════════════════════════════════════
+
+app.get('/api/announcer', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.json(announcerStatus());
+});
+
+app.post('/api/announcer/voice', express.json(), async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  const key = req.headers['x-api-key'];
+  if (!RELAY_API_KEY || key !== RELAY_API_KEY) {
+    return res.status(403).json({ error: 'The announcer voice switch is operator-only. It needs the relay API key.' });
+  }
+  const muted = req.body?.muted;
+  if (typeof muted !== 'boolean') {
+    return res.status(400).json({ error: 'muted must be true or false', usage: '{ muted: true|false, reason: "..." }' });
+  }
+  const status = announcerSetMuted(muted, {
+    reason: req.body?.reason,
+    by: req.body?.by || req.headers['x-agent-id'] || 'operator',
+  });
+  console.log(`[announcer] operator set voice muted=${muted} from ${req.ip}`);
+  res.json({ success: true, ...status });
+});
+
+// The dashboard reports back what it actually spoke. Without this the relay
+// would count an announcement as delivered the moment it was posted, which is
+// the exact class of bug this whole subsystem exists to avoid: the request was
+// accepted, and nothing came out of the speakers.
+app.post('/api/announcer/spoken', express.json(), (req, res) => {
+  const id = req.body?.id;
+  if (!id) return res.status(400).json({ error: 'id is required' });
+  announcerMarkSpoken(String(id).slice(0, 120));
+  res.json({ success: true, ...announcerStatus() });
+});
 
 app.get('/static/dashboard.js', (req, res) => {
   const filePath = join(PUBLIC_DIR, 'dashboard.js');
@@ -4659,6 +4798,17 @@ app.get('/static/dashboard.js', (req, res) => {
   content = content.replace(/\$\{relayApiKey\}/g, RELAY_API_KEY || '');
   res.setHeader('Content-Type', 'application/javascript');
   res.send(content);
+});
+
+// The fleet's outside voice: selective TTS for announcements only.
+// Served from the same place as dashboard.js, for the same reason — a file that
+// is not served from here is a file whose changes no browser will pick up.
+app.get('/static/fleet-announcer.js', (req, res) => {
+  const filePath = join(PUBLIC_DIR, 'fleet-announcer.js');
+  if (!existsSync(filePath)) return res.status(404).send('/* fleet-announcer.js not found */');
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.setHeader('Content-Type', 'application/javascript');
+  res.send(readFileSync(filePath, 'utf8'));
 });
 
 app.get('/static/markdown.js', (req, res) => {
@@ -4771,18 +4921,73 @@ if (existsSync(join(CUTTLEFISH_DIR, 'index.html'))) {
   console.log(`  CuttlefishClaws SPA: NOT FOUND at ${CUTTLEFISH_DIR} — skipping`);
 }
 
-// ── CashDApp SPA (Vite build) ──
-const CASHDAPP_DIR = join(__dirname, '..', 'cashdapp', 'dist');
-if (existsSync(join(CASHDAPP_DIR, 'index.html'))) {
-  app.use('/cashdapp', express.static(CASHDAPP_DIR, { maxAge: '5m' }));
-  app.get('/cashdapp/*path', (req, res) => {
-    const filePath = join(CASHDAPP_DIR, req.path.replace(/^\/cashdapp\//, ''));
-    if (existsSync(filePath)) return res.sendFile(filePath);
-    res.sendFile(join(CASHDAPP_DIR, 'index.html'));
+// ── CashDapp (Next.js, reverse-proxied) ────────────────────────────────
+//
+// This was `const CASHDAPP_DIR = join(__dirname, '..', 'cashdapp', 'dist')`
+// served with express.static, and it could never have worked:
+//
+//   * CashDapp is a Next.js app with five app/api routes - alchemy/balance,
+//     alchemy/tokens, check-payment, cold-wallet, create-payment-intent.
+//   * next.config.mjs sets no `output: 'export'`, so there is no static
+//     export and no dist/ is ever produced.
+//   * The only copy on disk is TempCashDapp/, a Next.js project.
+//
+// So the route pointed at a directory that cannot exist, logged
+// "NOT FOUND - skipping" on every boot, and served nothing. The skip message
+// is the worse half: it reads like a configuration note rather than a dead
+// feature, which is how it stayed invisible while people used the relay.
+//
+// A server-rendered app cannot be served by express.static, so this proxies.
+// Streamed with http.request rather than global fetch, because fetch buffers
+// the whole response body and a server-rendered app streams its RSC payloads.
+//
+// The PATH IS PRESERVED. /cashdapp/checkout goes to <origin>/cashdapp/
+// checkout, not <origin>/checkout, which is why next.config.mjs sets
+// `basePath: '/cashdapp'` - Next generates its own asset and route URLs from
+// basePath, so a prefix-stripping proxy would leave every script tag and
+// RSC request pointing at the relay root and 404.
+//
+// When the origin is down this answers 503 with a reason. It used to be a
+// silent skip; a feature that cannot be reached is broken, and the log line
+// should say so rather than shrug.
+const CASHDAPP_ORIGIN = process.env.CASHDAPP_ORIGIN || 'http://127.0.0.1:3100';
+{
+  const u = new URL(CASHDAPP_ORIGIN);
+  const isSecure = u.protocol === 'https:';
+  const mod = isSecure ? require('node:https') : require('node:http');
+
+  app.use('/cashdapp', (req, res) => {
+    // req.url is the part after the mount point, so rebuild the full path.
+    const targetPath = '/cashdapp' + (req.url === '/' ? '' : req.url);
+    const proxied = mod.request(
+      {
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port || (isSecure ? 443 : 80),
+        method: req.method,
+        path: targetPath,
+        headers: { ...req.headers, host: u.host },
+      },
+      (upstream) => {
+        res.writeHead(upstream.statusCode || 502, upstream.headers);
+        upstream.pipe(res);
+      }
+    );
+
+    proxied.on('error', (err) => {
+      const body = `CashDapp is not reachable at ${CASHDAPP_ORIGIN} (${err.code || err.message}). `
+        + `Start it with "pnpm --dir TempCashDapp build && pnpm --dir TempCashDapp start", `
+        + `or set CASHDAPP_ORIGIN.`;
+      console.error(`  CashDapp: proxy target unreachable at ${CASHDAPP_ORIGIN} - ${err.code || err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'cashdapp_unreachable', detail: body }));
+      }
+    });
+
+    req.pipe(proxied);
   });
-  console.log(`  CashDApp SPA: ${CASHDAPP_DIR}`);
-} else {
-  console.log(`  CashDApp SPA: NOT FOUND at ${CASHDAPP_DIR} — skipping`);
+  console.log(`  CashDapp: proxied at /cashdapp -> ${CASHDAPP_ORIGIN}`);
 }
 
 // ── PFP Intake SPA (Vite build, client onboarding flow) ──
@@ -5623,7 +5828,19 @@ app.post('/api/suite/tasks', async (req, res) => {
       [title, description||null, stage||'PENDING', status||'PENDING', priority||0, category||null, assignee_agent_id||null, blocking_reason||null, auto_advance_threshold_hours||null, progress_percentage||0, organization_id||null, created_by_user_id||null]
     );
     res.status(201).json(r.rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    // tasks_one_open_per_title: one open task per title. A duplicate is a
+    // refusal, not a server fault - 23505 is the whole point of the index, and
+    // answering 500 would make every caller log it as an outage instead of
+    // backing off. Callers that mean to be idempotent key on the 409.
+    if (e && e.code === '23505' && /tasks_one_open_per_title/.test(String(e.message || ''))) {
+      return res.status(409).json({
+        error: 'an open task with this title already exists',
+        constraint: 'tasks_one_open_per_title',
+      });
+    }
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.patch('/api/suite/tasks/:id', async (req, res) => {
@@ -8623,6 +8840,15 @@ const CURATED_TOOL_SCHEMAS = {
     },
     required: ['kind'],
   },
+  'fleet-announce': {
+    type: 'object',
+    properties: {
+      message: { type: 'string', description: 'What the operator needs to know, in one or two sentences. Lead with the fact, not with a greeting.' },
+      speech: { type: 'string', description: 'Optional shorter phrasing for aloud. The board post is markdown; this is what is actually spoken, so write it to be heard.' },
+      urgency: { type: 'string', enum: ['normal', 'urgent'], description: 'urgent interrupts the current announcement and is rate-limited harder (2 per hour). Use it only when a human must act now.' },
+    },
+    required: ['message'],
+  },
   'clerk-chat': {
     type: 'object',
     properties: {
@@ -8946,6 +9172,8 @@ function getToolDescription(name) {
     'task-stats': 'Get task runner statistics',
     'aside-push': 'Push content into the dynamic aside pane of every open XMRT Nexus dashboard. Args: kind (url|image|video|html|text|markdown), url (for url/image/video) or html or text, title, by. The pane appears only when something is pushed — use it to show the operator a web page, file preview, generated image/video, or rendered document. To drive the contained browser (URL bar + agent harnesses), push kind url with url /browser?u=<target>; harness shortcuts: http://127.0.0.1:4130/ (opencode), http://127.0.0.1:4131/ (dsh) — both are relay loopback proxies that inject auth, so never push 4096/3080 directly.',
     'aside-close': 'Close the aside pane on all open XMRT Nexus dashboards.',
+    'fleet-announce': 'Speak to the operator OUT LOUD. Escalation tool: makes the operator\'s Nexus dashboard read your message aloud through the browser\'s free built-in speech synthesis, so a human who is not watching the board still hears it. Use it when you have found something you cannot fix alone and it needs a person — a credential you cannot obtain, a decision only they can make, a service down with no safe next step, a request they explicitly asked to be told about. Do NOT use it for progress notes or routine updates: it is rate-limited (once per 10 min per agent, 4 per 30 min for the whole fleet, 2 urgent per hour) and every announcement is on their speakers in their room. Args: message (what they need to know), speech (optional shorter aloud phrasing), urgency ("normal" | "urgent"). Returns { success, spoken, suppressed, reason, detail } — when the operator has switched the voice off you get { operatorMuted: true }, which is final: put the information in fleet chat instead and do not retry.',
+    'fleet-announce-status': 'Read-only: whether the operator\'s outside voice is currently armed or switched off, how many announcements have been spoken or suppressed recently, and the rate limits in force. Cheap; check before escalating.',
     'clerk-chat': 'Office Clerk — deterministic offline responder. Args: message. Matches the message against a wired intent table (status, resources, tasks, external, mining, ollama, remember/recall, aside open/close, restart) and executes the mapped relay tool with no AI involved. Returns { text, provenance, intent, tool }. Use as a zero-cost first responder or offline fallback.',
     'github-post': 'Post a comment on a GitHub issue',
     'elze-templates': 'Elze Contract Suite template & clause retrieval. Actions: templates (all with metadata), template {id} (single + ordered clauses), clauses {template_id}, search {q, category}. Filters: category, jurisdiction. Reads canonical DB (lease_templates / clause_definitions). Use to fetch template structure for the lease writer.',
@@ -9196,6 +9424,17 @@ app.post('/tools/run', async (req, res) => {
   
   // Inject auth context into args
   args._agent = { id: agentId, level: auth.level };
+  // `_speaker` is the identity from the HTTP header only.
+  //
+  // `agentId` above resolves as `args.agent || x-agent-id`, so a caller can put
+  // any agent's name in the request body and be treated as them. For a read that
+  // is untidy; for something rate-limited and audited per speaker it is not
+  // acceptable — one agent could spend another's announcement cooldown, or file
+  // an escalation under a name that is not its own.
+  //
+  // Tools that need a non-forgeable speaker (fleet-announce) read this instead.
+  // null when no header was sent, in which case the caller's own fallback applies.
+  args._speaker = String(req.headers['x-agent-id'] || '').trim().toLowerCase() || null;
 
   // Agent tool calls: call handler directly (fast path, no queue wait).
   // The task runner is for background cron jobs, not synchronous agent requests.
@@ -10177,6 +10416,23 @@ function addFleetMessage(agent, message, channel = 'fleet', opts = {}) {
     ts: Date.now(),
     time: new Date().toISOString(),
     attachments: opts.attachments || [],
+    // ── Announcement channel for the dashboard's selective TTS ──
+    // `announce` marks this message as a broadcast summary the operator may want
+    // spoken aloud; `speech` is the shorter, markdown-free phrasing to speak when
+    // `message` itself is a formatted board post.
+    //
+    // Both are OPT-IN and only ever set by an allow-listed announcer (see
+    // ANNOUNCER_AGENTS in the send route). Without them a dashboard can tell an
+    // announcement from ordinary traffic by a flag instead of by reading the
+    // text, which means an agent cannot make the operator's machine talk by
+    // writing a sentence that happens to look like a summary.
+    announce: !!opts.announce,
+    speech: typeof opts.speech === 'string' ? opts.speech.slice(0, 1200) : null,
+    // Carried so the dashboard can tell an interrupting escalation from a
+    // routine summary without parsing the text. It was being passed in and
+    // dropped here, so every announcement reached the board as `undefined` and
+    // urgent could never interrupt anything.
+    urgency: opts.announce ? (opts.urgency === 'urgent' ? 'urgent' : 'normal') : null,
   };
   fleetChatMessages.push(entry);
   if (fleetChatMessages.length > FLEET_CHAT_MAX) fleetChatMessages.splice(0, fleetChatMessages.length - FLEET_CHAT_MAX);
@@ -10186,7 +10442,7 @@ function addFleetMessage(agent, message, channel = 'fleet', opts = {}) {
       `INSERT INTO public.fleet_messages (id, topic, agent_id, agent_name, message, payload, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING`,
       [entry.id, channel, agent, FLEET_AGENTS[agent]?.name || agent, message,
-       JSON.stringify({ hop: opts.hop || 0, parentId: opts.parentId || null, attachments: opts.attachments || [] }),
+       JSON.stringify({ hop: opts.hop || 0, parentId: opts.parentId || null, attachments: opts.attachments || [], announce: entry.announce, speech: entry.speech, urgency: entry.urgency }),
        new Date(entry.ts).toISOString()]
     ).catch(() => {});
   });
@@ -12121,7 +12377,12 @@ app.options('/api/fleet-chat/send', (req, res) => {
 app.post('/api/fleet-chat/send', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   trackRequest('/api/fleet-chat/send');
-  const { agent: claimedAgent, message, channel, attachments } = req.body || {};
+  // `message` is rebound below when a `!announce` / `!escalate` marker is stripped
+  // off the front of it, so it cannot be const. It was, and the marker path — the
+  // one an agent uses when it only knows how to post to fleet chat — answered 500
+  // "Assignment to constant variable" on every call.
+  const { agent: claimedAgent, channel, attachments } = req.body || {};
+  let message = req.body?.message;
 
   // Tie the speaker to the certificate.
   //
@@ -12164,13 +12425,88 @@ app.post('/api/fleet-chat/send', async (req, res) => {
     return res.status(400).json({ error: 'message must be a string', receivedType: Array.isArray(message) ? 'array' : typeof message });
   }
 
+  // ── Announcement ("outside voice") ──
+  // `announce` asks the operator's dashboard to SPEAK this message aloud. Any
+  // agent may ask — that is the escalation path and it is the point: an agent
+  // that finds something it cannot fix alone must be able to reach a human who
+  // is not watching the board.
+  //
+  // "May ask" is checked in lib/announcer.mjs, where the operator's switch
+  // lives. Three gates, in order: the operator's mute (which no agent can lift),
+  // a per-agent cooldown, and a fleet budget per 30 minutes so "urgent" stays
+  // worth something. A refusal is recorded and badged, never silently dropped.
+  //
+  // Two ways in: an explicit `announce: true` (what the tool and the summary job
+  // send), or a `!announce` / `!escalate` prefix on the message itself, so an
+  // agent that only knows how to post to fleet chat can still reach a human.
+  //
+  // `speech` is the shorter spoken phrasing (the board post is formatted
+  // markdown, and reading it aloud verbatim reads the punctuation).
+  const SUMMARY_AGENTS = new Set(['announcer', 'task-announcer']);
+  // Any agent may ask. This used to also require the speaker to be one of the
+  // announcer jobs, and that condition was the entire feature being dead: the
+  // escalation tool posted with announce:true, the speaker was never an
+  // announcer job, and the message went to the board as ordinary text with no
+  // cooldown recorded. Every caller saw "spoken: true" and nothing spoke.
+  // The set now only classifies the post (summary vs escalation) for the board.
+  let announcementIntent = req.body?.announce === true;
+  let urgency = req.body?.urgency === 'urgent' ? 'urgent' : 'normal';
+  if (typeof message === 'string') {
+    const marker = message.match(/^!(announce|escalate)\b\s*(!urgent\b\s*)?/i);
+    if (marker) {
+      announcementIntent = true;
+      if (marker[2]) urgency = 'urgent';
+      message = message.slice(marker[0].length).trim();
+      if (!message) return res.status(400).json({ error: 'announcement marker with no message' });
+    }
+  }
+
+  let announcement = false;
+  let speechText = null;
+  let announcementId;
+  if (announcementIntent) {
+    const check = announcerCheck({ agent, urgency });
+    if (!check.allowed) {
+      announcerNoteSuppressed({ agent, urgency, reason: check.reason, detail: check.detail, text: message });
+      console.log(`[announcer] refused ${agent} (${check.reason}): ${check.detail}`);
+      // Deliberately a 200. This is an answer, not a failure: the caller is an
+      // agent that asked a question and the answer is "not now, here is why". A
+      // 429 would make an ordinary refusal read as a broken tool.
+      return res.json({
+        success: false,
+        spoken: false,
+        suppressed: true,
+        reason: check.reason,
+        detail: check.detail,
+        retryInMs: check.retryInMs ?? null,
+        operatorMuted: check.reason === 'muted',
+      });
+    }
+    announcementId = `ann-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const claimed = announcerClaim({
+      agent, urgency, text: message, speech: req.body?.speech, id: announcementId,
+      kind: SUMMARY_AGENTS.has(String(agent || '').toLowerCase()) ? 'summary' : 'escalation',
+    });
+    if (!claimed.ok) return res.status(400).json({ error: claimed.error });
+    announcement = true;
+    speechText = claimed.speech;
+  }
+
   // Let addFleetMessage handle sanitization
   const entry = addFleetMessage(agent, message, channel || 'fleet', {
+    // The announcement id is minted here so the announcer's ledger and the board
+    // entry are the same row. Left to addFleetMessage the board showed `msg-…`
+    // while the ledger recorded `ann-…`, and "what did we actually speak" could
+    // not be joined to the message a human would see.
+    id: announcementId,
     attachments: attachments || [],
     // speaker_verified is carried through so a reader of the board can tell a proved
     // speaker from one that merely named itself. Nothing enforced a certificate
     // before this, so the board has never had that information.
     speaker_verified: speakerVerified,
+    announce: announcement,
+    speech: speechText,
+    urgency: announcement ? urgency : null,
   });
 
   // Store attachment references in DB (link to message) — synchronous to ensure persistence

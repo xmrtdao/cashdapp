@@ -1672,6 +1672,11 @@ export function createCampusHandler(deps) {
   </details><!-- /fn-catalog -->
 
             <script src="/static/dashboard.js?v=${dashboardJsVersion()}"></script>
+            <!-- The fleet's outside voice. Loaded after dashboard.js because it
+                 consumes the poll results dashboard.js already fetches, and it
+                 needs window.apiFetch (which injects the relay key) to reach
+                 /api/announcer. -->
+            <script src="/static/fleet-announcer.js?v=${dashboardJsVersion('fleet-announcer.js')}"></script>
 
             <script src="/static/markdown.js"></script>
   
