@@ -23,6 +23,23 @@ import net from 'node:net';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
+
+// Pick a concrete Python interpreter for services we supervise.
+//
+// Supervising `py` (the Windows Python Launcher) supervises a process that exits
+// as soon as it has dispatched to the real interpreter. The child handle goes
+// stale immediately, the health check short-circuits on it, and the service is
+// restarted in a loop while it is demonstrably still serving. Anything we
+// supervise for more than one tick has to BE the long-lived process.
+function resolvePython() {
+  const candidates = [
+    join(homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'python.exe'),
+    join(homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python312', 'python.exe'),
+    join(homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python311', 'python.exe'),
+  ];
+  for (const c of candidates) if (existsSync(c)) return c;
+  return 'python';
+}
 const DATA_DIR = join(ROOT, 'relay-data');
 const LOG_DIR = join(ROOT, 'logs');
 mkdirSync(DATA_DIR, { recursive: true });
@@ -109,6 +126,20 @@ const SERVICE_DEFS = [
     dependsOn: ['pg'],
   },
   {
+    name: 'opencode',
+    cmd: join(process.env.APPDATA || '', 'npm', 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'),
+    args: ['serve', '--port', '4096', '--hostname', '0.0.0.0'],
+    cwd: ROOT,
+    env: {
+      OPENCODE_API_KEY: process.env.OPENCODE_API_KEY || 'O4Ih7uGdYZUG7vsKFcd7fDgSI_XNtZCNUxioMTHazjU',
+      OPENCODE_BASE_URL: process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1',
+    },
+    healthCheck: () => checkHttp('http://127.0.0.1:4096/health', 2000),
+    startupGraceMs: 10000,
+    maxRestartsPerHour: 3,
+    dependsOn: [],
+  },
+  {
     name: 'cuttlefishclaws-mcp',
     cmd: 'node',
     args: ['relay/cuttlefishclaws-mcp.mjs', '--http', '--port', '3120'],
@@ -191,6 +222,56 @@ const SERVICE_DEFS = [
     dependsOn: ['relay'],
   },
   {
+    // The client-facing print studio. Its own tunnel, in the zone's own
+    // Cloudflare account — the account boundary is why a cross-account CNAME
+    // 530'd until this tunnel existed inside the right one.
+    //
+    // Token is read from ~/.cloudflared/<id>.token at startup, never stored
+    // in source. Connection-based health: the old 'tunnel' service only checks
+    // process existence, so a disconnected cloudflared reads HEALTHY while the
+    // host is actually down. This one is deliberately different.
+    // Runs the PFP tunnel with a LOCAL config rather than --token.
+    //
+    // This changed for a concrete reason. `cloudflared run --token` takes its
+    // ingress from the Cloudflare dashboard, so adding a hostname to a local
+    // file does nothing -- which is why book.partyfavorphoto.com could not be
+    // added. A named tunnel run with --config reads ingress from disk, so
+    // hostnames become version-visible and changeable without a dashboard.
+    //
+    // Two traps this encodes:
+    //   - protocol: http2 lives in pfp-config.yml and IS read in this form. It
+    //     is absent from the token form because that form never reads a config
+    //     at all. QUIC over UDP 7844 does not reach the edge from this network;
+    //     the process starts, holds zero connections, and serves 530 while
+    //     looking alive.
+    //   - The local config is only consulted if the tunnel is NOT remotely
+    //     managed. Prints resolves and book returns 404 today, which is the
+    //     signature of a remotely-managed tunnel whose dashboard ingress knows
+    //     only about prints. Until that public hostname is added in the
+    //     dashboard, book.partyfavorphoto.com stays 404 regardless of this file.
+    name: 'designer',
+    cmd: join(ROOT, 'cloudflared.exe'),
+    args: ['tunnel', '--config', join(homedir(), '.cloudflared', 'pfp-config.yml'),
+           '--metrics', '127.0.0.1:20243', 'run'],
+    cwd: ROOT,
+    // Port 20243, not 20242. The config form does NOT default to exposing
+    // metrics the way the token form did, so the address is pinned here rather
+    // than assumed: with no --metrics the process binds nothing, this healthUrl
+    // can never answer, and the supervisor restarts a perfectly healthy tunnel
+    // forever. 20243 rather than 20242 so it cannot collide with the
+    // mobilemonero tunnel's own metrics listener.
+    healthUrl: 'http://127.0.0.1:20243/metrics',
+    healthCheck: (body) => /cloudflared_tunnel_ha_connections\s+(\d+)/.test(body)
+                          && Number(body.match(/cloudflared_tunnel_ha_connections\s+(\d+)/)[1]) > 0,
+    startupGraceMs: 15000,
+    // Identity for findExistingProcess: the metrics listener distinguishes this
+    // tunnel from the main one (both are cloudflared.exe, so the exe-name
+    // fallback would conflate them and "adopt" the wrong one). With tcpPort
+    // declared, a missing :20243 means not-running, so tick starts it at once.
+    tcpPort: 20243,
+    dependsOn: ['relay'],
+  },
+  {
     name: 'alice',
     cmd: 'node',
     args: ['relay/alice.mjs', '--daemon'],
@@ -229,10 +310,29 @@ const SERVICE_DEFS = [
   },
   {
     name: 'resume-server',
-    cmd: 'py',
+    // The interpreter itself, NOT `py`.
+    //
+    // `py` is the Python Launcher: it dispatches to the real interpreter and then
+    // exits. So the supervisor was supervising a wrapper that had already left —
+    // the child pid it tracked went stale within seconds of every spawn, while
+    // the actual server (a python.exe the launcher had started) kept serving.
+    // That produced a restart roughly every six minutes for a service that was
+    // answering HTTP 200 the entire time, with exit code 3221225786
+    // (0xC000013A, STATUS_CONTROL_C_EXIT — an orderly exit, not a crash).
+    //
+    // The candidates are what `py` resolves to on this machine, listed in order.
+    // If none exists, fall back to `python` on PATH rather than failing to spawn:
+    // a missing interpreter should be a visible spawn error, not a silent
+    // fallback to the launcher that caused this in the first place.
+    cmd: resolvePython(),
     args: ['resume_server.py', '--host', '127.0.0.1', '--port', '5175'],
     cwd: join(ROOT, 'jobby-mcjobberson'),
     healthUrl: 'http://127.0.0.1:5175/',
+    // NOTE: `healthCheck` on a service definition is never read. checkServiceHealth
+    // consults healthUrl, then tcpPort, then the child pid — it never looks at
+    // def.healthCheck. A `healthCheck: () => true` here therefore did nothing at
+    // all, which is worth knowing before anyone writes another one expecting it
+    // to be authoritative.
     healthCheck: () => true,
     startupGraceMs: 5000,
     dependsOn: [],
@@ -296,7 +396,7 @@ const SERVICE_DEFS = [
 
 // graytech is independent of every other service - it needs no database and no
 // tunnel to answer on :8090 - so it starts last and blocks nothing.
-const START_ORDER = ['pg', 'local-sb', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'alice', 'cron-engine-v2', 'campaign-scheduler', 'dsh', 'resume-server', 'graytech'];
+const START_ORDER = ['pg', 'local-sb', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'designer', 'alice', 'cron-engine-v2', 'campaign-scheduler', 'opencode', 'dsh', 'resume-server', 'graytech'];
 
 // ── State ────────────────────────────────────────────────────────────
 const state = {};
@@ -671,7 +771,27 @@ async function startService(name) {
       }
     }
 
-    const child = spawn(def.cmd, def.args, {
+    // Substitute secret placeholders at launch time, never from source. A
+    // @{FILE:<path>} token is read from disk here; a @{ENV:<name>} token is
+    // read from the environment. The value is never logged.
+    let resolvedArgs = def.args;
+    if (def.args.some(a => typeof a === 'string' && a.startsWith('@{FILE:'))) {
+      resolvedArgs = def.args.map(a => {
+        const m = typeof a === 'string' && a.match(/^@\{FILE:([^}]+)\}$/);
+        if (!m) return a;
+        try { return readFileSync(m[1], 'utf8').trim(); }
+        catch (e) {
+          log(`  ${name}: could not read secret file ${m[1]}: ${e.message}`);
+          return null;
+        }
+      });
+      if (resolvedArgs.some(a => a === null)) {
+        log(`  ${name}: NOT starting — a secret file was missing or unreadable`);
+        return;
+      }
+    }
+
+    const child = spawn(def.cmd, resolvedArgs, {
       cwd: def.cwd,
       detached: true,
       stdio: ['ignore', logFd || 'ignore', errFd || 'ignore'],
@@ -728,15 +848,32 @@ async function checkServiceHealth(name) {
   const def = SERVICE_DEFS.find(d => d.name === name);
   if (!def) return false;
 
-  // 1. Check if our managed child process is alive
   const s = state[name];
-  if (s && s.child) {
-    try { process.kill(s.child.pid, 0); } catch { return false; }
+
+  // A DEFINED HEALTH ENDPOINT IS THE AUTHORITY.
+  //
+  // This used to sit behind the child-pid check, which meant a stale child handle
+  // could report a service dead while it was answering requests — observed on
+  // resume-server, which the supervisor restarted every ~6 minutes while
+  // curl was getting HTTP 200 from it throughout. The pid is bookkeeping; the
+  // endpoint is the service. When both are available, the endpoint decides, and
+  // the pid is only asked as a fallback for services that have no endpoint.
+  //
+  // The one case this deliberately does NOT cover: a service whose endpoint
+  // still answers after its process died (a port left held by a child of the
+  // child). That is handled by sweeping stale port owners on restart, not by
+  // trusting a pid we already know is wrong.
+  if (def.healthUrl) {
+    const ok = await checkHttp(def.healthUrl);
+    if (ok) return true;
+    // Endpoint did not answer. A dead child is then corroborating evidence, not
+    // a separate verdict — fall through rather than short-circuit, so a service
+    // on a TCP port with a broken URL can still be recognised as alive.
   }
 
-  // 2. If service has an HTTP health endpoint, check it
-  if (def.healthUrl) {
-    return await checkHttp(def.healthUrl);
+  // 1. Check if our managed child process is alive
+  if (s && s.child) {
+    try { process.kill(s.child.pid, 0); } catch { /* stale handle; keep looking */ }
   }
 
   // 3. TCP port check (for services like pg that listen on a port but have no HTTP)

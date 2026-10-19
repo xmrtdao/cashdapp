@@ -21,6 +21,7 @@ import { Router } from 'express';
 import { spawn } from 'child_process';
 import { existsSync, readdirSync, statSync, writeFileSync, unlinkSync, readFileSync, mkdirSync, createWriteStream } from 'fs';
 import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { createHash } from 'crypto';
 
 let _funcCache = null;
@@ -123,7 +124,13 @@ function discoverFunctions(dir) {
   const out = {};
   for (const name of readdirSync(dir)) {
     const p = join(dir, name);
-    if (!statSync(p).isDirectory()) continue;
+    // statSync can THROW on an entry that exists in the listing but is
+    // unreadable — a directory left delete-pending by Windows, for instance.
+    // One broken entry must not take the whole function catalogue down with
+    // it, so a failure here skips that entry and the rest still load.
+    let isDir = false;
+    try { isDir = statSync(p).isDirectory(); } catch { continue; }
+    if (!isDir) continue;
     if (existsSync(join(p, 'index.ts'))) out[name] = join(p, 'index.ts');
     else if (existsSync(join(p, 'index.js'))) out[name] = join(p, 'index.js');
     else if (existsSync(join(p, 'mod.ts'))) out[name] = join(p, 'mod.ts');
@@ -131,8 +138,51 @@ function discoverFunctions(dir) {
   }
   return out;
 }
+
+// A second function root: <repo>/relay/functions/<name>/index.ts
+//
+// Why this exists. The canonical root is <repo>/suite/supabase/functions, and on
+// 2026-10-19 the agent-work-executor directory there was left in a
+// delete-pending state by Windows — it still appears in a directory listing but
+// every read of it returns ACCESS_DENIED, so the function could not be found,
+// could not be started, and the executor answered 501 for every call. The
+// executor is the only thing that turns queued work into finished work, so that
+// one unreadable directory took the fleet's throughput to zero while every
+// other surface stayed perfectly healthy.
+//
+// This root is a way out that does not depend on the OS clearing a stuck
+// directory: a function whose canonical copy cannot be read is served from
+// here instead. The canonical copy wins whenever it is readable — this is a
+// fallback, not a fork. The same per-function directory convention is used
+// (index.ts inside <name>/), so the transform and shim logic is unchanged.
+//
+// The working copy currently living here carries one difference from the
+// committed source: its shared-logger import is rewritten to an explicit path,
+// because the canonical sibling no longer resolves from this location.
+const RELAY_FUNCTION_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'relay', 'functions');
+
+function discoverRelayFunctions(dir) {
+  if (!existsSync(dir)) return {};
+  const out = {};
+  let names = [];
+  try { names = readdirSync(dir); } catch { return out; }
+  for (const name of names) {
+    const p = join(dir, name);
+    let isDir = false;
+    try { isDir = statSync(p).isDirectory(); } catch { continue; }
+    if (!isDir) continue;
+    if (existsSync(join(p, 'index.ts'))) out[name] = join(p, 'index.ts');
+  }
+  return out;
+}
+
 function getFunctions(dir) {
-  if (!_funcCache) _funcCache = discoverFunctions(dir);
+  if (!_funcCache) {
+    const canonical = discoverFunctions(dir);
+    // Canonical first, relay root second: a function present in both is served
+    // from the canonical copy.
+    _funcCache = { ...discoverRelayFunctions(RELAY_FUNCTION_ROOT), ...canonical };
+  }
   return _funcCache;
 }
 // Clear cache on file changes (called after each request to pick up new .ts files)
@@ -322,7 +372,7 @@ Deno.serve({ port }, wrapped);
         // OpenCode Zen — tier 1 of the edge-function AI cascade
         OPENCODE_API_KEY: process.env.OPENCODE_API_KEY || '',
         OPENCODE_BASE_URL: process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1',
-        OPENCODE_MODELS: process.env.OPENCODE_MODELS || 'space-bunny-free',
+        OPENCODE_MODELS: process.env.OPENCODE_MODELS || 'minimax-m3.1-flash-free',
         OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || '',
         DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY || '',
         ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
@@ -414,12 +464,17 @@ async function handleFunctionCall(req, res, { functionsDir, denoPath }) {
   const funcFile = funcs[name];
 
   if (!funcFile) {
-    console.log(`[functions] ${name}: not found locally, returning stub`);
-    return res.json({
-      stub: true,
+    // This used to return HTTP 200 with `{stub:true}`. A caller that checked
+    // only for a 200 (or for the absence of an `error` field) therefore read a
+    // missing function as a working one. That is how a cron job can "succeed"
+    // against a function that was never written. A function that does not exist
+    // is a 501, so the failure is visible at the call site.
+    console.log(`[functions] ${name}: not found locally - returning 501 (no stub)`);
+    return res.status(501).json({
+      error: 'function_not_implemented',
       function: name,
-      message: 'Edge function not implemented in local stack. Add to suite/supabase/functions/' + name + '/index.ts',
-      received: { method: req.method, query: req.query, body: req.body },
+      message: 'No local implementation at suite/supabase/functions/' + name +
+        '/index.ts. This is a missing function, not a success.',
     });
   }
 
