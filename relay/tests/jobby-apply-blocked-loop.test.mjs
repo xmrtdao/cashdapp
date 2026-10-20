@@ -1,3 +1,4 @@
+import { localDbUrl } from '../lib/local-db-url.mjs';
 /**
  * relay/tests/jobby-apply-blocked-loop.test.mjs — the whole loop, end to end
  *
@@ -19,7 +20,7 @@
  */
 import pg from 'pg';
 
-const CONN = process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite';
+const CONN = localDbUrl();
 let pool;
 try {
   pool = new pg.Pool({ connectionString: CONN, connectionTimeoutMillis: 4000 });

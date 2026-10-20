@@ -110,8 +110,6 @@ async function gather(db) {
                           max(created_at) AS last_at
                    FROM cron_execution_log WHERE status <> 'completed' AND created_at > $1
                    GROUP BY 1, 2 ORDER BY n DESC LIMIT 8`, [since]);
-  const executorRuns = await q('executorRuns', `SELECT count(*)::int AS n FROM cron_execution_log
-                       WHERE job_name = 'agent-work-executor' AND created_at > $1`, [since]);
   const done24h = await q('done24h', `SELECT count(*)::int AS n FROM app.tasks WHERE status = ANY($2::text[]) AND updated_at > $1`, [sinceDay, FINISHED]);
   const closed24h = await q('closed24h', `SELECT count(*)::int AS n FROM app.tasks
                        WHERE status = ANY($2::text[]) AND updated_at > $1`, [sinceDay, ['CANCELLED', 'CLOSED']]);
@@ -125,7 +123,7 @@ async function gather(db) {
   }
 
   return { chat, chatByAgent, dupes, created, completed, moved, stalled, blocked,
-           statusCounts, cronFail, executorRuns, done24h, closed24h, services };
+           statusCounts, cronFail, done24h, closed24h, services };
 }
 
 // ── rendering ──
@@ -199,13 +197,17 @@ function renderBoard(e) {
   }
 
   // 4. Productivity
+  // There is no task executor. This section used to report "Executor ran Nx" by
+  // counting `agent-work-executor` rows, which is why the fleet kept discussing a
+  // job that was removed: the announcer was its last public voice. It now reports
+  // only what actually happened, and says plainly that nothing runs tasks
+  // automatically when nothing does.
   L.push('');
-  const runs = e.executorRuns.rows[0]?.n ?? 0;
   const doneWin = e.completed.rows.length;
   const doneDay = e.done24h.rows[0]?.n ?? 0;
   const closedDay = e.closed24h.rows[0]?.n ?? 0;
   L.push(`**Productivity**`);
-  L.push(`- Executor ran ${runs}×; ${doneWin} task${doneWin === 1 ? '' : 's'} finished this window.`);
+  L.push(`- ${doneWin} task${doneWin === 1 ? '' : 's'} finished this window (no automated executor exists).`);
   L.push(`- Last 24h: ${doneDay} finished (DONE/COMPLETED), ${closedDay} cancelled or closed. Tasks marked blocked: ${e.blocked.rows[0]?.n ?? 0}.`);
   const stalled = e.stalled.rows;
   if (stalled.length) L.push(`- Stalled (assigned, no movement in ${WINDOW_MIN + 20}+ min): ${stalled.length} shown.`);
@@ -214,14 +216,13 @@ function renderBoard(e) {
   // 5. Next steps — every line answers something above.
   const steps = [];
   for (const f of cronFails) steps.push(`Fix \`${f.job_name}\` — ${f.err || 'failing'} (${f.n}× in ${WINDOW_MIN}m).`);
-  if (runs > 0 && doneWin === 0) steps.push(`Executor ran ${runs}× with 0 completions — check \`app.tasks\` for work_failed before adding more work.`);
   // Only repeats that contain words. An image-only post repeated four times is
   // not a loop worth a next step; it is an empty string with a count on it.
   for (const d of e.dupes.rows.filter(x => meaningful(x.line))) {
     steps.push(`Investigate repeated post: "${clip(d.line, 70)}" ×${d.n} — a loop, not progress.`);
   }
   if (stalled.length) steps.push(`Nudge or unassign ${stalled.length} stalled task(s); oldest: "${stalled[0].title}" (${stalled[0].assignee_agent_id || 'unassigned'}).`);
-  if (doneDay === 0 && runs > 0) steps.push(`Nothing finished in 24h against ${runs} executor runs/window — throughput is zero; check AI provider health.`);
+  if (doneDay === 0 && open.some(r => r.status === 'IN_PROGRESS')) steps.push('Nothing finished in 24h while tasks are IN_PROGRESS — throughput is zero; a person has to unblock them.');
   if (unhealthy && unhealthy.length) steps.push(`Restore ${unhealthy.map(s => s.name).join(', ')} — reported unhealthy right now.`);
   if (!steps.length) steps.push('Nothing requires intervention in this window.');
 
@@ -240,7 +241,6 @@ function renderBoard(e) {
 function renderSpeech(e) {
   const chat = e.chat.rows.length;
   const doneWin = e.completed.rows.length;
-  const runs = e.executorRuns.rows[0]?.n ?? 0;
   const doneDay = e.done24h.rows[0]?.n ?? 0;
   const cronFails = e.cronFail.rows;
   const unhealthy = e.services ? (e.services.services || []).filter(s => !s.healthy) : [];
@@ -249,7 +249,6 @@ function renderSpeech(e) {
   const bits = [`Fleet summary for the last ${WINDOW_MIN} minutes.`];
   bits.push(`${chat} fleet chat message${chat === 1 ? '' : 's'}.`);
   bits.push(`${e.created.rows[0]?.n ?? 0} tasks created, ${doneWin} finished.`);
-  if (runs) bits.push(`The executor ran ${runs} times.`);
   bits.push(`${doneDay} tasks finished in the last day.`);
 
   if (cronFails.length) {

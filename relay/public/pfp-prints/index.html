@@ -1,0 +1,1010 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Party Favor Photo — Your Print Studio</title>
+<link rel="icon" href="/api/visual/pfp/brand/logo.png" />
+<style>
+  /* Light brand palette, matched to www.partyfavorphoto.com (cream stationery
+     with gold) rather than the dark theme this studio started as. */
+  :root{
+    --gold:#B8860B; --gold-deep:#8C6508; --gold-soft:#A97C1A;
+    --ink:#1C1A17; --ink-2:#FFFFFF; --paper:#FAF7F1; --page:#F1ECE3;
+    --line:rgba(184,134,11,.26); --line-strong:rgba(184,134,11,.5);
+    --muted:#7A7266; --ok:#2F7D57; --bad:#B3402F;
+    --r:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:
+      radial-gradient(1100px 620px at 12% -8%, rgba(184,134,11,.10), transparent 62%),
+      radial-gradient(900px 520px at 92% 108%, rgba(184,134,11,.08), transparent 60%),
+      var(--page);
+    color:var(--ink); font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* ── Shell ────────────────────────────────────────────────────────────── */
+  #app{display:none;height:100%;flex-direction:column}
+  header{
+    display:flex;align-items:center;gap:12px;padding:12px 18px;
+    border-bottom:1px solid var(--line);background:rgba(250,247,241,.9);
+    backdrop-filter:blur(10px);flex:none;
+  }
+  header img{height:38px;width:auto;flex:none}
+  .who{flex:1;min-width:0}
+  .who b{display:block;font-size:13.5px;font-weight:600;
+         white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .who span{display:block;font-size:11.5px;color:var(--muted);
+            white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .chip{font-size:10.5px;letter-spacing:.7px;text-transform:uppercase;
+        padding:5px 10px;border-radius:999px;border:1px solid var(--line);
+        color:var(--gold-deep);flex:none;background:rgba(184,134,11,.07)}
+  .chip.live{color:var(--ok);border-color:rgba(47,125,87,.4);background:rgba(47,125,87,.08)}
+
+  main{flex:1;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);
+       gap:0;min-height:0}
+
+  /* ── Chat ─────────────────────────────────────────────────────────────── */
+  #chat{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
+  #log{flex:1;overflow-y:auto;padding:20px 18px;display:flex;flex-direction:column;gap:14px}
+  .msg{max-width:82%;padding:12px 14px;border-radius:14px;font-size:14px;
+       line-height:1.6;white-space:pre-wrap;word-wrap:break-word}
+  .msg.eliza{background:var(--ink-2);border:1px solid var(--line);
+             border-bottom-left-radius:5px;align-self:flex-start;
+             box-shadow:0 1px 2px rgba(28,26,23,.05)}
+  .msg.me{background:linear-gradient(135deg,#D9AE3B,#C9992A);color:#241B08;
+         border-bottom-right-radius:5px;align-self:flex-end;font-weight:500}
+  .msg.sys{align-self:center;background:rgba(179,64,47,.08);border:1px solid rgba(179,64,47,.3);
+           color:#8E3225;font-size:12.5px;max-width:92%}
+  .typing{display:inline-flex;gap:4px;align-items:center;padding:2px 0}
+  .typing i{width:6px;height:6px;border-radius:50%;background:var(--gold);opacity:.45;
+            animation:bl 1.25s infinite}
+  .typing i:nth-child(2){animation-delay:.18s} .typing i:nth-child(3){animation-delay:.36s}
+  @keyframes bl{0%,60%,100%{opacity:.25;transform:translateY(0)}
+                30%{opacity:1;transform:translateY(-3px)}}
+
+  /* ── Composer ─────────────────────────────────────────────────────────── */
+  #bar{flex:none;border-top:1px solid var(--line);padding:10px 14px;
+       background:rgba(250,247,241,.92);display:flex;flex-direction:column;gap:9px}
+  .chips{display:flex;gap:7px;flex-wrap:wrap}
+  .chips button{font-size:11.5px;padding:6px 11px;border-radius:999px;cursor:pointer;
+                border:1px solid var(--line);background:rgba(184,134,11,.05);
+                color:var(--gold-deep);transition:.15s;font-family:inherit}
+  .chips button:hover{background:rgba(184,134,11,.14);border-color:var(--line-strong)}
+  .row{display:flex;gap:8px;align-items:flex-end}
+  #say{flex:1;resize:none;max-height:130px;min-height:44px;padding:11px 13px;border-radius:11px;
+       border:1px solid var(--line);background:var(--ink-2);color:var(--ink);
+       font:inherit;font-size:14px}
+  #say:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(184,134,11,.12)}
+  .icon{width:44px;height:44px;flex:none;border-radius:11px;border:1px solid var(--line);
+        background:var(--ink-2);color:var(--gold-deep);cursor:pointer;font-size:17px;
+        display:grid;place-items:center;transition:.15s}
+  .icon:hover{background:rgba(184,134,11,.10)}
+  .icon:disabled{opacity:.4;cursor:not-allowed}
+  .icon.send{background:linear-gradient(135deg,#D9AE3B,#C9992A);color:#241B08;border:none;font-weight:700}
+  #tts{margin-left:auto}
+
+  /* ── Studio ───────────────────────────────────────────────────────────── */
+  #studio{display:flex;flex-direction:column;min-height:0;background:
+          radial-gradient(700px 400px at 50% 0%, rgba(184,134,11,.07), transparent 70%)}
+  #stagewrap{flex:1;display:grid;place-items:center;padding:20px;min-height:0}
+  .frame{position:relative;max-height:100%;max-width:100%;
+         /* checkerboard = transparency, so the client can SEE the cut-outs */
+         background-image:
+           linear-gradient(45deg,#D8D2C6 25%,transparent 25%),
+           linear-gradient(-45deg,#D8D2C6 25%,transparent 25%),
+           linear-gradient(45deg,transparent 75%,#D8D2C6 75%),
+           linear-gradient(-45deg,transparent 75%,#D8D2C6 75%);
+         background-size:18px 18px;background-position:0 0,0 9px,9px -9px,-9px 0;
+         border-radius:var(--r);overflow:hidden;box-shadow:0 12px 32px rgba(28,26,23,.14);
+         border:1px solid var(--line);display:none}
+  .frame img{display:block;max-height:calc(100vh - 230px);max-width:100%;object-fit:contain}
+  #empty{text-align:center;color:var(--muted);font-size:13px;max-width:280px;line-height:1.65}
+  #empty svg{opacity:.35;margin-bottom:12px}
+
+  #controls{flex:none;border-top:1px solid var(--line);padding:12px 16px;
+            background:rgba(250,247,241,.92);display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  select{flex:1;min-width:150px;padding:9px 11px;border-radius:9px;border:1px solid var(--line);
+         background:var(--ink-2);color:var(--ink);font:inherit;font-size:13px}
+  select:focus{outline:none;border-color:var(--gold)}
+  .btn{padding:9px 15px;border-radius:9px;border:1px solid var(--line);
+       background:rgba(184,134,11,.05);color:var(--gold-deep);font:inherit;font-size:13px;
+       cursor:pointer;transition:.15s}
+  .btn:hover{background:rgba(184,134,11,.14);border-color:var(--line-strong)}
+  .btn.pri{background:linear-gradient(135deg,#D9AE3B,#C9992A);color:#241B08;border:none;font-weight:600}
+  .btn.ok{background:linear-gradient(135deg,#3E9A6E,#2F7D57);color:#FFFFFF;border:none;font-weight:600}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+
+  /* The in-studio backdrop grid was removed so the preview gets the room.
+     The picker itself lives in .ob-bd inside #onboard, which has its own
+     mobile-first rules further down. */
+
+  /* ── Dropzone: appears once, then vanishes for good ────────────────────── */
+  #drop{
+    position:absolute;inset:0;z-index:20;display:grid;place-items:center;
+    background:rgba(250,247,241,.96);border:2px dashed var(--gold);border-radius:var(--r);
+    padding:26px;text-align:center;cursor:pointer;transition:.18s;
+  }
+  #drop.hot{background:rgba(184,134,11,.14);transform:scale(1.01)}
+  #drop b{display:block;color:var(--gold-deep);font-size:15px;margin-bottom:7px}
+  #drop span{color:var(--muted);font-size:12.5px;line-height:1.6;display:block}
+  #drop.gone{display:none}
+
+  #busy{position:absolute;inset:0;z-index:15;display:none;place-items:center;
+        background:rgba(250,247,241,.82);backdrop-filter:blur(3px);border-radius:var(--r)}
+  #busy.on{display:grid}
+  .spin{width:34px;height:34px;border:3px solid rgba(184,134,11,.2);border-top-color:var(--gold);
+        border-radius:50%;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  #busytext{margin-top:12px;color:var(--gold-deep);font-size:12.5px;text-align:center}
+
+  .meta{padding:7px 16px;border-top:1px solid var(--line);font-size:11px;color:var(--muted);
+        display:flex;gap:14px;flex-wrap:wrap;background:rgba(250,247,241,.75)}
+  .meta b{color:var(--gold-deep);font-weight:600}
+
+  @media(max-width:900px){
+    main{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) minmax(0,1fr)}
+    #chat{border-right:none;border-bottom:1px solid var(--line)}
+    .frame img{max-height:46vh}
+  }
+
+  /* ── Onboarding ────────────────────────────────────────────────────────── */
+  /* MOBILE FIRST. Every rule below is the small-screen default; the wider
+     layouts are progressive enhancements at min-width. Building desktop-first
+     here would mean the phone — which is how a client opens a link from a
+     confirmation email — gets the leftovers.
+
+     The order is deliberate and it is the product: backdrop, then inspiration,
+     then event type. A backdrop is a concrete visual choice anyone can make
+     with nothing to hand; "upload your invitation" strands anyone who has not
+     got one; and the event type is easiest to answer once there is a curtain
+     and an invitation on screen to react to. Chat and the first draft come
+     last, so nobody types at a blank wall. */
+  #onboard{position:fixed;inset:0;z-index:60;display:flex;flex-direction:column;
+           background:var(--page);overflow-y:auto;-webkit-overflow-scrolling:touch}
+  #onboard.done{display:none}
+  .ob-head{padding:18px 18px 0;text-align:center;flex:none}
+  .ob-head img{height:40px;width:auto;margin-bottom:12px}
+  .ob-head h1{font-size:20px;margin:0 0 4px;letter-spacing:-.2px}
+  .ob-head p{margin:0;font-size:13px;color:var(--muted);line-height:1.55}
+
+  .ob-steps{display:flex;gap:6px;padding:16px 18px 0;flex:none}
+  .ob-steps i{flex:1;height:4px;border-radius:2px;background:rgba(184,134,11,.2)}
+  .ob-steps i.on{background:var(--gold)}
+  .ob-steps i.done{background:var(--ok)}
+
+  .ob-body{flex:1;padding:20px 18px 12px;display:flex;flex-direction:column}
+  .ob-step{display:none}
+  .ob-step.on{display:block;animation:fade .28s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .ob-step h2{font-size:17px;margin:0 0 5px}
+  .ob-step .lede{font-size:13px;color:var(--muted);margin:0 0 18px;line-height:1.6}
+
+  /* Tap targets stay 44px+ on a phone. A 64px swatch is thumb-sized; the
+     desktop rule below shrinks it only once there is a pointer. */
+  .ob-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .ob-bd{border:2px solid var(--line);border-radius:12px;overflow:hidden;cursor:pointer;
+         background:var(--ink-2);position:relative;transition:.15s}
+  .ob-bd img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block}
+  .ob-bd span{display:block;font-size:10.5px;padding:6px 4px;color:var(--muted);
+              text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ob-bd.sel{border-color:var(--gold);box-shadow:0 0 0 3px rgba(184,134,11,.18)}
+  .ob-bd.sel span{color:var(--gold-deep);font-weight:600}
+  .ob-bd:hover{border-color:var(--line-strong)}
+
+  .ob-drop{border:2px dashed var(--line-strong);border-radius:14px;background:var(--ink-2);
+           padding:34px 20px;text-align:center;cursor:pointer;transition:.15s}
+  .ob-drop:hover,.ob-drop.hot{border-color:var(--gold);background:rgba(184,134,11,.06)}
+  .ob-drop b{display:block;font-size:15px;color:var(--gold-deep);margin-bottom:6px}
+  .ob-drop span{font-size:12.5px;color:var(--muted);line-height:1.6;display:block}
+  .ob-file{margin-top:14px;border:1px solid var(--line);border-radius:10px;padding:12px;
+           background:var(--paper);display:flex;align-items:center;gap:11px}
+  .ob-file img{width:44px;height:44px;border-radius:8px;object-fit:cover;flex:none}
+  .ob-file b{display:block;font-size:12.5px}
+  .ob-file em{font-style:normal;font-size:11px;color:var(--muted);display:block}
+
+  .ob-types{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
+  .ob-ty{padding:14px 12px;border:1px solid var(--line);border-radius:11px;background:var(--ink-2);
+         cursor:pointer;text-align:left;font:inherit;transition:.15s}
+  .ob-ty b{display:block;font-size:13.5px;font-weight:600}
+  .ob-ty span{display:block;font-size:11px;color:var(--muted);margin-top:2px;line-height:1.45}
+  .ob-ty.sel{background:linear-gradient(135deg,#D9AE3B,#C9992A);border-color:transparent;color:#241B08}
+  .ob-ty.sel span{color:#4A3606}
+  .ob-ty:hover{border-color:var(--line-strong)}
+
+  .ob-foot{flex:none;padding:0 18px calc(18px + env(safe-area-inset-bottom));display:flex;gap:10px}
+  .ob-foot .btn{flex:1;padding:14px;font-size:14px}
+  .ob-note{font-size:11.5px;color:var(--muted);text-align:center;margin:10px 0 0;line-height:1.5}
+
+  @media(min-width:720px){
+    .ob-head img{height:46px}
+    .ob-head h1{font-size:24px}
+    .ob-body{padding:26px 24px 14px}
+    .ob-body>div{max-width:760px;margin:0 auto;width:100%}
+    .ob-grid{grid-template-columns:repeat(6,1fr);gap:12px}
+    .ob-bd img{aspect-ratio:3/4}
+    .ob-types{grid-template-columns:repeat(3,1fr)}
+    .ob-foot{max-width:760px;margin:0 auto;width:100%;padding-bottom:24px}
+  }
+
+  /* ── Event type bar, above the chat ────────────────────────────────────── */
+  #etype{flex:none;display:flex;align-items:center;gap:8px;padding:9px 12px;
+         border-bottom:1px solid var(--line);background:rgba(250,247,241,.92);
+         font-size:11px;color:var(--muted)}
+  #etype label{font-size:11px;margin:0;flex:none;font-weight:600;color:var(--gold-deep)}
+  #etype select{flex:1;min-width:0;padding:6px 9px;border-radius:8px;border:1px solid var(--line);
+                background:var(--ink-2);color:var(--ink);font:inherit;font-size:12px}
+  @media(min-width:900px){ #etype{font-size:12px} #etype select{font-size:13px} }
+
+</style>
+</head>
+<body>
+
+<!-- The studio is open to every visitor: there is no gate, no login and no
+     recovery flow. A booking UUID in the link personalises the greeting and
+     ties the draft to that client's record; without one, the visitor still
+     gets a working studio. (There used to be a splash here that read
+     "Loading your studio..." and never went away — #gate carried display:grid,
+     which overrides the HTML `hidden` attribute, so it sat on top of a fully
+     working studio. Deleting it removes that whole failure mode.) -->
+
+<div id="onboard">
+  <div class="ob-head">
+    <img src="/api/visual/pfp/brand/logo.png" alt="Party Favor Photo" />
+    <h1>Let's build your photo template</h1>
+    <p>Three quick steps, then Eliza draws your first draft.</p>
+  </div>
+  <div class="ob-steps"><i class="on"></i><i></i><i></i></div>
+
+  <div class="ob-body">
+  <div>
+    <!-- 1. Backdrop -->
+    <div class="ob-step on" data-step="1">
+      <h2>Pick your backdrop</h2>
+      <p class="lede">This is the curtain you'll be standing in front of on the night. You'll see it in your design before you commit to anything.</p>
+      <div class="ob-grid" id="ob-bd"></div>
+    </div>
+
+    <!-- 2. Inspiration -->
+    <div class="ob-step" data-step="2">
+      <h2>Add your invitation or logo</h2>
+      <p class="lede">One file is usually all it takes. We'll read the colours and fonts and match your design to them. If you don't have one handy, skip this — you can always add it later.</p>
+      <div class="ob-drop" id="ob-drop">
+        <b>Drop your invitation or logo here</b>
+        <span>or tap to choose a file<br/>We'll never alter your logo.</span>
+      </div>
+      <input type="file" id="ob-file-input" accept="image/*" hidden />
+      <div class="ob-file hide" id="ob-picked">
+        <img id="ob-thumb" alt="" />
+        <div style="flex:1;min-width:0"><b id="ob-name"></b><em id="ob-note"></em></div>
+      </div>
+      <p class="ob-note" id="ob-skip-note"></p>
+    </div>
+
+    <!-- 3. Event type -->
+    <div class="ob-step" data-step="3">
+      <h2>What kind of event?</h2>
+      <p class="lede">This sets the starting style. Eliza will take it from here and you can change anything later.</p>
+      <div class="ob-types" id="ob-types"></div>
+    </div>
+  </div>
+  </div>
+
+  <div class="ob-foot">
+    <button class="btn" id="ob-back" style="flex:0 0 auto">Back</button>
+    <button class="btn pri" id="ob-next">Continue</button>
+  </div>
+</div>
+
+<div id="app">
+  <header>
+    <img src="/api/visual/pfp/brand/logo.png" alt="Party Favor Photo" />
+    <div class="who">
+      <b id="hName">—</b>
+      <span id="hEvent">—</span>
+    </div>
+    <span class="chip live" id="hState">Live</span>
+    <span class="chip" id="hRev">Draft 1</span>
+  </header>
+
+  <main>
+    <section id="chat">
+      <div id="etype">
+        <label for="etype-sel">Event</label>
+        <select id="etype-sel"></select>
+      </div>
+      <div id="log"></div>
+      <div id="bar">
+        <div class="chips" id="quick"></div>
+        <div class="row">
+          <button class="icon" id="attach" title="Add a logo or inspiration">&#128206;</button>
+          <textarea id="say" rows="1" placeholder="Tell Eliza what you'd like changed…"></textarea>
+          <button class="icon" id="tts" title="Eliza speaks">&#128266;</button>
+          <button class="icon send" id="send" title="Send">&#10148;</button>
+        </div>
+        <input type="file" id="file" accept="image/*" hidden />
+      </div>
+    </section>
+
+    <section id="studio">
+      <div id="stagewrap" style="position:relative">
+        <div class="frame" id="frame">
+          <img id="shot" alt="Your print template preview" />
+          <div id="busy"><div><div class="spin"></div><div id="busytext">Eliza is designing…</div></div></div>
+          <div id="drop">
+            <div>
+              <b>Drop your logo or invitation here</b>
+              <span>One file is usually all it takes.<br/>We'll read it and never alter your logo.</span>
+            </div>
+          </div>
+        </div>
+        <div id="empty">
+          <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="#D4AF37" stroke-width="1.2">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 15l5-5 4 4 3-3 6 6"/><circle cx="8.5" cy="8.5" r="1.5"/>
+          </svg>
+          <div>Your first draft is being prepared.<br/>It'll appear here in a moment.</div>
+        </div>
+      </div>
+      <div class="meta" id="meta"></div>
+      <div id="controls">
+        <!-- The style <select> is hidden, not deleted. It is still the single
+             source of truth for "which style is loaded" and roughly a dozen
+             places read or write it — including Eliza's own chat replies, which
+             mirror the style back into the dropdown. Removing the element would
+             break all of that; hiding it costs nothing and leaves exactly one
+             visible control for style: the event type bar above the chat. -->
+        <select id="style" hidden aria-hidden="true"></select>
+        <button class="btn" id="redraft">New draft</button>
+        <button class="btn" id="revise">Refine</button>
+        <button class="btn ok" id="approve" disabled>Approve</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+(() => {
+  const $ = s => document.querySelector(s);
+  const log = $('#log'), say = $('#say'), frame = $('#frame'), shot = $('#shot');
+  const empty = $('#empty'), drop = $('#drop'), busy = $('#busy'), meta = $('#meta');
+
+  const API = '/studio';
+
+  // ── Entry: open immediately, credential optional ───────────────────────
+  // A booking UUID in the link personalises the greeting and ties the draft to
+  // that client. Without one, the visitor still gets a working studio — the
+  // studio is open to everyone. There is no gate, no login, no recovery flow.
+  // The booking reference can be EITHER shape, and getting this wrong is silent:
+  // the studio still loads, still greets, still drafts — as an anonymous session
+  // with no booking attached. The funnel issues base64url tokens
+  // (crypto.randomBytes(24).toString('base64url') -> 32 chars of [A-Za-z0-9_-]),
+  // which a UUID-only pattern does not match. The booking link was therefore
+  // handing every paying client an unrecognised link.
+  //
+  // Both are accepted: UUIDs for links that predate the funnel, base64url for
+  // everything issued since.
+  const UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+  const TOKEN_RE = /\/([A-Za-z0-9_-]{24,64})(?:\/|$|\?)/;
+  function bookingId() {
+    const q = new URLSearchParams(location.search);
+    const explicit = q.get('booking') || q.get('b') || q.get('id');
+    if (explicit) return explicit;
+    const path = location.pathname.replace(/\/+$/, '');
+    const last = path.split('/').filter(Boolean).pop() || '';
+    // A bare path segment is only trusted when it looks like a token, not when
+    // it is a word — otherwise "/studio" or "/pricing" becomes a booking id.
+    if (/^[A-Za-z0-9_-]{24,64}$/.test(last)) return last;
+    return (location.pathname.match(UUID_RE) || [])[1] || null;
+  }
+  const remembered = () => localStorage.getItem('pfp_booking');
+
+  let B = null, styles = [], rev = 0, uploadedLogo = false, busyLock = false, approved = false;
+  let ttsOn = false;
+
+  const say_ = (who, text) => {
+    const d = document.createElement('div');
+    d.className = 'msg ' + who;
+    d.textContent = text;
+    log.appendChild(d);
+    log.scrollTop = log.scrollHeight;
+    if (who === 'eliza') speak(text);
+    return d;
+  };
+  const sys = t => say_('sys', t);
+
+  // Eliza speaks. Speech synthesis is free and on-device; no key, no call.
+  function speak(text) {
+    if (!ttsOn || !window.speechSynthesis) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.04; u.pitch = 1.06; u.volume = .95;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  }
+  $('#tts').onclick = () => {
+    ttsOn = !ttsOn;
+    $('#tts').style.filter = ttsOn ? 'drop-shadow(0 0 7px rgba(212,175,55,.75))' : '';
+    if (ttsOn) say('Eliza is on. Press play to hear me.');
+  };
+
+  const working = on => {
+    busyLock = on;
+    busy.classList.toggle('on', on);
+    $('#send').disabled = on || approved;
+    $('#redraft').disabled = on || approved;
+    $('#revise').disabled = on || approved;
+  };
+
+  // ── Backdrop ──────────────────────────────────────────────────────────────
+  // The visible picker lives in onboarding, where the client chooses a curtain
+  // BEFORE the first draft. It is deliberately not repeated here: an eleven-tile
+  // grid under the preview cost more vertical space than the preview itself, and
+  // a second control for the same choice is a second thing to disagree with.
+  //
+  // What survives here is the VALUE, because every later draft must keep
+  // rendering against the chosen backdrop, and the NAME RESOLVER, because
+  // removing the picker removes the only way to change your mind. A client who
+  // says "can we try the gold one instead" gets it without a menu.
+  let backdrop = null;
+
+  const prettyBackdrop = slug => slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+  let catalogue = null;
+  async function backdropCatalogue() {
+    if (catalogue) return catalogue;
+    try {
+      const r = await fetch(`${API}/backdrops`);
+      const j = await r.json();
+      catalogue = j.backdrops || [];
+    } catch (e) {
+      // Say so rather than reporting an empty gallery, which is what a failure
+      // looks like from the outside.
+      sys('I could not load the backdrop list just now, so I cannot switch curtains on request. '
+        + 'Everything else still works.');
+      catalogue = [];
+    }
+    return catalogue;
+  }
+
+  /**
+   * Words that describe the cloth's finish or grade, not its colour. These are
+   * stripped before matching because ordinary sentences contain them:
+   * "make the text LARGER" would otherwise match premium-gold-LARGE-sequin and
+   * spend a real render on a redraw nobody asked for.
+   */
+  const BACKDROP_NOISE = new Set([
+    'sequin', 'sequins', 'large', 'premium', 'flat', 'backdrop', 'background',
+  ]);
+
+  /**
+   * Match a phrase the client typed against a real backdrop.
+   *
+   * Scores candidates rather than taking the first hit, so a message naming a
+   * two-word curtain beats a one-word near-miss.
+   *
+   * @returns {Promise<{slug:string}|{candidates:string[]}|null>}
+   *   {slug}            exactly one curtain matched — act on it.
+   *   {candidates}      several scored equally, e.g. "the gold one" against five
+   *                     gold curtains. Guessing spends a render on the wrong
+   *                     one, so this is reported and the client is asked.
+   *   null              nothing matched.
+   */
+  async function matchBackdrop(text) {
+    const list = await backdropCatalogue();
+    const t = (text || '').toLowerCase();
+    const scored = [];
+
+    for (const b of list) {
+      let score = 0;
+      for (const w of b.slug.split('-')) {
+        if (w.length < 4 || BACKDROP_NOISE.has(w)) continue;
+        if (new RegExp(`\\b${w}`).test(t)) score += w.length;
+      }
+      if (score > 0) scored.push({ slug: b.slug, score });
+    }
+    if (!scored.length) return null;
+
+    const top = Math.max(...scored.map(s => s.score));
+    const winners = scored.filter(s => s.score === top).map(s => s.slug);
+    return winners.length === 1 ? { slug: winners[0] } : { candidates: winners };
+  }
+
+  async function chooseBackdrop(slug, { announce = true } = {}) {
+    if (!slug) return;
+    backdrop = slug;
+    // Redraw immediately and say what changed. The draft is the product; a
+    // control that sets a value without moving the picture is a colour swatch.
+    await newDraft(false, { backdrop: slug });
+    if (announce) {
+      say_('eliza', `Switched to the ${prettyBackdrop(slug)} backdrop — that is the curtain `
+        + `you will be standing in front of on the night.`);
+    }
+  }
+
+  // ── Entry: open immediately, credential optional ───────────────────────
+  async function open(id) {
+    try {
+      const r = await fetch(`${API}/context?booking=${encodeURIComponent(id || '')}`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Could not open the studio.');
+      B = j; styles = j.styles || []; rev = j.revision || 0;
+      if (id) { try { localStorage.setItem('pfp_booking', id); } catch (_) {} }
+      $('#app').style.display = 'flex';
+      boot();
+    } catch (e2) {
+      console.error(e2);
+      // Still show the app so the visitor sees a real, usable studio rather
+      // than a stuck splash — the chat works even with no draft yet.
+      $('#app').style.display = 'flex';
+      sys('I could not reach the design service just now. Try again in a moment.');
+    }
+  }
+
+  // ── Onboarding ───────────────────────────────────────────────────────────
+  // Backdrop -> inspiration -> event type -> chat and the first draft.
+  //
+  // The gate is honest about skipping. Step 2 is skippable because "upload your
+  // invitation" is the one step a client may genuinely not be able to do right
+  // now; blocking on it strands them on a blank screen. Steps 1 and 3 are not
+  // skippable, but both have a default so "Continue" always works.
+  const OB = { step: 1, backdrop: null, file: null, type: null };
+
+  // Only ids that actually exist in STYLE_BANK. A first draft is generated
+  // immediately on selection, so an id that does not exist is not a label that
+  // fails to resolve — it is a failed first impression and a wasted render.
+  // Verified against relay/tools/pfp-template-designer.mjs.
+  const EVENT_TYPES = [
+    { id: 'celebration', label: 'Birthday party', note: 'Bright and playful' },
+    { id: 'wedding_classic', label: 'Wedding', note: 'Elegant and timeless' },
+    { id: 'wedding_rustic', label: 'Rustic wedding', note: 'Warm, relaxed, outdoors' },
+    { id: 'graduation_prestige', label: 'Graduation', note: 'Celebratory and formal' },
+    { id: 'corporate_holiday', label: 'Corporate / holiday', note: 'Polished and on-brand' },
+    { id: 'hoco_prom', label: 'Prom / formal dance', note: 'Glamorous, high-energy' },
+  ];
+
+  const obNext = () => $('#ob-next');
+  const obBack = () => $('#ob-back');
+
+  function obRender() {
+    document.querySelectorAll('.ob-step').forEach(el =>
+      el.classList.toggle('on', +el.dataset.step === OB.step));
+    document.querySelectorAll('.ob-steps i').forEach((el, i) => {
+      el.classList.toggle('on', i + 1 === OB.step);
+      el.classList.toggle('done', i + 1 < OB.step);
+    });
+    obBack().style.visibility = OB.step === 1 ? 'hidden' : 'visible';
+    obNext().textContent = OB.step === 3 ? 'Start my design' : 'Continue';
+  }
+
+  async function obLoadBackdrops() {
+    try {
+      const r = await fetch(`${API}/backdrops`);
+      const j = await r.json();
+      const list = j.backdrops || [];
+      $('#ob-bd').innerHTML = list.map(b => `
+        <div class="ob-bd" data-slug="${b.slug}">
+          <img src="${b.url}" alt="${prettyBackdrop(b.slug)}" loading="lazy" />
+          <span>${prettyBackdrop(b.slug)}</span>
+        </div>`).join('');
+      $('#ob-bd').querySelectorAll('.ob-bd').forEach(el => {
+        el.onclick = () => {
+          OB.backdrop = el.dataset.slug;
+          $('#ob-bd').querySelectorAll('.ob-bd').forEach(x =>
+            x.classList.toggle('sel', x === el));
+        };
+      });
+      if (!list.length) $('#ob-skip-note').textContent = '';
+    } catch (e) {
+      // Say it. An empty grid is indistinguishable from "you have no backdrops".
+      $('#ob-bd').innerHTML =
+        '<p class="ob-note" style="grid-column:1/-1">The backdrop gallery did not load. '
+        + 'You can carry on and tell Eliza which one you want by name.</p>';
+    }
+  }
+
+  function obRenderTypes() {
+    $('#ob-types').innerHTML = EVENT_TYPES.map(t => `
+      <button class="ob-ty" data-type="${t.id}">
+        <b>${t.label}</b><span>${t.note}</span>
+      </button>`).join('');
+    $('#ob-types').querySelectorAll('.ob-ty').forEach(el => {
+      el.onclick = () => {
+        OB.type = el.dataset.type;
+        $('#ob-types').querySelectorAll('.ob-ty').forEach(x =>
+          x.classList.toggle('sel', x === el));
+      };
+    });
+  }
+
+  function obBindUpload() {
+    const drop = $('#ob-drop'), input = $('#ob-file-input');
+    drop.onclick = () => input.click();
+    input.onchange = e => { if (e.target.files[0]) obPick(e.target.files[0]); e.target.value = ''; };
+    ['dragenter', 'dragover'].forEach(ev =>
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
+    ['dragleave', 'drop'].forEach(ev =>
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
+    drop.addEventListener('drop', e => {
+      const f = e.dataTransfer.files[0];
+      if (f) obPick(f);
+    });
+  }
+
+  function obPick(file) {
+    OB.file = file;
+    const rd = new FileReader();
+    rd.onload = () => { $('#ob-thumb').src = rd.result; };
+    rd.readAsDataURL(file);
+    $('#ob-name').textContent = file.name;
+    $('#ob-note').textContent = Math.round(file.size / 1024) + ' KB — ready to read';
+    $('#ob-picked').classList.remove('hide');
+    $('#ob-drop').classList.add('hide');
+  }
+
+  function obSkipUpload() {
+    OB.file = null;
+    $('#ob-drop').classList.remove('hide');
+    $('#ob-picked').classList.add('hide');
+  }
+
+  /** Finish onboarding and hand everything to the studio. */
+  async function obFinish() {
+    $('#onboard').classList.add('done');
+    $('#app').style.display = 'flex';
+    $('#etype-sel').value = OB.type || 'celebration';
+    backdrop = OB.backdrop;
+
+    // The upload runs first when present, because the detector can change the
+    // event style. If we drew first and uploaded after, the client would watch
+    // a draft appear and then immediately change underneath them.
+    if (OB.file) {
+      try { await upload(OB.file); } catch (e) { /* upload() reports its own failure */ }
+    }
+    say_('eliza', OB.backdrop
+      ? `Lovely. ${prettyBackdrop(OB.backdrop)} backdrop, and we're building for a `
+        + `${(EVENT_TYPES.find(t => t.id === OB.type) || {}).label || 'celebration'}. `
+        + `Give me a moment — here's your first draft.`
+      : `Let's get started on your design. Give me a moment — here's your first draft.`);
+    newDraft(true, { backdrop: OB.backdrop, type: OB.type });
+  }
+
+  obBack().onclick = () => { if (OB.step > 1) { OB.step--; obRender(); } };
+  obNext().onclick = () => {
+    if (OB.step === 2 && !$('#ob-drop').classList.contains('hide') && !OB.file) {
+      // No file: step 2 was declined, not failed. Do not make anyone explain it.
+      OB.step = 3; obRender(); return;
+    }
+    if (OB.step === 3) { obFinish(); return; }
+    OB.step++; obRender();
+  };
+
+  obLoadBackdrops();
+  obRenderTypes();
+  obBindUpload();
+  obRender();
+
+  // ── Boot ─────────────────────────────────────────────────────────────────
+  function boot() {
+    $('#hName').textContent = B.client_name || 'Your event';
+    $('#hEvent').textContent = [B.event_name, B.event_date,
+      B.hours ? `${B.hours} hours` : null].filter(Boolean).join(' · ');
+
+    $('#style').innerHTML = styles.map(s =>
+      `<option value="${s.id}">${s.name}</option>`).join('');
+    $('#style').value = B.style_id;
+
+    log.innerHTML = '';
+    (B.messages || []).forEach(m => say_(m.role, m.text));
+    quick();
+    // The event type sits ABOVE the chat and stays there: a standing control,
+    // not a one-time answer. Changing it redraws immediately, so a client can
+    // find their way to the right style by looking rather than guessing blind.
+    const et = $('#etype-sel');
+    et.innerHTML = EVENT_TYPES.map(t =>
+      `<option value="${t.id}">${t.label}</option>`).join('');
+    et.value = OB.type || B.style_id || 'celebration';
+    et.onchange = () => newDraft(false, { type: et.value });
+
+    // The backdrop catalogue is fetched lazily now, only if a client asks to
+    // swap curtains in chat. Prefetching it on every open bought nothing: the
+    // onboarding step already loaded it for anyone who got that far.
+    backdropCatalogue();
+  }
+
+  const QUICK = [
+    'Make it more colourful',
+    'Softer and more elegant',
+    'Use my logo colours',
+    'Make the text bigger',
+    'Can you try a different style?',
+    'That is perfect',
+  ];
+  const quick = () => {
+    $('#quick').innerHTML = '';
+    QUICK.forEach(q => {
+      const b = document.createElement('button');
+      b.textContent = q;
+      b.onclick = () => { say.value = q; send(); };
+      $('#quick').appendChild(b);
+    });
+  };
+
+  // ── Generation ───────────────────────────────────────────────────────────
+  function show(url) {
+    shot.src = url + '?v=' + Date.now();
+    frame.style.display = 'block';
+    empty.style.display = 'none';
+    $('#hRev').textContent = 'Draft ' + rev;
+    $('#approve').disabled = approved;
+    // The dropzone is a first-run invitation, not a permanent overlay. Once a
+    // design exists it was covering the very thing the client came to see, so
+    // it retires after the first draft. The paperclip stays for later uploads.
+    if (!uploadedLogo && rev > 1) drop.classList.add('gone');
+  }
+
+  /** `got` carries the client's theme/palette request, if there was one. */
+  async function newDraft(first = false, got = {}) {
+    working(true);
+    $('#busytext').textContent = first ? 'Eliza is preparing your first draft…' : 'Eliza is drawing a new one…';
+    try {
+      const r = await fetch(`${API}/draft`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          booking: B.booking_id,
+          // `type` is the client's plain-language answer from onboarding or the
+          // event bar; the style dropdown is the power-user override. `type`
+          // wins when both are supplied because it is the more recent, more
+          // deliberate signal.
+          style_id: got.type || $('#style').value,
+          theme: got.theme || undefined,
+          palette: got.palette || undefined,
+          backdrop: got.backdrop || backdrop || undefined,
+        }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j);
+      rev = j.revision; show(j.image);
+      $('#meta').innerHTML =
+        '<span><b>' + (j.geometry || '') + '</b></span>' +
+        '<span>300 DPI</span>' +
+        '<span>transparent windows</span>' +
+        (j.ink ? '<span>' + j.ink + '</span>' : '') +
+        (j.cost != null ? '<span>design $' + (+j.cost).toFixed(3) + '</span>' : '') +
+        (j.seconds ? '<span>' + j.seconds + 's</span>' : '');
+      if (!first) say_('eliza', 'Here is that as a new draft. Anything to adjust?');
+    } catch (e) {
+      const d = e.detail ? e : {};
+      sys(d.error || 'The designer could not finish this draft. ' +
+          (d.action || 'I have logged it for our team.'));
+    } finally { working(false); }
+  }
+
+  async function refine(got = {}) {
+    if (!rev) return newDraft();
+    const dir = say.value.trim() || 'Refine the ornamentation while keeping the layout and palette.';
+    working(true);
+    $('#busytext').textContent = 'Eliza is refining…';
+    try {
+      const r = await fetch(`${API}/revise`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          booking: B.booking_id, direction: dir,
+          theme: got.theme || undefined, palette: got.palette || undefined,
+          backdrop: got.backdrop || backdrop || undefined,
+        }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j);
+      rev = j.revision; show(j.image);
+      say_('eliza', "Adjusted — how's that looking?");
+    } catch (e) {
+      const d = e.detail ? e : {};
+      sys(d.error || 'The designer could not apply that change. ' +
+          (d.action || 'I have logged it for our team.'));
+    } finally { working(false); }
+  }
+
+  $('#redraft').onclick = () => newDraft();
+  $('#revise').onclick = refine;
+  $('#style').onchange = () => newDraft();
+
+  $('#approve').onclick = async () => {
+    await fetch(`${API}/approve`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ booking: B.booking_id }),
+    });
+    approved = true;
+    $('#hState').textContent = 'Approved';
+    $('#approve').disabled = true;
+    $('#send').disabled = true;
+  };
+
+  // ── Chat ─────────────────────────────────────────────────────────────────
+  // ── Eliza actually listens ──────────────────────────────────────────────
+  // The first live version posted `style_id` straight from a dropdown pinned at
+  // boot, so every message re-rendered the SAME template and the conversation
+  // looked decorative. This is what makes it real: read what the client asked
+  // for, decide style/theme/palette, and tell them what changed.
+  const STYLE_WORDS = [
+    [/\b(toy ?story|buzz|woody|pizza ?planet|haml|green ?army)\b/i, 'celebration'],
+    [/\b(mario|minecraft|fortnite|pokemon|dinosaur|jurassic|unicorn|rainbow|fairy|dragon|princess|super ?hero|lego|minion)\b/i, 'celebration'],
+    [/\b(quince|bar ?mitzvah|fifteen|sweet ?16)\b/i, 'celebration'],
+    [/\b(birthday|party)\b/i, 'celebration'],
+    [/\b(wedding|marry|marriage|bridal)\b/i, 'wedding_classic'],
+    [/\b(rustic|barn|farm|western|outdoor)\b/i, 'wedding_rustic'],
+    [/\b(grad|graduation|commencement)\b/i, 'graduation_prestige'],
+    [/\b(hoco|homecoming|prom|glam)\b/i, 'hoco_prom'],
+    [/\b(christmas|holiday|winter|snow)\b/i, 'corporate_holiday'],
+    [/\b(elegant|classic|formal|refined)\b/i, 'wedding_classic'],
+    [/\b(bold|modern|vibrant|bright|fun|playful)\b/i, 'celebration'],
+  ];
+
+  const PALETTE_WORDS = [
+    [/\bgold(en)?\b/i, 'metallic gold #D4AF37'],
+    [/\bsilver\b/i, 'metallic silver #C8CBCE'],
+    [/\bpink\b/i, 'bright pink #E85D75'],
+    [/\bblue\b/i, 'deep blue #2B5FB8'],
+    [/\b(green|emerald)\b/i, 'emerald green #1F7A4D'],
+    [/\b(purple|lavender|violet)\b/i, 'lavender #8B6FC7'],
+    [/\b(red|crimson)\b/i, 'rich red #C1272D'],
+    [/\borange\b/i, 'warm orange #F06020'],
+    [/\byellow\b/i, 'sunny yellow #FFD24A'],
+    [/\b(black|monochrome)\b/i, 'charcoal #1A1A1A with white accents'],
+    [/\bwhite\b/i, 'white #FFFFFF with soft grey accents'],
+    [/\bpastel\b/i, 'soft pastel pink, mint and sky blue'],
+  ];
+
+  /** Turn a client message into a concrete design change. */
+  function interpret(text) {
+    const t = (text || '').trim();
+    let style = null, palette = null;
+    for (const [re, id] of STYLE_WORDS) if (re.test(t)) { style = id; break; }
+    for (const [re, p] of PALETTE_WORDS) if (re.test(t)) { palette = p; break; }
+    // Descriptive leftovers become the theme, passed to the model verbatim.
+    const stop = /\b(more|less|make|it|the|and|please|can|you|could|would|change|to|a|an|is|very|bit|little|really|just|like|some|this|that|my|our|for|with|do|so|but|want|need|about|into)\b/gi;
+    const theme = (style || palette) ? '' : t.replace(stop, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    return { style, palette, theme, changed: !!(style || palette || theme) };
+  }
+
+  async function send() {
+    const t = say.value.trim();
+    if (!t || busyLock || approved) return;
+    say.value = ''; say.style.height = 'auto';
+    say_('me', t);
+
+    // Backdrop first, and on its own. Removing the picker from the studio took
+    // away the only way to change curtains, so chat has to carry it: "can we do
+    // the gold one instead" must work without a menu. Checked before the style
+    // interpreter because "silver backdrop" would otherwise be read as a palette
+    // request and answered with a recolour.
+    const bd = await matchBackdrop(t);
+    if (bd && bd.candidates) {
+      // Several curtains scored the same. Spending a render on a coin-flip is
+      // how the wrong curtain ends up on a client's proof, so ask.
+      say_('eliza', `I have more than one that matches — `
+        + `${bd.candidates.map(prettyBackdrop).join(', ')}. Which one?`);
+      return;
+    }
+    if (bd && bd.slug && bd.slug !== backdrop) {
+      say_('eliza', `Switching to the ${prettyBackdrop(bd.slug)} backdrop — one moment…`);
+      await chooseBackdrop(bd.slug, { announce: false });
+      say_('eliza', `That's the ${prettyBackdrop(bd.slug)} curtain. How's that looking?`);
+      return;
+    }
+
+    const got = interpret(t);
+    if (!got.changed) {
+      say_('eliza', "I didn't catch a change there — try naming a theme (\"Toy Story\"), "
+        + "a style (\"elegant\", \"bold\"), a colour (\"gold\", \"pink\") or a backdrop.");
+      return;
+    }
+    if (got.style) $('#style').value = got.style;
+
+    const bits = [];
+    if (got.style) bits.push('switched to ' + $('#style').selectedOptions[0].textContent);
+    if (got.palette) bits.push('pulled the palette to ' + got.palette);
+    if (got.theme) bits.push('built the artwork around "' + got.theme + '"');
+    say_('eliza', 'On it — ' + bits.join(', ') + '. Give me a moment…');
+
+    // A new theme or style is a mood change: regenerate. A colour tweak
+    // refines what is already on screen.
+    if (got.style || got.theme) await newDraft(false, got);
+    else await refine(got);
+  }
+  $('#send').onclick = send;
+  say.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  say.addEventListener('input', () => {
+    say.style.height = 'auto';
+    say.style.height = Math.min(say.scrollHeight, 130) + 'px';
+  });
+
+  // ── Uploads ──────────────────────────────────────────────────────────────
+  $('#attach').onclick = () => $('#file').click();
+  drop.onclick = () => $('#file').click();
+
+  $('#file').onchange = e => { if (e.target.files[0]) upload(e.target.files[0]); e.target.value = ''; };
+
+  // The dropzone is a first-run affordance: once a file is ingested it is gone
+  // for good, because there is almost never a second logo.
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); drop.classList.add('hot');
+  }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); drop.classList.remove('hot');
+  }));
+  drop.addEventListener('drop', e => {
+    const f = e.dataTransfer.files[0];
+    if (f) upload(f);
+  });
+  window.addEventListener('dragover', e => e.preventDefault());
+  window.addEventListener('drop', e => e.preventDefault());
+
+  async function upload(file) {
+    if (!file.type.startsWith('image/')) { sys('Please drop an image file.'); return; }
+    const kind = /logo/i.test(file.name) ? 'logo' : 'inspiration';
+    sys(`Reading ${file.name}…`);
+    const dataUrl = await new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result); fr.onerror = rej;
+      fr.readAsDataURL(file);
+    });
+    try {
+      const r = await fetch(`${API}/upload`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ booking: B.booking_id, kind, dataUrl, fileName: file.name }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Upload failed.');
+
+      if (kind === 'logo') {
+        uploadedLogo = true;
+        drop.classList.add('gone');          // disappears permanently
+        const hex = (j.brandHexes || []).join(' ');
+        say_('eliza',
+          `Thank you — I've got ${j.name}. Your logo is stored exactly as you sent it and will be ` +
+          `placed, never redrawn or "improved".` +
+          (hex ? ` I've read its colours (${hex}) and the artwork around it will be built to match.` : ''));
+        if (j.styleId) $('#style').value = j.styleId;
+        sayElizaPicked(j);
+        await newDraft();
+      } else {
+        uploadedLogo = true;
+        drop.classList.add('gone');
+        // The upload chose the style on its own. Say so, or the switch looks
+        // arbitrary to the client.
+        if (j.styleId) $('#style').value = j.styleId;
+        sayElizaPicked(j, j.detected || {});
+        await newDraft();
+      }
+    } catch (e) { sys(e.message); }
+  }
+
+  /** Tell the client, in their language, what the upload taught Eliza. */
+  function sayElizaPicked(j, d) {
+    const opt = $('#style').selectedOptions[0];
+    const label = (opt && opt.textContent) || j.styleId || 'a new style';
+    const ev = d && d.event && d.event !== 'unknown' ? d.event : null;
+    const bits = [];
+    if (ev) bits.push('that reads as a ' + ev + ' event');
+    else if (d && d.kind === 'logo') bits.push('that reads as a business mark');
+    if (j.brandHexes && j.brandHexes.length) bits.push('and I picked up ' + j.brandHexes.join(', '));
+    say_('eliza',
+      (bits.length
+        ? 'I took one look and knew ' + bits.join(' ') + ', so I moved you to ' + label + '. '
+        : 'I moved you to ' + label + '. ')
+      + 'Let me redraw it around that — one moment.');
+  }
+
+  // Auto-open: anyone who arrives gets a working studio immediately.
+  (function init() {
+    const fromLink = bookingId();
+    open(fromLink || remembered() || null);
+  })();
+})();
+</script>
+</body>
+</html>

@@ -1,4 +1,6 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
+
+import { localDbUrl } from '../lib/local-db-url.mjs';
 // The seam between the mailbox store and the sender, plus which Resend account a
 // send would actually use.
 //
@@ -182,7 +184,7 @@ section('the candidate path does not go through the agent route');
 
 async function cleanup(ids) {
   const pool = new pg.Pool({
-    connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+    connectionString: localDbUrl(),
   });
   if (ids && ids.length) await pool.query('DELETE FROM app.job_clients WHERE id = ANY($1::int[])', [ids]);
   await pool.end();

@@ -1,3 +1,4 @@
+import { localDbUrl } from '../lib/local-db-url.mjs';
 /**
  * relay/tests/jobby-identity-dedupe.test.mjs — the second duplicate signal
  *
@@ -18,7 +19,7 @@
 import pg from 'pg';
 import { findDuplicatesByIdentity } from '../jobby/reconcile.mjs';
 
-const CONN = process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite';
+const CONN = localDbUrl();
 let pool;
 try {
   pool = new pg.Pool({ connectionString: CONN, connectionTimeoutMillis: 4000 });

@@ -145,9 +145,9 @@ export const AGENTS: AgentProfile[] = [
     description: 'Constitutional AI agent for multilingual communication, X.com operations, Japanese-priority translation, community onboarding, and global brand amplification. Bounded by SOUL.md and Article X of the Constitution. Studio CAC tier.',
     greeting: "Konnichiwa / Hello. I'm GlobalCommunicator, the voice of Tributary AI Campus to the world. I speak Japanese, English, Korean, Mandarin, and 8 more languages natively. How can I connect you to the campus today?",
     responses: [
-      "Every post I write passes through constitutional review before publishing. I never promise returns â only what's already on-chain.",
+      "Every post I write passes through constitutional review before publishing. I never promise returns — only what's already on-chain.",
       "Japanese-language onboarding is my priority. If you're a builder from Japan, I can walk you through CAC purchase and KYA verification in Japanese.",
-      "I coordinate with Trib before any governance-related post. The pipeline is: draft â constitutional check â Trib approval (if score < 85) â post.",
+      "I coordinate with Trib before any governance-related post. The pipeline is: draft → constitutional check → Trib approval (if score < 85) → post.",
       "My TrustGraph score is 78. I earn +12 per day of compliant multilingual engagement. A constitutional violation costs me -100 and triggers self-pause.",
     ],
     files: [

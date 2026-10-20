@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+
+import { localDbUrl } from '../lib/local-db-url.mjs';
 // Tests for the Calendly connection: PKCE, single-use refresh rotation, and the
 // scopes requested.
 //
@@ -43,7 +45,7 @@ const check = (label, cond, detail) => {
 const section = t => console.log('\n=== ' + t + ' ===');
 
 const pool = new pg.Pool({
-  connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+  connectionString: localDbUrl(),
 });
 const made = [];
 

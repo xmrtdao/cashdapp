@@ -1,4 +1,4 @@
-﻿// Does the tool pull the right questions out of what the page agent wrote?
+// Does the tool pull the right questions out of what the page agent wrote?
 //
 // The three reports below are verbatim from live runs. The agent's formatting
 // varies with what it found, so the shapes differ, and two of the three put the

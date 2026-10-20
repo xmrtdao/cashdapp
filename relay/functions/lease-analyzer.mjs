@@ -260,7 +260,7 @@ const EMPLOYMENT_LAW = {
 };
 
 // ── Statute Registry ─────────────────────────────────────────
-const STATUTE_REGISTRY = {
+export const STATUTE_REGISTRY = {
   commercial_lease: { name: 'Commercial Lease', statutes: COMMERCIAL_COMMON_LAW, jurisdiction: 'Virginia Common Law' },
   residential_lease: { name: 'Residential Lease', statutes: VRLTA_STATUTES, jurisdiction: 'VA VRLTA § 55.1-1200' },
   service_contract: { name: 'Service Contract', statutes: SERVICE_CONTRACT_LAW, jurisdiction: 'VA Common Law + UCC' },

@@ -12,13 +12,18 @@ import {
 } from './mailbox.mjs';
 
 let pool = null;
+let poolUrl = null;
 async function db() {
-  if (!pool) {
+  const { localDbUrl } = await import('../lib/local-db-url.mjs');
+  const url = localDbUrl();
+  if (!pool || poolUrl !== url) {
+    if (pool) { await pool.end(); }
     const { default: pg } = await import('pg');
     pool = new pg.Pool({
-      connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+      connectionString: url,
       max: 4,
     });
+    poolUrl = url;
   }
   return pool;
 }

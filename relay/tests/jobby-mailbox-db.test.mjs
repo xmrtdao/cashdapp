@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+
+import { localDbUrl } from '../lib/local-db-url.mjs';
 // Integration tests for the per-candidate mailbox, against the real database.
 //
 // These are not mocked, because the behaviour that matters here is the
@@ -34,7 +36,7 @@ async function client(name) {
 async function cleanup() {
   const { default: pg } = await import('pg');
   const pool = new pg.Pool({
-    connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+    connectionString: localDbUrl(),
   });
   if (made.length) {
     // Children first. job_client_mailboxes has no FK to job_clients, so deleting
@@ -73,7 +75,7 @@ async function cleanup() {
 async function clearPreviousRun() {
   const { default: pg } = await import('pg');
   const pool = new pg.Pool({
-    connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+    connectionString: localDbUrl(),
   });
   const stale = await pool.query(
     "DELETE FROM app.job_clients WHERE session_key LIKE 'test-mailbox-%' RETURNING id");
@@ -153,7 +155,7 @@ section('two candidates with the same name get different addresses');
   // And the database, not the code, is what guarantees it.
   const { default: pg } = await import('pg');
   const pool = new pg.Pool({
-    connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+    connectionString: localDbUrl(),
   });
   let rejected = false;
   try {

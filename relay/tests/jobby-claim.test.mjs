@@ -1,3 +1,4 @@
+import { localDbUrl } from '../lib/local-db-url.mjs';
 // Claiming an email, and the gate it puts on sending.
 //
 // Two things are being defended here, and both are security properties rather
@@ -29,7 +30,7 @@ const check = (label, cond, detail) => {
 const section = t => console.log('\n=== ' + t + ' ===');
 
 const pool = new pg.Pool({
-  connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+  connectionString: localDbUrl(),
 });
 const made = [];
 const tag = () => `claim-test-${Math.random().toString(36).slice(2)}`;

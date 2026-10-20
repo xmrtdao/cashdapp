@@ -39,13 +39,20 @@ const MAX_ATTEMPTS = 3;
 const MAX_REQUESTS_PER_HOUR = 5;
 
 let pool = null;
+let poolUrl = null;
 async function db() {
-  if (!pool) {
+  // Shared resolver. This module used to read only LOCAL_PG_URL, so a test run
+  // with LOCAL_DATABASE_URL pointed at xmrt_suite_test had store.mjs writing to
+  // the test database and this module reading and writing xmrt_suite. The
+  // symptom was a foreign key violation against a client that existed one pool
+  // away. See lib/local-db-url.mjs.
+  const { localDbUrl } = await import('../lib/local-db-url.mjs');
+  const url = localDbUrl();
+  if (!pool || poolUrl !== url) {
+    if (pool) { await pool.end(); pool = null; }
     const { default: pg } = await import('pg');
-    pool = new pg.Pool({
-      connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
-      max: 4,
-    });
+    pool = new pg.Pool({ connectionString: url, max: 4 });
+    poolUrl = url;
   }
   return pool;
 }

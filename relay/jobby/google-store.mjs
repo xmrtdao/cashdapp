@@ -17,8 +17,9 @@ let pool = null;
 async function db() {
   if (!pool) {
     const { Pool } = pg;
+    const { localDbUrl } = await import('../lib/local-db-url.mjs');
     pool = new Pool({
-      connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+      connectionString: localDbUrl(),
       max: 3,
     });
   }
