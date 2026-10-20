@@ -1,4 +1,4 @@
-﻿# Ignore the local environments and the downloaded model pack. Both are large,
+# Ignore the local environments and the downloaded model pack. Both are large,
 # reproducible from pyproject.toml, and the model in particular is a few hundred
 # MB that does not belong in git.
 face-service/.venv/

@@ -1,0 +1,766 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Book Party Favor Photo</title>
+<meta name="description" content="Reserve a Party Favor Photo StudioStation for your event. See your real contract and price before you pay.">
+<style>
+/* Light brand palette, matching www.partyfavorphoto.com: warm cream stationery,
+   gold accent, charcoal ink. Same tokens as the print studio so a client who
+   moves from booking to design sees one product. */
+:root{
+  --gold:#B8860B; --gold-deep:#8C6508; --gold-soft:#A97C1A;
+  --ink:#1C1A17; --ink-2:#FFFFFF; --paper:#FAF7F1; --page:#F1ECE3;
+  --line:rgba(184,134,11,.26); --line-strong:rgba(184,134,11,.5);
+  --muted:#7A7266; --ok:#2F7D57; --bad:#B3402F;
+  --r:14px;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:
+    radial-gradient(1100px 620px at 12% -8%, rgba(184,134,11,.10), transparent 62%),
+    radial-gradient(900px 520px at 92% 108%, rgba(184,134,11,.08), transparent 60%),
+    var(--page);
+  color:var(--ink); font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:940px;margin:0 auto;padding:0 20px 80px}
+
+header{display:flex;align-items:center;gap:14px;padding:18px 0 16px}
+header img{height:44px;width:auto}
+header .t{flex:1;min-width:0}
+header .t b{display:block;font-size:15px;font-weight:600}
+header .t span{display:block;font-size:12px;color:var(--muted)}
+a.phone{font-size:13px;color:var(--gold-deep);text-decoration:none;font-weight:600}
+a.phone:hover{text-decoration:underline}
+
+/* ── Progress ──────────────────────────────────────────────────────────── */
+#steps{display:flex;gap:6px;margin:6px 0 26px;flex-wrap:wrap}
+#steps div{flex:1;min-width:112px;font-size:11px;letter-spacing:.5px;text-transform:uppercase;
+  padding:9px 11px;border-radius:9px;background:rgba(255,255,255,.6);
+  border:1px solid var(--line);color:var(--muted);font-weight:600}
+#steps div.on{background:linear-gradient(135deg,#D9AE3B,#C9992A);color:#241B08;border-color:transparent}
+#steps div.done{color:var(--ok);border-color:rgba(47,125,87,.35);background:rgba(47,125,87,.07)}
+
+.card{background:var(--ink-2);border:1px solid var(--line);border-radius:var(--r);
+  padding:24px;box-shadow:0 1px 3px rgba(28,26,23,.05);margin-bottom:18px}
+h1{font-size:25px;margin:0 0 6px;letter-spacing:-.3px}
+h2{font-size:16px;margin:0 0 4px}
+.lede{color:var(--muted);font-size:13.5px;margin:0 0 20px;line-height:1.6}
+label{display:block;font-size:12px;font-weight:600;color:var(--ink);margin:0 0 6px}
+.hint{font-size:11.5px;color:var(--muted);font-weight:400;margin:3px 0 0}
+
+input,select,textarea{width:100%;padding:11px 13px;border-radius:10px;border:1px solid var(--line);
+  background:var(--paper);color:var(--ink);font:inherit;font-size:14px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--gold);
+  box-shadow:0 0 0 3px rgba(184,134,11,.12)}
+.grid{display:grid;gap:16px}
+@media(min-width:640px){ .g2{grid-template-columns:1fr 1fr} }
+@media(min-width:860px){ .g3{grid-template-columns:1fr 1fr 1fr} }
+.f{margin-bottom:16px}
+
+/* ── Choices ───────────────────────────────────────────────────────────── */
+.picks{display:grid;gap:10px}
+@media(min-width:640px){ .picks{grid-template-columns:repeat(5,1fr)} }
+.pick{border:1px solid var(--line);border-radius:11px;padding:13px 10px;text-align:center;
+  cursor:pointer;background:var(--paper);transition:.15s;user-select:none}
+.pick:hover{border-color:var(--line-strong);background:rgba(184,134,11,.06)}
+.pick.sel{background:linear-gradient(135deg,#D9AE3B,#C9992A);border-color:transparent;color:#241B08}
+.pick b{display:block;font-size:17px;font-weight:700}
+.pick span{display:block;font-size:11px;opacity:.82;margin-top:2px}
+
+/* ── Calendar ──────────────────────────────────────────────────────────── */
+.cal{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
+.cal .h{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);
+  text-align:center;padding:5px 0;font-weight:600}
+.day{aspect-ratio:1;border-radius:9px;border:1px solid var(--line);background:var(--paper);
+  display:grid;place-items:center;font-size:12.5px;cursor:pointer;position:relative;transition:.12s}
+.day:disabled{opacity:.3;cursor:not-allowed}
+.day.full{background:#F3E4E1;border-color:rgba(179,64,47,.28);color:#8E3225;cursor:not-allowed;text-decoration:line-through}
+.day.limited{border-color:rgba(184,134,11,.55)}
+.day:not(:disabled):hover{border-color:var(--gold);background:rgba(184,134,11,.1)}
+.day.sel{background:linear-gradient(135deg,#D9AE3B,#C9992A);color:#241B08;border-color:transparent;font-weight:700}
+.day.today{box-shadow:inset 0 0 0 2px var(--gold-soft)}
+.legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font-size:11.5px;color:var(--muted)}
+.legend i{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:-1px;margin-right:5px;border:1px solid var(--line)}
+
+/* ── Summary ───────────────────────────────────────────────────────────── */
+.sum{background:var(--paper);border:1px solid var(--line);border-radius:11px;padding:16px}
+.sr{display:flex;justify-content:space-between;gap:14px;padding:7px 0;font-size:13.5px}
+.sr+.sr{border-top:1px dashed var(--line)}
+.sr.tot{border-top:1px solid var(--line-strong);margin-top:7px;padding-top:11px;
+  font-size:16px;font-weight:700}
+.sr .k{color:var(--muted)}
+.sr .v{font-weight:600;text-align:right}
+.pill{display:inline-block;font-size:10.5px;letter-spacing:.4px;text-transform:uppercase;
+  padding:3px 8px;border-radius:999px;background:rgba(184,134,11,.1);color:var(--gold-deep);font-weight:700}
+.pill.ok{background:rgba(47,125,87,.1);color:var(--ok)}
+
+/* ── Buttons ───────────────────────────────────────────────────────────── */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:12px 22px;
+  border-radius:10px;border:1px solid var(--line);background:rgba(184,134,11,.06);
+  color:var(--gold-deep);font:inherit;font-size:14px;font-weight:600;cursor:pointer;transition:.15s}
+.btn:hover:not(:disabled){background:rgba(184,134,11,.14);border-color:var(--line-strong)}
+.btn.pri{background:linear-gradient(135deg,#D9AE3B,#C9992A);color:#241B08;border-color:transparent}
+.btn.pri:hover:not(:disabled){filter:brightness(1.05)}
+.btn.ok{background:linear-gradient(135deg,#3E9A6E,#2F7D57);color:#fff;border-color:transparent}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.wide{width:100%}
+.nav{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap}
+.nav .sp{flex:1}
+
+/* ── Notices ───────────────────────────────────────────────────────────── */
+.note{padding:12px 15px;border-radius:10px;font-size:13px;margin:0 0 16px;line-height:1.55;
+  display:flex;gap:10px;align-items:flex-start}
+.note.err{background:#FBEDEA;border:1px solid rgba(179,64,47,.32);color:#8E3225}
+.note.warn{background:#FCF6E6;border:1px solid rgba(184,134,11,.4);color:var(--gold-deep)}
+.note.ok{background:#EAF5EF;border:1px solid rgba(47,125,87,.32);color:#1F6044}
+.note b{flex:none}
+
+/* ── Contract viewer ───────────────────────────────────────────────────── */
+.doc{width:100%;height:620px;border:1px solid var(--line);border-radius:11px;background:#F7F4EE}
+
+/* ── Signature ─────────────────────────────────────────────────────────── */
+.pad{position:relative;border:1px dashed var(--line-strong);border-radius:11px;background:#FFFDF8;
+  overflow:hidden;height:170px;touch-action:none}
+.pad canvas{display:block;width:100%;height:100%;cursor:crosshair}
+.pad .ph{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted);
+  font-size:13px;pointer-events:none;transition:.2s}
+.pad.has .ph{opacity:0}
+.pad .base{position:absolute;left:26px;right:26px;bottom:44px;border-bottom:1px solid var(--line)}
+.pad .who{position:absolute;left:28px;bottom:24px;font-size:11px;color:var(--muted)}
+.pad .x{position:absolute;right:12px;top:12px;font-size:11px;color:var(--muted);background:#FFFDF8;
+  border:1px solid var(--line);border-radius:6px;padding:3px 9px;cursor:pointer;font-family:inherit}
+.pad .x:hover{background:rgba(184,134,11,.1)}
+.consent{display:flex;gap:11px;align-items:flex-start;padding:13px;border:1px solid var(--line);
+  border-radius:10px;background:var(--paper);cursor:pointer;margin-top:14px}
+.consent input{width:18px;height:18px;margin:1px 0 0;flex:none;accent-color:var(--gold-deep)}
+.consent span{font-size:12.5px;color:var(--muted);line-height:1.55}
+
+/* ── Payment ───────────────────────────────────────────────────────────── */
+#paybox{padding:18px;border:1px solid var(--line);border-radius:11px;background:var(--paper)}
+.spin{width:26px;height:26px;border:3px solid rgba(184,134,11,.2);border-top-color:var(--gold);
+  border-radius:50%;animation:sp .8s linear infinite;margin:0 auto}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+/* ── Confirmation ──────────────────────────────────────────────────────── */
+.done{text-align:center;padding:28px 0 8px}
+.done .tick{width:62px;height:62px;border-radius:50%;background:rgba(47,125,87,.12);
+  display:grid;place-items:center;margin:0 auto 16px;border:2px solid rgba(47,125,87,.35)}
+.done h1{margin-bottom:4px}
+.done .sub{color:var(--muted);font-size:14px;margin-bottom:22px}
+.links{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.links a{display:flex;align-items:center;gap:11px;padding:15px;border:1px solid var(--line);
+  border-radius:11px;background:var(--paper);text-decoration:none;color:inherit;transition:.15s}
+.links a:hover{border-color:var(--gold);background:rgba(184,134,11,.07);transform:translateY(-1px)}
+.links .ic{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;flex:none;
+  background:rgba(184,134,11,.1);color:var(--gold-deep)}
+.links b{display:block;font-size:13.5px}
+.links span{display:block;font-size:11.5px;color:var(--muted)}
+
+footer{text-align:center;font-size:11.5px;color:var(--muted);padding:26px 0 0;line-height:1.7}
+.hide{display:none!important}
+.audit{margin-top:16px;padding:13px;border:1px solid var(--line);border-radius:10px;
+  background:var(--paper);font-size:11.5px;color:var(--muted)}
+.audit div{display:flex;gap:8px;padding:2px 0}
+.audit .k{flex:none;font-weight:600;color:var(--ink-2)}
+.audit code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
+  word-break:break-all}
+.audit .p{color:var(--ok)}
+.audit .f{color:var(--bad)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <img src="/api/visual/pfp/brand/logo.png" alt="Party Favor Photo" onerror="this.style.display='none'">
+  <div class="t"><b>Book Party Favor Photo</b><span id="hdr-sub">Event photography, Northern Virginia</span></div>
+  <a class="phone" href="tel:+12027980610" id="hdr-phone">(202) 798-0610</a>
+</header>
+
+<div id="steps">
+  <div data-s="1" class="on">1 · Date</div>
+  <div data-s="2">2 · Details</div>
+  <div data-s="3">3 · Contract</div>
+  <div data-s="4">4 · Payment</div>
+  <div data-s="5">5 · Done</div>
+</div>
+
+<div id="err" class="note err hide" role="alert"><b>⚠</b><span id="err-t"></span></div>
+
+<!-- ── 1. Date & package ─────────────────────────────────────────────── -->
+<section id="s1">
+  <div class="card">
+    <h1>Choose your date</h1>
+    <p class="lede">We run four StudioStations. A date is yours once one of them is free and the deposit is paid — so what you see below is real availability, not a request queue.</p>
+
+    <div class="f">
+      <label>Your event date</label>
+      <div id="cal" class="cal"></div>
+      <div class="legend">
+        <span><i style="background:#FAF7F1"></i>Available</span>
+        <span><i style="background:#FCF6E6;border-color:rgba(184,134,11,.55)"></i>Last kit</span>
+        <span><i style="background:#F3E4E1;border-color:rgba(179,64,47,.28)"></i>Fully booked</span>
+      </div>
+      <p class="hint" id="cal-hint">Loading availability…</p>
+    </div>
+
+    <div class="f">
+      <label>How many hours?</label>
+      <div class="picks" id="hours"></div>
+    </div>
+
+    <div class="f">
+      <label>Which package?</label>
+      <div class="picks" id="rates" style="grid-template-columns:repeat(2,1fr)"></div>
+      <p class="hint" id="rate-hint"></p>
+    </div>
+
+    <div class="sum" id="sum1"></div>
+    <div class="nav">
+      <span class="sp"></span>
+      <button class="btn pri" id="go2" disabled>Continue</button>
+    </div>
+  </div>
+</section>
+
+<!-- ── 2. Details ────────────────────────────────────────────────────── -->
+<section id="s2" class="hide">
+  <div class="card">
+    <h2>Your details</h2>
+    <p class="lede">These go on the contract exactly as you type them. Nothing is guessed.</p>
+    <div class="grid g2">
+      <div class="f"><label for="c_name">Full name</label>
+        <input id="c_name" autocomplete="name" placeholder="Natalia Jaffee">
+        <p class="hint">Exactly how you want it on the agreement.</p></div>
+      <div class="f"><label for="c_email">Email</label>
+        <input id="c_email" type="email" autocomplete="email" placeholder="you@example.com">
+        <p class="hint">Your receipt and countersigned contract go here.</p></div>
+      <div class="f"><label for="c_phone">Phone</label>
+        <input id="c_phone" type="tel" autocomplete="tel" placeholder="(202) 555-0134">
+        <p class="hint">For day-of questions. Optional.</p></div>
+      <div class="f"><label for="ev_name">Event name</label>
+        <input id="ev_name" placeholder="Jaffee–Knapp Wedding">
+        <p class="hint">Not guessed from your name or the date.</p></div>
+      <div class="f"><label for="ev_venue">Venue</label>
+        <input id="ev_venue" placeholder="Historic Rosemont Manor"></div>
+      <div class="f"><label for="ev_addr">Address</label>
+        <input id="ev_addr" placeholder="Berryville, VA"></div>
+      <div class="f"><label for="t_start">Start time</label>
+        <input id="t_start" placeholder="5:00 PM"></div>
+      <div class="f"><label for="t_end">End time</label>
+        <input id="t_end" placeholder="9:00 PM"></div>
+    </div>
+    <div class="nav">
+      <button class="btn" id="back1">← Back</button><span class="sp"></span>
+      <button class="btn pri" id="go3">Review contract</button>
+    </div>
+  </div>
+</section>
+
+<!-- ── 3. Contract & sign ────────────────────────────────────────────── -->
+<section id="s3" class="hide">
+  <div class="card">
+    <h2>Your contract</h2>
+    <p class="lede">Generated for this booking with your details and this exact price. Read it — it is the same document you sign.</p>
+    <div class="sum" id="sum3"></div>
+    <div style="margin:16px 0"><iframe class="doc" id="pdfframe" title="Your contract"></iframe></div>
+  </div>
+
+  <div class="card">
+    <h2>Sign</h2>
+    <p class="lede">Draw your signature, or type it. Either is legally binding under the U.S. E-SIGN Act, and both are recorded with a timestamp and a document fingerprint.</p>
+    <div class="f"><label for="s_name">Full legal name</label>
+      <input id="s_name" autocomplete="name"></div>
+
+    <div class="pad" id="pad">
+      <canvas id="cv"></canvas>
+      <div class="ph">Sign here with your mouse or finger</div>
+      <div class="base"></div><div class="who" id="pad-who"></div>
+      <button class="x" id="clear" type="button">Clear</button>
+    </div>
+
+    <label class="consent">
+      <input type="checkbox" id="agree">
+      <span id="agree-t"></span>
+    </label>
+
+    <div class="nav">
+      <button class="btn" id="back2">← Back</button><span class="sp"></span>
+      <button class="btn pri" id="go4" disabled>Sign &amp; continue to payment</button>
+    </div>
+  </div>
+</section>
+
+<!-- ── 4. Payment ────────────────────────────────────────────────────── -->
+<section id="s4" class="hide">
+  <div class="card">
+    <h2>Payment</h2>
+    <p class="lede" id="pay-lede"></p>
+    <div class="sum" id="sum4" style="margin-bottom:18px"></div>
+    <div id="paybox"><div class="spin"></div>
+      <p style="text-align:center;font-size:12.5px;color:var(--muted);margin:12px 0 0">Loading secure payment…</p>
+    </div>
+    <div class="nav">
+      <button class="btn" id="back3">← Back</button><span class="sp"></span>
+      <button class="btn ok" id="go5" disabled>I've paid</button>
+    </div>
+  </div>
+</section>
+
+<!-- ── 5. Confirmation ───────────────────────────────────────────────── -->
+<section id="s5" class="hide">
+  <div class="card">
+    <div class="done">
+      <div class="tick"><svg width="30" height="30" viewBox="0 0 24 24" fill="none"
+        stroke="#2F7D57" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="20 6 9 17 4 12"/></svg></div>
+      <h1>You're booked</h1>
+      <p class="sub" id="done-sub"></p>
+    </div>
+
+    <div class="sum" id="sum5" style="margin-bottom:18px"></div>
+
+    <div class="links">
+      <a id="l-studio" target="_blank" rel="noopener">
+        <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/>
+          <circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg></span>
+        <span><b>Design your photo templates</b><span>Meet Eliza — upload your invitation or logo</span></span>
+      </a>
+      <a id="l-contract" target="_blank" rel="noopener">
+        <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/></svg></span>
+        <span><b>Your signed contract</b><span>Download or keep a copy</span></span>
+      </a>
+      <a id="l-receipt" target="_blank" rel="noopener">
+        <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round"><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1z"/>
+          <path d="M8 9h8M8 13h5"/></svg></span>
+        <span><b>Payment receipt</b><span>From Stripe</span></span>
+      </a>
+    </div>
+
+    <div class="audit" id="audit"></div>
+
+    <div class="note warn" style="margin-top:18px">
+      <b>i</b><span id="balance-note"></span>
+    </div>
+  </div>
+</section>
+
+<footer>
+  Party Favor Photo · Joe Lee · <a href="tel:+12027980610" style="color:var(--gold-deep)">(202) 798-0610</a><br>
+  Prices and terms are shown in full before you are charged. Nothing is taken without your signature.
+</footer>
+</div>
+
+<script src="https://js.stripe.com/v3/"></script>
+<script>
+'use strict';
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+const API = '/api/pfp-book';
+
+const S = { cfg:null, date:null, hours:3, rate:'standard', token:null,
+            quote:null, sched:null, stripe:null, element:null, pay:null };
+
+// ── Errors: say the real thing. A vague failure on a payment page is how
+// somebody pays twice or gives up on a wedding.
+let busy = false;
+function showError(msg){ $('#err-t').textContent = msg; $('#err').classList.remove('hide');
+  window.scrollTo({top:0,behavior:'smooth'}); }
+function clearError(){ $('#err').classList.add('hide'); }
+
+async function api(path, opts={}){
+  const r = await fetch(API + path, {
+    method: opts.body ? 'POST' : 'GET',
+    headers: opts.body ? {'Content-Type':'application/json'} : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const raw = await r.text();
+  let j = null; try { j = raw ? JSON.parse(raw) : null; } catch { /* non-JSON body */ }
+  if (!r.ok) {
+    // Surface the server's own words. The API returns `error` deliberately;
+    // "Payment failed" with the real reason underneath is the difference
+    // between a client retrying and a client phoning.
+    throw new Error((j && j.error) || `Request failed (${r.status})`);
+  }
+  return j;
+}
+
+function money(c){ return '$' + (c/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+
+function step(n){
+  $$('#steps div').forEach(d => {
+    const s = +d.dataset.s;
+    d.classList.toggle('on', s === n);
+    d.classList.toggle('done', s < n);
+  });
+  $$('section[id^=s]').forEach(s => s.classList.add('hide'));
+  $('#s' + n).classList.remove('hide');
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+// ── Summary rows, rendered from the server's quote so the page can never
+//    show a number the engine did not compute.
+function summary(q, sc, el){
+  el.innerHTML = `
+    <div class="sr"><span class="k">Date</span><span class="v">${prettyDate(S.date)}</span></div>
+    <div class="sr"><span class="k">Package</span><span class="v">${q.rate_label} · ${q.hours} hours</span></div>
+    <div class="sr"><span class="k">${q.rate_label} ${q.hours}hr @ ${q.hourly_display}</span><span class="v">${q.subtotal_display}</span></div>
+    ${q.discount_applied ? `<div class="sr"><span class="k">Discount${q.discount_reason?' — '+q.discount_reason:''}</span><span class="v">−${q.discount_display}</span></div>` : ''}
+    <div class="sr tot"><span class="k">Total</span><span class="v">${q.total_display}</span></div>
+    <div class="sr"><span class="k">Due now (50%)</span><span class="v">${sc.deposit_display}</span></div>
+    <div class="sr"><span class="k">Balance — ${sc.balance_due}</span><span class="v">${sc.balance_display}</span></div>`;
+}
+
+const MONTHS = ['January','February','March','April','May','June','July',
+                'August','September','October','November','December'];
+function prettyDate(iso){
+  const d = new Date(iso + 'T00:00:00');
+  return d.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+}
+
+// ── 1. Calendar ───────────────────────────────────────────────────────────
+let monthOffset = 0, availCache = new Map();
+
+async function loadMonth(){
+  const base = new Date();
+  base.setDate(1); base.setMonth(base.getMonth() + monthOffset);
+  const from = base.toISOString().slice(0,10);
+  const key = from.slice(0,7);
+  $('#cal-hint').textContent = 'Loading availability…';
+
+  let data;
+  if (availCache.has(key)) data = availCache.get(key);
+  else { data = await api(`/availability?from=${from}&days=42`); availCache.set(key, data); }
+
+  const byDate = Object.fromEntries(data.days.map(d => [d.date, d]));
+  const y = base.getFullYear(), m = base.getMonth();
+  const first = new Date(y, m, 1).getDay();
+  const nDays = new Date(y, m+1, 0).getDate();
+  const todayIso = new Date().toISOString().slice(0,10);
+
+  let h = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+    .map(x => `<div class="h">${x}</div>`).join('');
+  h += '<div></div>'.repeat(first);
+  for (let d = 1; d <= nDays; d++){
+    const iso = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const info = byDate[iso];
+    const past = iso < todayIso;
+    const full = !info || info.available <= 0;
+    const cls = ['day'];
+    if (past) cls.push('full');
+    else if (full) cls.push('full');
+    else if (info.state === 'limited') cls.push('limited');
+    if (iso === todayIso) cls.push('today');
+    if (iso === S.date) cls.push('sel');
+    const tip = info ? (full ? 'fully booked' : `${info.available} of ${info.capacity} left`) : '';
+    h += `<div class="${cls.join(' ')}" data-d="${iso}" ${past||full?'disabled':''}
+            title="${prettyDate(iso)} — ${tip}">${d}</div>`;
+  }
+  $('#cal').innerHTML = h;
+  $('#cal-hint').innerHTML = `${MONTHS[m]} ${y} · ${data.days.filter(d=>d.available>0 && d.date>=todayIso).length} dates with a kit free`;
+  $$('#cal .day').forEach(el => el.onclick = () => {
+    S.date = el.dataset.d;
+    S.quote = S.cfg ? price(S.hours, S.rate) : null;
+    draw(); loadMonth();
+  });
+}
+
+// Prices are computed server-side; this mirrors the engine for display only and
+// the server's quote always wins when it arrives.
+function price(hours, rate){
+  const r = S.cfg.rates.find(x => x.rate_id === rate);
+  const total = hours * (rate === 'premium' ? 34900 : 24900);
+  return { rate_label:r.label, hours, hourly_display:(rate==='premium'?'$349.00':'$249.00')+'/hr',
+           subtotal_display:money(total), total_display:money(total),
+           discount_applied:false, print_format:r.print_format };
+}
+
+function draw(){
+  $$('#hours .pick').forEach(p => p.classList.toggle('sel', +p.dataset.h === S.hours));
+  $$('#rates .pick').forEach(p => p.classList.toggle('sel', p.dataset.r === S.rate));
+  const q = price(S.hours, S.rate);
+  S.quote = q;
+  const dep = Math.round(q.total_display.replace(/[$,]/g,'') * 100) / 2;
+  $('#rate-hint').textContent = S.rate === 'premium'
+    ? 'Full-size 4×6 photo cards for every guest.'
+    : '2×6 photo strips for every guest.';
+  $('#sum1').innerHTML = `
+    <div class="sr"><span class="k">Date</span><span class="v">${S.date ? prettyDate(S.date) : '<span style="color:var(--muted)">Pick a date</span>'}</span></div>
+    <div class="sr"><span class="k">Package</span><span class="v">${q.rate_label} · ${q.hours} hours</span></div>
+    <div class="sr"><span class="k">Subtotal</span><span class="v">${q.subtotal_display}</span></div>
+    <div class="sr tot"><span class="k">Total</span><span class="v">${q.total_display}</span></div>
+    <div class="sr"><span class="k">Due now (50%)</span><span class="v">${money(dep)}</span></div>`;
+  $('#go2').disabled = !S.date;
+}
+
+// ── 3. Signature pad ──────────────────────────────────────────────────────
+function initPad(){
+  const cv = $('#cv'), pad = $('#pad');
+  let drawing = false, dirty = false;
+  const ctx = cv.getContext('2d');
+
+  function fit(){
+    const r = pad.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    // Size to CSS pixels but back it with device pixels, or the stroke is soft
+    // on any modern display and the signature is the least legible thing here.
+    cv.width = r.width * dpr; cv.height = r.height * dpr;
+    ctx.scale(dpr, dpr);
+    ctx.lineWidth = 2.1; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#1C1A17';
+  }
+  fit(); window.addEventListener('resize', fit);
+
+  const pos = (e) => {
+    const r = cv.getBoundingClientRect();
+    const p = e.touches ? e.touches[0] : e;
+    return { x: p.clientX - r.left, y: p.clientY - r.top };
+  };
+  const start = (e) => { e.preventDefault(); drawing = true;
+    const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); };
+  const move = (e) => { if (!drawing) return; e.preventDefault();
+    const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); mark(); };
+  const end = () => { drawing = false; };
+
+  function mark(){ dirty = true; pad.classList.add('has'); validate(); }
+
+  cv.addEventListener('mousedown', start); window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', end);
+  cv.addEventListener('touchstart', start, {passive:false});
+  cv.addEventListener('touchmove', move, {passive:false});
+  cv.addEventListener('touchend', end);
+
+  $('#clear').onclick = () => {
+    ctx.clearRect(0,0,cv.width,cv.height); dirty = false;
+    pad.classList.remove('has'); validate();
+  };
+  S.padHas = () => dirty;
+  S.padPng = () => dirty ? cv.toDataURL('image/png').split(',')[1] : null;
+}
+
+function validate(){
+  const name = $('#s_name').value.trim();
+  const ok = S.padHas() && name && $('#agree').checked;
+  $('#go4').disabled = !ok;
+}
+
+// ── 4. Payment ────────────────────────────────────────────────────────────
+async function mountPayment(){
+  const d = await api('/pay', { body: { token: S.token } });
+  if (d.already_paid) { await finish(); return; }
+  S.pay = d;
+
+  $('#pay-lede').textContent =
+    `The ${money(d.deposit.deposit_cents)} deposit confirms your date. The balance of ` +
+    `${d.deposit.balance_display} is due ${d.deposit.balance_due} — that is in your contract, not a surprise later.`;
+
+  if (!window.Stripe) {
+    $('#paybox').innerHTML = `<div class="note err" style="margin:0"><b>⚠</b><span>
+      The secure payment form could not load. Nothing has been charged. Please refresh, or call
+      (202) 798-0610 and we will take your card number over the phone.</span></div>`;
+    return;
+  }
+  S.stripe = window.Stripe(d.publishable_key);
+  S.element = S.stripe.elements({ clientSecret: d.client_secret,
+                                  appearance: { theme:'stripe',
+                                    variables:{ colorPrimary:'#8C6508', borderRadius:'10px',
+                                                fontFamily:'system-ui, sans-serif' } } });
+  const el = S.element.create('payment');
+  el.mount('#paybox');
+  el.on('change', (e) => {
+    if (e.error) showError(e.error.message);
+    else clearError();
+    $('#go5').disabled = false;
+  });
+}
+
+async function submitPayment(){
+  if (busy) return; busy = true;
+  $('#go5').disabled = true; clearError();
+  try {
+    const { error } = await S.stripe.confirmPayment({
+      elements: S.element,
+      confirmParams: { return_url: location.origin + location.pathname + '?paid=' + S.token },
+      redirect: 'if_required',
+    });
+    if (error) throw new Error(error.message);
+    // The webhook is what marks the booking paid. Give it a moment: confirming
+    // in the browser and Stripe notifying us are two different clocks, and
+    // showing "you're booked" before the date is actually committed would be
+    // the one lie this page must not tell.
+    await waitForPaid();
+  } catch (e) {
+    showError('Payment did not go through: ' + e.message);
+    $('#go5').disabled = false;
+  } finally { busy = false; }
+}
+
+async function waitForPaid(){
+  for (let i = 0; i < 20; i++){
+    const c = await api(`/confirmation/${S.token}`);
+    if (c.paid_at) { await finish(c); return; }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  throw new Error('Your payment went through but we have not heard back from our payment provider yet. ' +
+    'Do not pay again — your date is held and we will confirm by email within a few minutes. ' +
+    'Call (202) 798-0610 if you need to know sooner.');
+}
+
+// ── 5. Confirmation ───────────────────────────────────────────────────────
+async function finish(pre){
+  const c = pre || await api(`/confirmation/${S.token}`);
+  S.done = c; step(5);
+
+  $('#done-sub').textContent =
+    `${c.event_name} · ${prettyDate(c.event_date)}${c.venue ? ' · ' + c.venue : ''}`;
+
+  $('#sum5').innerHTML = `
+    <div class="sr"><span class="k">Booking</span><span class="v">${c.hours} hours · ${c.rate_label}</span></div>
+    <div class="sr"><span class="k">Guests take home</span><span class="v">${c.print_format}</span></div>
+    <div class="sr"><span class="k">Paid today</span><span class="v">${c.deposit_display} <span class="pill ok">paid</span></span></div>
+    <div class="sr"><span class="k">Balance — ${c.balance_due}</span><span class="v">${c.balance_display}</span></div>
+    <div class="sr tot"><span class="k">Contract total</span><span class="v">${c.total_display}</span></div>`;
+
+  $('#l-studio').href = c.studio_url || 'https://prints.partyfavorphoto.com';
+  $('#l-contract').href = c.contracts.countersigned || c.contracts.signed;
+  $('#l-receipt').href = c.receipt_url || c.contracts.signed;
+
+  $('#balance-note').innerHTML =
+    `Your balance of <b>${c.balance_display}</b> is due ${c.balance_due}. ` +
+    `Your countersigned contract arrives by email once Joe has reviewed it — usually within the day.`;
+
+  // The audit trail is shown to the client, not buried. If the document is ever
+  // questioned, the fingerprint below is what proves it is the one they signed.
+  const v = c.verification || { checks: [] };
+  $('#audit').innerHTML = '<div><span class="k">Signature record</span></div>' +
+    v.checks.map(x => `<div><span class="${x.ok?'p':'f'}">${x.ok?'✓':'✗'}</span>
+      <span>${x.name} — ${x.detail}</span></div>`).join('') +
+    (c.contract_sha256 ? `<div style="margin-top:7px"><span class="k">Document SHA-256</span></div>
+      <div><code>${c.contract_sha256}</code></div>` : '');
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+(async function(){
+  try {
+    S.cfg = await api('/config');
+    $('#hdr-phone').textContent = S.cfg.brand.phone;
+    $('#hdr-sub').textContent = `${S.cfg.rates[0].print_format} · from $${S.cfg.min_hours} hours`;
+    if (S.cfg.consent) {
+      $('#agree-t').innerHTML = S.cfg.consent.text +
+        ' <em style="opacity:.7">(recorded as ' + S.cfg.consent.version + ')</em>';
+    }
+
+    $('#hours').innerHTML = S.cfg.durations.map(h =>
+      `<div class="pick" data-h="${h}"><b>${h}</b><span>hours</span></div>`).join('');
+    $$('#hours .pick').forEach(p => p.onclick = () => { S.hours = +p.dataset.h; draw(); });
+
+    $('#rates').innerHTML = S.cfg.rates.map(r => {
+      const first = r.packages[0];
+      return `<div class="pick" data-r="${r.rate_id}">
+        <b>$${(r.rate_id==='premium'?349:249)}</b><span>per hour · ${r.print_format}</span>
+        <span style="margin-top:4px;opacity:.75">${first.hours}h = ${first.total_display}</span></div>`;
+    }).join('');
+    $$('#rates .pick').forEach(p => p.onclick = () => { S.rate = p.dataset.r; draw(); });
+
+    initPad();
+    $('#s_name').addEventListener('input', validate);
+    $('#agree').addEventListener('change', validate);
+
+    // Handoff from the marketing site. partyfavorphoto.com carries the date,
+    // hours and package across so nobody retypes what they already chose.
+    //
+    // The values are trusted as INTENT and re-validated against the catalogue:
+    // `rate` must name a real package and `hours` a real duration, or the
+    // pricing engine refuses them and the page breaks on arrival. A stale link
+    // must degrade to the default calendar, not to an error.
+    const q = new URLSearchParams(location.search);
+    const wantHours = Number(q.get('hours'));
+    const wantRate = (q.get('rate') || '').toLowerCase();
+    if (S.cfg.durations.includes(wantHours)) S.hours = wantHours;
+    if (S.cfg.rates.some(r => r.rate_id === wantRate)) S.rate = wantRate;
+    const wantDate = (q.get('date') || '').match(/^\d{4}-\d{2}-\d{2}$/);
+    if (wantDate) S.date = wantDate[0];
+
+    if (S.date) {
+      // Open on the date they chose rather than the current month.
+      const d = new Date(S.date + 'T00:00:00');
+      if (!Number.isNaN(d.getTime())) {
+        monthOffset = (d.getFullYear() - new Date().getFullYear()) * 12
+                    + (d.getMonth() - new Date().getMonth());
+      }
+    }
+    await loadMonth();
+    draw();
+    if (S.date) {
+      // The chosen day may sit outside the window the calendar just drew, so
+      // say plainly where they are instead of silently showing a blank month.
+      const onScreen = $$('#cal .day').some(el => el.dataset.d === S.date);
+      if (!onScreen) {
+        $('#cal-hint').textContent =
+          `${prettyDate(S.date)} is selected — scroll or pick another month to see it highlighted.`;
+      }
+    }
+
+    $('#go2').onclick = () => { clearError(); step(2); };
+    $('#back1').onclick = () => step(1);
+
+    $('#go3').onclick = async () => {
+      clearError();
+      const payload = {
+        event_date: S.date, hours: S.hours, rate_id: S.rate,
+        client_name: $('#c_name').value, client_email: $('#c_email').value,
+        client_phone: $('#c_phone').value, event_name: $('#ev_name').value,
+        venue: $('#ev_venue').value, address: $('#ev_addr').value,
+        start_time: $('#t_start').value, end_time: $('#t_end').value,
+      };
+      $('#go3').disabled = true; $('#go3').textContent = 'Claiming your date…';
+      try {
+        const r = await api('/reserve', { body: payload });
+        S.token = r.token; S.quote = r.quote; S.sched = r.schedule;
+        // Prefill the signature name from the name they already typed.
+        $('#s_name').value = payload.client_name;
+        $('#pad-who').textContent = payload.client_name || '';
+        summary(r.quote, r.schedule, $('#sum3'));
+        $('#pdfframe').src = r.contract.url;
+        step(3); validate();
+      } catch (e) {
+        showError(e.message);
+        // A full date is not a generic failure: go back and let them pick again.
+        if (/fully booked/i.test(e.message)) { S.date = null; await loadMonth(); }
+      } finally {
+        $('#go3').disabled = false; $('#go3').textContent = 'Review contract';
+      }
+    };
+    $('#back2').onclick = () => step(2);
+
+    $('#go4').onclick = async () => {
+      clearError(); $('#go4').disabled = true; $('#go4').textContent = 'Signing…';
+      try {
+        await api('/sign', { body:{ token:S.token, name:$('#s_name').value,
+          signature_png_base64: S.padPng(), consent:true, consent_text: S.cfg.consent.text } });
+        step(4); await mountPayment();
+      } catch (e) { showError(e.message); validate(); }
+      finally { $('#go4').disabled = false; $('#go4').textContent = 'Sign & continue to payment'; }
+    };
+    $('#back3').onclick = () => step(3);
+    $('#go5').onclick = submitPayment;
+
+    // Returning from a Stripe redirect: the webhook may already have landed.
+    const paid = new URLSearchParams(location.search).get('paid');
+    if (paid) { S.token = paid; step(4); try { await waitForPaid(); } catch(e){ showError(e.message); } }
+
+  } catch (e) {
+    showError('Could not load the booking page: ' + e.message);
+  }
+})();
+</script>
+</body>
+</html>

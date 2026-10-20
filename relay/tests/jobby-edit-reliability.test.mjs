@@ -1,4 +1,4 @@
-﻿// Verify the fix for the failure in client 496: three wrong key names, only one
+// Verify the fix for the failure in client 496: three wrong key names, only one
 // reported, whole entry discarded, and a follow-up question answered with a
 // canned non-answer.
 import { applyEdit, applyEdits } from '../jobby/dossier.mjs';

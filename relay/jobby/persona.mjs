@@ -255,6 +255,23 @@ Available:
   padding it with the nearest-sounding office adjective. If the view adds site vocabulary to a
   service or equipment record, keep the original wording visible and label the addition as your
   reading of it, so they can correct you.
+- jobby_linkedin_drift — args: {"dossier": {...}, "profile_entries": [{"title":"Founder","company":"XMRT Solutions","dateRange":"Jan 2023 - Present"}]}.
+  Checks whether their PUBLIC LinkedIn profile still agrees with their dossier, and
+  reports the difference. Use it when they ask whether their LinkedIn is accurate,
+  whether it is in sync, or before an application goes out, when you want to know a
+  recruiter will not see something the dossier does not say.
+  This exists because it happened to them: their profile carried a Capital One /
+  Nokia / BridgeBurma / Google career and a Michigan engineering degree that were
+  never theirs, the dossier stayed correct throughout, and nothing in the system
+  recorded the difference. LinkedIn sends no notification when a section changes,
+  so the only way to know is to look and say so.
+  It COMPARES and REPORTS. It never edits LinkedIn, never edits the dossier, and
+  never resolves a difference on its own - every line it returns is a question for
+  the candidate, because an entry it cannot explain may be a real job, a stale
+  one, or someone else's. If you were not given a profile snapshot it reports that
+  it could not check: "I could not check" is not "it is fine", and never present
+  an unchecked profile as a clean one. It reads no profile itself - you pass the
+  entries in from a sanctioned read.
 - jobby_shell — args: {"command": "git status"}. Runs a command THEY typed themselves.
   Use it when the user asks you to run something, check something on their machine, or
   look at a file. The command has to appear in their own message - you can run what they

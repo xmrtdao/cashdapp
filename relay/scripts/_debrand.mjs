@@ -1,4 +1,4 @@
-﻿/**
+/**
  * relay/scripts/_debrand.mjs — drop the cuttlefish prefix, in one pass.
  *
  * THE ORDER MATTERS, and it is the reverse of the obvious one:
@@ -26,7 +26,8 @@
  * The first attempt at this rename was done with PowerShell's Get-Content -Raw
  * and [System.IO.File]::WriteAllText. On Windows PowerShell 5.1, Get-Content
  * decodes a BOM-less UTF-8 file as the system ANSI code page, so every em dash
- * became "Ã¢â‚¬â€" and WriteAllText saved that as UTF-8. 1,486 sequences across 11
+ * became three characters (U+00E2, U+20AC, U+201D) and WriteAllText saved that as
+ * UTF-8. 1,486 sequences across 11
  * files were corrupted and every test still passed. This script does all file
  * I/O through node:fs, which decodes UTF-8 correctly, and verifies afterwards
  * that no mojibake was introduced.
@@ -48,7 +49,7 @@ process.env.LOCAL_DATABASE_URL = (readFileSync(join(RELAY, '.env'), 'utf8')
 const { getPool } = await import('file:///C:/Users/PureTrek/Desktop/xmrtdao/relay/jobby/store.mjs');
 const pool = await getPool();
 
-// â”€â”€ the mapping â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── the mapping ──────────────────────────────────────────────────────────────
 const RENAME = {
   activity_registry: 'activity_registry',
   agent_tasks: 'work_queue',
@@ -76,7 +77,7 @@ const RENAME = {
 // or half the estate keeps saying cuttlefish.
 const ALREADY = { cuttlefish_trust_events: 'trust_events', cuttlefish_standing_events: 'standing_events' };
 
-// â”€â”€ 1. expose the un-prefixed public views â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── 1. expose the un-prefixed public views ───────────────────────────────────
 const exists = async (s, n) => (await pool.query(
   'SELECT table_type FROM information_schema.tables WHERE table_schema=$1 AND table_name=$2', [s, n])).rows[0];
 
@@ -99,7 +100,7 @@ for (const [from, to] of Object.entries({ ...RENAME, ...ALREADY })) {
   }
 }
 
-// â”€â”€ 2. migrate the code â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── 2. migrate the code ──────────────────────────────────────────────────────
 const PAIRS = [];
 for (const [from, to] of Object.entries({ ...RENAME, ...ALREADY })) {
   PAIRS.push([`public.cuttlefish_${from}`, `public.${to}`]);
@@ -148,7 +149,7 @@ if (APPLY) {
   console.log(`    ${total} replacement(s) would apply`);
 }
 
-// â”€â”€ 3. rename the app base tables, last â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── 3. rename the app base tables, last ─────────────────────────────────────
 console.log('\n  phase 3 — rename the app base tables');
 if (APPLY) {
   const c = await pool.connect();
@@ -179,7 +180,7 @@ if (APPLY) {
   } finally { c.release(); }
 }
 
-// â”€â”€ 4. verify â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── 4. verify ───────────────────────────────────────────────────────────────
 const left = await pool.query(
   `SELECT count(*)::int n FROM information_schema.tables
     WHERE table_schema='app' AND table_type='BASE TABLE' AND table_name ILIKE 'cuttlefish%'`);

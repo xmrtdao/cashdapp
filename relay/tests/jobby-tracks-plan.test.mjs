@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Tests for the pure decision logic: track selection and plan generation.
-// No database, no network â€” these must stay deterministic.
+// No database, no network — these must stay deterministic.
 import { decideTracks, explainTracks, TRACKS, BASE_TRACKS } from '../jobby/tracks.mjs';
 import { buildPlan, planSummary } from '../jobby/plan.mjs';
 
@@ -12,7 +12,7 @@ function check(label, cond, detail) {
 }
 function section(t) { console.log('\n=== ' + t + ' ==='); }
 
-// â”€â”€ Track decision â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Track decision ──────────────────────────────────────────────────────
 section('base tracks for an ordinary employee resume');
 {
   const d = decideTracks({
@@ -35,7 +35,7 @@ section('consultant opens tracks 1 and 2');
   });
   check('track 1 on', d.tracks.includes(1), d.tracks);
   check('track 2 on', d.tracks.includes(2), d.tracks);
-  // 1,2,3,4 â€” and NOT 5. This dossier is a compliance consultant with no
+  // 1,2,3,4 — and NOT 5. This dossier is a compliance consultant with no
   // statement about rotating, so track 5 must stay closed. Asserting the
   // length alone would pass with a stray 5 in place of a missing 1.
   check('tracks 1,2,3,4 and no FIFO', d.tracks.length === 4 && !d.tracks.includes(5), d.tracks);
@@ -106,7 +106,7 @@ section('user override');
   check('override can open track 5', fifo.tracks.includes(5), fifo.tracks);
 }
 
-// â”€â”€ Track 5. The load-bearing case is what must NOT open it. â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Track 5. The load-bearing case is what must NOT open it. ────────────────
 //
 // "Has done site work" and "wants to do site work" are different claims. An
 // earlier cut opened track 5 on the first, which put fly-in/fly-out roles in
@@ -187,7 +187,7 @@ section('robustness');
   check('explainTracks mentions closed tracks', /tracks 1 and 2 stay closed/.test(explainTracks(decideTracks({}))));
 }
 
-// â”€â”€ Plan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Plan ────────────────────────────────────────────────────────────────
 section('plan for an employee resume');
 {
   const dossier = {

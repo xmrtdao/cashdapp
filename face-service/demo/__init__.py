@@ -1,1 +1,1 @@
-﻿"""demo package."""
+"""demo package."""

@@ -1,3 +1,4 @@
+import { localDbUrl } from '../lib/local-db-url.mjs';
 // The two edits that were refused in a live session, replayed exactly as the
 // model sent them.
 //
@@ -90,7 +91,7 @@ section('read-only and prototype paths are still refused');
 section('the two edits, applied end to end to a real dossier');
 {
   const pool = new pg.Pool({
-    connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+    connectionString: localDbUrl(),
   });
   const key = 'dossier-alias-test-' + Math.random().toString(36).slice(2);
   const client = await getOrCreateClient(key, 'Alias Test');

@@ -40,12 +40,17 @@ export async function webScrape(url, options = {}) {
       const res = await fetch(url, {
         headers: {
           'User-Agent': userAgents[attempt],
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer': 'https://www.google.com/',
           'Cache-Control': 'no-cache',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'cross-site',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1',
         },
         signal: controller.signal,
-        // Don't follow redirects manually — let fetch handle it
         redirect: 'follow',
       });
 
@@ -91,19 +96,15 @@ export async function webScrape(url, options = {}) {
         extractedLength: content.length,
         contentType: contentType.split(';')[0],
         content,
-        // null rather than [] when not requested, so a caller can tell "no links
-        // on the page" from "links were not extracted".
         links,
       };
     } catch (err) {
       clearTimeout(timer);
       if (err.name === 'AbortError') {
         lastError = `Request timed out after ${timeout}ms`;
-        // Timeout might be network issue — try next UA
         continue;
       }
       lastError = `Fetch failed: ${err.message}`;
-      // DNS/connection errors — try next UA
       continue;
     }
   }
@@ -111,11 +112,7 @@ export async function webScrape(url, options = {}) {
   return { error: lastError || 'All fetch attempts failed' };
 }
 
-/**
- * Extract readable text from HTML
- */
 function extractHtmlText(html) {
-  // Remove script, style, nav, footer, header, iframe, noscript tags
   let cleaned = html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
@@ -125,7 +122,6 @@ function extractHtmlText(html) {
     .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, ' ')
     .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, ' ');
   
-  // Replace <br>, <p>, <div>, <li>, <h1-6> with newlines
   cleaned = cleaned
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>/gi, '\n\n')
@@ -136,10 +132,8 @@ function extractHtmlText(html) {
     .replace(/<\/th>/gi, '\t')
     .replace(/<\/td>/gi, '\t');
   
-  // Remove all remaining HTML tags
   cleaned = cleaned.replace(/<[^>]+>/g, ' ');
   
-  // Decode common HTML entities
   cleaned = cleaned
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
@@ -149,7 +143,6 @@ function extractHtmlText(html) {
     .replace(/&nbsp;/g, ' ')
     .replace(/&#(\d+);/g, (match, dec) => String.fromCharCode(dec));
   
-  // Collapse whitespace
   cleaned = cleaned
     .replace(/\t+/g, ' ')
     .replace(/ +/g, ' ')
@@ -159,25 +152,11 @@ function extractHtmlText(html) {
   return cleaned;
 }
 
-/**
- * Extract page title from HTML
- */
 function extractTitle(html) {
   const match = html.match(/<title[^>]*>([^<]*)<\/title>/i);
   return match ? match[1].trim() : '';
 }
 
-/**
- * Extract anchors and mailto addresses, resolved to absolute URLs.
- *
- * This is the part extractHtmlText throws away. It reads the href attributes
- * before the tags are stripped, and resolves them against the page URL so a
- * relative "/team" link comes back as something that can actually be fetched.
- *
- * Tracking parameters are dropped rather than kept. They identify a click, not a
- * page, and a sourcing record that carries someone's utm campaign is a record
- * about a visitor rather than about a role.
- */
 function extractHtmlLinks(html, pageUrl) {
   const out = [];
   const seen = new Set();
@@ -191,7 +170,6 @@ function extractHtmlLinks(html, pageUrl) {
     if (!href || href === '#' || /^javascript:/i.test(href)) return;
 
     if (kind === 'mailto') {
-      // "Name <a@b.com>" is legal in a mailto and the name is not an address.
       const addr = href.replace(/^mailto:/i, '').split('?')[0].trim();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr)) return;
       const key = 'mailto:' + addr.toLowerCase();
@@ -231,7 +209,6 @@ function extractHtmlLinks(html, pageUrl) {
     push(href, m[2], /^mailto:/i.test(href) ? 'mailto' : 'link');
   }
 
-  // Pages sometimes put the address in visible text with no anchor at all.
   const bare = html.replace(/<[^>]+>/g, ' ');
   const mailRe = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
   let e;

@@ -16,9 +16,12 @@ import pg from 'pg';
 import { POOL_CONFIG } from './pool-config.mjs';
 const { Pool } = pg;
 
-const DB_URL = process.env.LOCAL_DATABASE_URL
-  || process.env.DATABASE_URL
-  || 'postgres://postgres@127.0.0.1:5432/xmrt_suite';
+// One resolver, shared with store.mjs, claim.mjs, calendly-store.mjs and
+// google-store.mjs. These five resolved the URL from different environment
+// variable lists, which meant a test run against xmrt_suite_test could have
+// half the system reading and writing xmrt_suite. See lib/local-db-url.mjs.
+const { localDbUrl } = await import('./local-db-url.mjs');
+const DB_URL = localDbUrl();
 
 let _pool = null;
 let _healthTimer = null;

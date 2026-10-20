@@ -1,3 +1,4 @@
+import { localDbUrl } from '../lib/local-db-url.mjs';
 // Audit Jobby's real capabilities: what the 14 tools claim to do, and what each
 // one actually depends on.
 //
@@ -148,7 +149,7 @@ section('credentials the tools depend on');
 section('the job_* tables the tools write to');
 {
   const pool = new pg.Pool({
-    connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+    connectionString: localDbUrl(),
   });
   const { rows } = await pool.query(`
     SELECT table_name FROM information_schema.tables

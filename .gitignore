@@ -278,3 +278,10 @@ _devgrgold_cleanup_bak/
 
 # local-sb writes its log beside the server.
 local-supabase/*.log
+
+# A screenshot of the obsidian UI, a scratch test, and a file called
+# "nul" - which is a reserved device name on Windows and cannot be
+# indexed by git at all.
+/obsidian-ui-current.png
+/test_cascade.mjs
+/nul

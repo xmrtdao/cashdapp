@@ -940,6 +940,92 @@ export function createJobbyTools({ llmChat }) {
      * nothing to the dossier. If the user wants a claim recorded, they have to
      * say it, and the ordinary edit tools handle that.
      */
+    /**
+     * Does the candidate's public LinkedIn profile still say what the dossier
+     * says it says?
+     *
+     * The dossier is the record and LinkedIn is a surface, and surfaces drift.
+     * This one did: the profile carried a Capital One / Nokia / BridgeBurma /
+     * Google career and a Michigan engineering degree that were never his, while
+     * the dossier beside it stayed correct and nothing in this system recorded
+     * the difference. LinkedIn sends no notification when a profile section
+     * changes, so the only way to know is to look, on a schedule, and say.
+     *
+     * Read-only by construction. There is no write path here and there will not
+     * be one: the fix for a wrong profile is a person correcting it, not an
+     * agent editing a recruiter-facing page with no notification and no undo.
+     *
+     * The profile itself is supplied by `profile_entries` or `profile_json` from
+     * a sanctioned read. The module does not open a browser or scrape LinkedIn
+     * - there is no open API for it and scraping violates the ToS, which this
+     * repo already records in relay/tests/jobby-capabilities.test.mjs.
+     */
+    async jobby_linkedin_drift(args, ctx) {
+      const { runDriftCheck, renderReport } = await import('./linkedin-drift.mjs');
+      const { loadDossier } = await import('./dossier.mjs').catch(() => ({}));
+      void loadDossier;
+
+      // The dossier is whatever the candidate's own record already is. Nothing
+      // here writes to it - this is a comparison, not an edit.
+      let dossier = args?.dossier || null;
+      if (!dossier && typeof ctx?.dossier === 'object' && ctx.dossier) dossier = ctx.dossier;
+      if (!dossier || !Array.isArray(dossier.employment)) {
+        return {
+          error: 'No dossier to compare against. Pass {"dossier": {...}} or run this with a dossier in context.',
+        };
+      }
+
+      let entries = null;
+      let source = null;
+      if (Array.isArray(args?.profile_entries)) {
+        entries = args.profile_entries;
+        source = 'supplied by caller';
+      } else if (typeof args?.profile_json === 'string' && args.profile_json.trim()) {
+        try {
+          const parsed = JSON.parse(args.profile_json);
+          entries = Array.isArray(parsed) ? parsed : parsed?.entries;
+          source = 'supplied by caller (json)';
+        } catch (err) {
+          return { error: 'profile_json is not valid JSON: ' + String(err?.message || err) };
+        }
+      }
+
+      if (!entries) {
+        // No profile supplied. Report unavailable rather than inventing one, and
+        // say plainly what would clear it.
+        return {
+          ok: false,
+          status: 'unavailable',
+          reason: 'No LinkedIn profile was supplied, so nothing was compared.',
+          how_to_provide:
+            'Pass {"profile_entries": [{"title":"...","company":"...","dateRange":"Jan 2016 - Present"}]} ' +
+            'from a sanctioned read of the public profile. This tool does not open a browser or scrape LinkedIn.',
+        };
+      }
+
+      const report = await runDriftCheck({
+        dossier,
+        readProfile: async () => ({ entries, source }),
+      });
+
+      return {
+        ok: report.ok,
+        status: report.status,
+        checkedAt: report.checkedAt,
+        counts: report.counts,
+        missing: report.missing,
+        unexplained: report.unexplained,
+        undated: report.undated,
+        mismatched: report.mismatched,
+        report: renderReport(report),
+        evidence:
+          'A comparison between the dossier and a supplied snapshot of the public profile. ' +
+          'It is evidence about consistency, not about the person: a role on a profile is a ' +
+          'claim the candidate made, not a verified fact, and nothing here writes to LinkedIn ' +
+          'or to the dossier.',
+      };
+    },
+
     async jobby_register_media(args, ctx) {
       const source = args?.source || args?.url || args?.path;
       if (!source) {

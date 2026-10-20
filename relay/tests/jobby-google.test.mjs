@@ -246,14 +246,15 @@ section('MIME tree walking finds the body');
 section('oauth state is single-use');
 {
   const { Pool } = await import('pg');
-  // These pools were hardcoded to the production database, which made two things
-  // true at once: they wrote fixture rows into app.job_clients on every run, and
-  // they broke the moment the suite was pointed at a throwaway database - the
-  // client was created in one database and the oauth state written to another,
-  // so the foreign key failed. Both symptoms had one cause.
-  const pool = new Pool({ connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite' });
-  const clientId = 999999; // no FK row needed: the states table requires one,
-                           // so create a real client and clean it up after.
+  // This pool resolved LOCAL_PG_URL only, so it wrote fixture rows into the
+  // PRODUCTION database on every run - and broke the moment the suite was
+  // pointed at a throwaway database, because the client was created in one
+  // database and the oauth state written to another, so the foreign key failed.
+  // Both symptoms had one cause, and the cause was this line. google-store.mjs
+  // now uses the shared resolver, so the fixture must too, or it creates the
+  // client in one database and the state in another again.
+  const { localDbUrl } = await import('../lib/local-db-url.mjs');
+  const pool = new Pool({ connectionString: localDbUrl() });
   const { rows } = await pool.query(
     `INSERT INTO app.job_clients (session_key, display_name) VALUES ($1,$2) RETURNING id`,
     [`test-google-state-${Date.now()}`, 'state test'],
@@ -291,12 +292,9 @@ section('oauth state is single-use');
 section('no token material is exposed by statusFor or listSent');
 {
   const { Pool } = await import('pg');
-  // These pools were hardcoded to the production database, which made two things
-  // true at once: they wrote fixture rows into app.job_clients on every run, and
-  // they broke the moment the suite was pointed at a throwaway database - the
-  // client was created in one database and the oauth state written to another,
-  // so the foreign key failed. Both symptoms had one cause.
-  const pool = new Pool({ connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite' });
+  // Same two lines, same cause. See the note in the first block.
+  const { localDbUrl } = await import('../lib/local-db-url.mjs');
+  const pool = new Pool({ connectionString: localDbUrl() });
   const { rows } = await pool.query(
     `INSERT INTO app.job_clients (session_key, display_name) VALUES ($1,$2) RETURNING id`,
     [`test-google-token-${Date.now()}`, 'token test'],
@@ -371,12 +369,9 @@ section('no token material is exposed by statusFor or listSent');
 section('reply de-duplication');
 {
   const { Pool } = await import('pg');
-  // These pools were hardcoded to the production database, which made two things
-  // true at once: they wrote fixture rows into app.job_clients on every run, and
-  // they broke the moment the suite was pointed at a throwaway database - the
-  // client was created in one database and the oauth state written to another,
-  // so the foreign key failed. Both symptoms had one cause.
-  const pool = new Pool({ connectionString: process.env.LOCAL_PG_URL || 'postgres://postgres@127.0.0.1:5432/xmrt_suite' });
+  // Same two lines, same cause. See the note in the block above.
+  const { localDbUrl } = await import('../lib/local-db-url.mjs');
+  const pool = new Pool({ connectionString: localDbUrl() });
   const { rows } = await pool.query(
     `INSERT INTO app.job_clients (session_key, display_name) VALUES ($1,$2) RETURNING id`,
     [`test-google-replies-${Date.now()}`, 'reply test'],

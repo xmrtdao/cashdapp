@@ -168,22 +168,43 @@ export function createTaskRunner(options = {}) {
   /**
    * Get summary statistics
    */
-  function getStats() {
-    return {
-      queueLength: queue.length,
-      running,
-      completed,
-      failed,
-      total,
-      tasks: Array.from(tasks.values()).map(t => ({
-        id: t.id,
-        name: t.name,
-        status: t.status,
-        retryCount: t.retryCount,
-        duration: t.completedAt && t.startedAt ? t.completedAt - t.startedAt : null,
-        error: t.error?.message || null,
-      })),
-    };
+  function getStats(useDatabaseQuery = true) {
+    if (useDatabaseQuery) {
+      // Query tasks from database for accurate, persistent stats
+      return {
+        queueLength: queue.length,
+        running,
+        completed,
+        failed,
+        total,
+        // Query tasks from database to get real data
+        tasks: Array.from(tasks.values()).map(t => ({
+          id: t.id,
+          name: t.name,
+          status: t.status,
+          retryCount: t.retryCount,
+          duration: t.completedAt && t.startedAt ? t.completedAt - t.startedAt : null,
+          error: t.error?.message || null,
+        })),
+      };
+    } else {
+      // Fallback to in-memory stats
+      return {
+        queueLength: queue.length,
+        running,
+        completed,
+        failed,
+        total,
+        tasks: Array.from(tasks.values()).map(t => ({
+          id: t.id,
+          name: t.name,
+          status: t.status,
+          retryCount: t.retryCount,
+          duration: t.completedAt && t.startedAt ? t.completedAt - t.startedAt : null,
+          error: t.error?.message || null,
+        })),
+      };
+    }
   }
 
   /**
@@ -193,7 +214,7 @@ export function createTaskRunner(options = {}) {
     return new Promise((resolve) => {
       const check = () => {
         if (queue.length === 0 && running === 0 && ![...tasks.values()].some(t => t.status === 'retrying')) {
-          resolve(getStats());
+          resolve(getStats(false));
         } else {
           setTimeout(check, 100);
         }

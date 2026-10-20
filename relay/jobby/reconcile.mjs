@@ -20,13 +20,7 @@
 // application and a reply will be filed against.
 
 import pg from 'pg';
-
-/** Every table hanging off client_id, and what a consolidation has to move. */
-const CHILD_TABLES = [
-  'job_actions', 'job_chat_messages', 'job_dossier_edits', 'job_dossiers',
-  'job_google_accounts', 'job_oauth_states', 'job_calendly_accounts',
-  'job_opportunities', 'job_outreach', 'job_seen_replies', 'job_sent_messages',
-];
+import { moveAllChildRows } from './consolidate-rows.mjs';
 
 /** Which client wins when several match. The oldest holds the history. */
 function pickSurvivor(clients) {
@@ -299,17 +293,9 @@ export async function consolidateClients(pool, clientIds, { dryRun = false, reas
       }
     }
 
-    // ── Everything else moves wholesale ─────────────────────────────────────
-    for (const table of CHILD_TABLES) {
-      if (SINGLE_ROW.has(table) || table === 'job_dossiers') continue;
-      const exists = await client.query(
-        `SELECT 1 FROM information_schema.tables
-          WHERE table_schema='app' AND table_name=$1`, [table]);
-      if (!exists.rowCount) continue;
-      const res = await client.query(
-        `UPDATE ${table} SET client_id = $1 WHERE client_id = ANY($2::int[])`, [survivor.id, doomed.map(d => d.id)]);
-      if (res.rowCount) report.moved[table] = res.rowCount;
-    }
+    // ── Everything else moves collision-aware ──────────────────────────────────
+    const report = { moved: {}, skipped: [], keptStronger: [], discarded: 0, released: 0 };
+    if (!dryRun) await moveAllChildRows(client, { survivorId: survivor.id, doomedIds: doomed.map(d => d.id), report });
 
     // ── Fill the survivor's profile from the duplicates ─────────────────────
     for (const field of ['display_name', 'email', 'phone', 'location', 'mailbox']) {
@@ -325,19 +311,8 @@ export async function consolidateClients(pool, clientIds, { dryRun = false, reas
     // ── The duplicates go ──────────────────────────────────────────────────
     if (!dryRun) {
       for (const d of doomed) {
-        // The mailbox is unique per client, so it cannot simply travel with the
-        // row; it is released first and the survivor adopts it if it has none.
-        await client.query('UPDATE app.job_clients SET mailbox = NULL WHERE id = $1', [d.id]);
         const del = await client.query('DELETE FROM app.job_clients WHERE id = $1', [d.id]);
         report.merged.push({ removed: d.id, deleted: del.rowCount });
-      }
-      if (survivor.mailbox) {
-        await client.query('UPDATE app.job_clients SET mailbox = NULL WHERE id = $1', [survivor.id]);
-        const adopt = doomed.find(d => d.mailbox);
-        if (adopt) {
-          await client.query('UPDATE app.job_clients SET mailbox = $2 WHERE id = $1', [survivor.id, adopt.mailbox]);
-          report.merged.push({ field: 'mailbox', from: adopt.id, value: adopt.mailbox });
-        }
       }
     }
 

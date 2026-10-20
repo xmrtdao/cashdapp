@@ -8,13 +8,13 @@
  * A bulk rename rewrote source files with PowerShell's Get-Content -Raw and
  * [System.IO.File]::WriteAllText. On Windows PowerShell 5.1, Get-Content on a
  * file with no BOM decodes as the system ANSI code page (cp1252), not UTF-8.
- * So every em dash (E2 80 94) was read as the three characters "â€”", and
+ * So every em dash (E2 80 94) was read as the three characters "—", and
  * WriteAllText then saved those three characters as UTF-8. The file parsed
  * perfectly, every test passed, and 537 sequences across 11 files were wrong.
  *
  * Nothing visible broke, which is why it went unnoticed: the damage is in
  * comments and string decorations, not in logic. It is still real — `—` became
- * `â€”` in the relay's own header text, in a browser tab, and in the box-drawing
+ * `—` in the relay's own header text, in a browser tab, and in the box-drawing
  * rules that separate sections of these files.
  *
  * HOW THE REPAIR WORKS

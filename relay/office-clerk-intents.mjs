@@ -47,7 +47,6 @@ export const CLERK_INTENTS = [
       '**Office Clerk — deterministic commands** (work fully offline):',
       '- `status` / `health` — supervised services up/down',
       '- `resources` — CPU, memory, disk',
-      '- `tasks` — task runner pipeline stats',
       '- `external` — Supabase/Ollama/GitHub reachability',
       '- `mining` — cloud mining stats',
       '- `ollama` — local model runtime status',
@@ -86,20 +85,6 @@ export const CLERK_INTENTS = [
       if (r.disk) parts.push(`- Disk: ${typeof r.disk === 'object' ? JSON.stringify(r.disk) : r.disk}`);
       if (!parts.length) return '```json\n' + JSON.stringify(r, null, 1).slice(0, 600) + '\n```';
       return `**System resources:**\n${parts.join('\n')}`;
-    },
-  },
-  {
-    id: 'tasks',
-    patterns: [/\b(tasks?|pipeline|queue|jobs?)\b.*\b(status|stats|running|pending|list|show)?\b/i, /^(tasks|pipeline)\??$/i],
-    tool: 'task-stats',
-    format: (r) => {
-      if (!r || r.error) return `**Task pipeline:** unavailable (${r?.error || 'no data'})`;
-      const lines = Object.entries(r)
-        .filter(([, v]) => typeof v === 'number')
-        .map(([k, v]) => `- ${k}: ${v}`);
-      return lines.length
-        ? `**Task runner stats:**\n${lines.join('\n')}`
-        : '```json\n' + JSON.stringify(r, null, 1).slice(0, 600) + '\n```';
     },
   },
   {
@@ -154,7 +139,20 @@ export const CLERK_INTENTS = [
   },
   {
     id: 'aside-open',
-    patterns: [/^(?:open|show|browse|display)\s+(https?:\/\/\S+)$/i],
+    // "browse" was removed from this trigger on 2026-10-12, alongside the
+    // earlier removals of "proceed"/"proceeding" and "task"/"tasks".
+    //
+    // It read like a harmless synonym for "open", but it is overwhelmingly a
+    // verb people use when talking TO Eliza ("browse the XMRT repo", "browse
+    // what's new"), not as a command to open a literal URL. Matching it here
+    // hijacked those messages into the aside pane instead of letting the model
+    // answer them. Verified before the change: "browse https://example.com"
+    // resolved to intent `aside-open` / tool `aside-push`.
+    //
+    // "open", "show" and "display" are unambiguous imperative forms and stay.
+    // Nothing is lost: the aside pane is still reachable three other ways, and
+    // the tool description for aside-push documents it.
+    patterns: [/^(?:open|show|display)\s+(https?:\/\/\S+)$/i],
     tool: 'aside-push',
     args: (m) => ({ kind: 'url', url: m[1], title: m[1], by: 'office-clerk' }),
     format: (r) => r?.success ? `📑 Opened in the aside pane: ${r.title}` : `⚠️ ${r?.error || 'aside push failed'}`,
@@ -180,7 +178,7 @@ export const CLERK_INTENTS = [
 export const CLERK_MISS_RESPONSE = [
   '⚡ **Office Clerk (deterministic mode)** — I don\'t have a wired workflow for that.',
   '',
-  'I can handle these offline: `status`, `resources`, `tasks`, `external`, `mining`, `ollama`, `remember k = v`, `recall k`, `open <url>`, `close aside`, `restart <service>`. Type `help` for details.',
+  'I can handle these offline: `status`, `resources`, `external`, `mining`, `ollama`, `remember k = v`, `recall k`, `open <url>`, `close aside`, `restart <service>`. Type `help` for details.',
   '',
   '_Anything more complex gets handed to the local model or the cloud cascade when online._',
 ].join('\n');

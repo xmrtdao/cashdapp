@@ -1,5 +1,5 @@
-﻿/**
- * PFP Bookings API â€” REST endpoints for Party Favor Photo management platform.
+/**
+ * PFP Bookings API — REST endpoints for Party Favor Photo management platform.
  *
  * All routes are mounted under /api/pfp/ in relay/server.js.
  * Uses the shared pg Pool from localDb.mjs.
@@ -7,7 +7,7 @@
 
 import { query, queryOne } from '../lib/localDb.mjs';
 
-// â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function json(res, data, status = 200) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -94,15 +94,15 @@ function calendarWhere(filters) {
   return { where: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', params };
 }
 
-// â”€â”€â”€ Route Registrations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Route Registrations ─────────────────────────────────────────────────────
 
 export default function register(app) {
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
   // LEADS
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  // GET /api/pfp/leads â€” list leads (with filters)
+  // GET /api/pfp/leads — list leads (with filters)
   app.get('/api/pfp/leads', async (req, res) => {
     try {
       const filters = {
@@ -122,7 +122,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // GET /api/pfp/leads/:id â€” get lead detail
+  // GET /api/pfp/leads/:id — get lead detail
   app.get('/api/pfp/leads/:id', async (req, res) => {
     try {
       const row = await queryOne('SELECT * FROM pfp_leads WHERE id = $1', [req.params.id]);
@@ -131,7 +131,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // POST /api/pfp/leads â€” create lead
+  // POST /api/pfp/leads — create lead
   app.post('/api/pfp/leads', async (req, res) => {
     try {
       const b = req.body;
@@ -145,7 +145,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // PUT /api/pfp/leads/:id â€” update lead
+  // PUT /api/pfp/leads/:id — update lead
   app.put('/api/pfp/leads/:id', async (req, res) => {
     try {
       const id = req.params.id;
@@ -170,7 +170,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // DELETE /api/pfp/leads/:id â€” delete lead
+  // DELETE /api/pfp/leads/:id — delete lead
   app.delete('/api/pfp/leads/:id', async (req, res) => {
     try {
       const result = await query('DELETE FROM pfp_leads WHERE id = $1 RETURNING id', [req.params.id]);
@@ -179,11 +179,11 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
   // BOOKINGS
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  // GET /api/pfp/bookings â€” list bookings
+  // GET /api/pfp/bookings — list bookings
   app.get('/api/pfp/bookings', async (req, res) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit) : null;
@@ -194,7 +194,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // GET /api/pfp/bookings/:id â€” get booking detail
+  // GET /api/pfp/bookings/:id — get booking detail
   app.get('/api/pfp/bookings/:id', async (req, res) => {
     try {
       const row = await queryOne('SELECT * FROM pfp_bookings WHERE id = $1', [req.params.id]);
@@ -203,7 +203,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // POST /api/pfp/bookings â€” create booking
+  // POST /api/pfp/bookings — create booking
   app.post('/api/pfp/bookings', async (req, res) => {
     try {
       const b = req.body;
@@ -234,7 +234,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // PUT /api/pfp/bookings/:id â€” update booking
+  // PUT /api/pfp/bookings/:id — update booking
   app.put('/api/pfp/bookings/:id', async (req, res) => {
     try {
       const id = req.params.id;
@@ -284,7 +284,7 @@ export default function register(app) {
     }
   });
 
-  // DELETE /api/pfp/bookings/:id â€” delete booking
+  // DELETE /api/pfp/bookings/:id — delete booking
   app.delete('/api/pfp/bookings/:id', async (req, res) => {
     try {
       const result = await query('DELETE FROM pfp_bookings WHERE id = $1 RETURNING id', [req.params.id]);
@@ -293,11 +293,11 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
   // CAMPAIGNS
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  // GET /api/pfp/campaigns â€” list campaigns
+  // GET /api/pfp/campaigns — list campaigns
   app.get('/api/pfp/campaigns', async (req, res) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit) : null;
@@ -308,7 +308,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // GET /api/pfp/campaigns/:id â€” get campaign detail
+  // GET /api/pfp/campaigns/:id — get campaign detail
   app.get('/api/pfp/campaigns/:id', async (req, res) => {
     try {
       const row = await queryOne('SELECT * FROM pfp_campaigns WHERE id = $1', [req.params.id]);
@@ -317,7 +317,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // POST /api/pfp/campaigns â€” create campaign
+  // POST /api/pfp/campaigns — create campaign
   app.post('/api/pfp/campaigns', async (req, res) => {
     try {
       const b = req.body;
@@ -331,7 +331,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // PUT /api/pfp/campaigns/:id â€” update campaign
+  // PUT /api/pfp/campaigns/:id — update campaign
   app.put('/api/pfp/campaigns/:id', async (req, res) => {
     try {
       const id = req.params.id;
@@ -357,7 +357,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // DELETE /api/pfp/campaigns/:id â€” delete campaign
+  // DELETE /api/pfp/campaigns/:id — delete campaign
   app.delete('/api/pfp/campaigns/:id', async (req, res) => {
     try {
       const result = await query('DELETE FROM pfp_campaigns WHERE id = $1 RETURNING id', [req.params.id]);
@@ -366,11 +366,11 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
   // CONTACTS
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  // GET /api/pfp/contacts â€” list contacts
+  // GET /api/pfp/contacts — list contacts
   app.get('/api/pfp/contacts', async (req, res) => {
     try {
       const limit = req.query.limit ? parseInt(req.query.limit) : null;
@@ -381,7 +381,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // GET /api/pfp/contacts/:id â€” get contact detail
+  // GET /api/pfp/contacts/:id — get contact detail
   app.get('/api/pfp/contacts/:id', async (req, res) => {
     try {
       const row = await queryOne('SELECT * FROM pfp_contacts WHERE id = $1', [req.params.id]);
@@ -390,7 +390,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // POST /api/pfp/contacts â€” create contact
+  // POST /api/pfp/contacts — create contact
   app.post('/api/pfp/contacts', async (req, res) => {
     try {
       const b = req.body;
@@ -404,7 +404,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // PUT /api/pfp/contacts/:id â€” update contact
+  // PUT /api/pfp/contacts/:id — update contact
   app.put('/api/pfp/contacts/:id', async (req, res) => {
     try {
       const id = req.params.id;
@@ -429,7 +429,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // DELETE /api/pfp/contacts/:id â€” delete contact
+  // DELETE /api/pfp/contacts/:id — delete contact
   app.delete('/api/pfp/contacts/:id', async (req, res) => {
     try {
       const result = await query('DELETE FROM pfp_contacts WHERE id = $1 RETURNING id', [req.params.id]);
@@ -438,11 +438,11 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
   // CALENDAR EVENTS
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  // GET /api/pfp/calendar â€” list events (with date range filter)
+  // GET /api/pfp/calendar — list events (with date range filter)
   app.get('/api/pfp/calendar', async (req, res) => {
     try {
       const filters = {
@@ -459,7 +459,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // GET /api/pfp/calendar/:id â€” get event detail
+  // GET /api/pfp/calendar/:id — get event detail
   app.get('/api/pfp/calendar/:id', async (req, res) => {
     try {
       const row = await queryOne('SELECT * FROM pfp_calendar_events WHERE id = $1', [req.params.id]);
@@ -468,7 +468,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // POST /api/pfp/calendar â€” create event
+  // POST /api/pfp/calendar — create event
   app.post('/api/pfp/calendar', async (req, res) => {
     try {
       const b = req.body;
@@ -482,7 +482,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // PUT /api/pfp/calendar/:id â€” update event
+  // PUT /api/pfp/calendar/:id — update event
   app.put('/api/pfp/calendar/:id', async (req, res) => {
     try {
       const id = req.params.id;
@@ -507,7 +507,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // DELETE /api/pfp/calendar/:id â€” delete event
+  // DELETE /api/pfp/calendar/:id — delete event
   app.delete('/api/pfp/calendar/:id', async (req, res) => {
     try {
       const result = await query('DELETE FROM pfp_calendar_events WHERE id = $1 RETURNING id', [req.params.id]);
@@ -516,11 +516,11 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
   // STATS
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  // GET /api/pfp/stats â€” dashboard stats
+  // GET /api/pfp/stats — dashboard stats
   app.get('/api/pfp/stats', async (req, res) => {
     try {
       const leadsCount = (await queryOne("SELECT COUNT(*)::int AS count FROM pfp_leads WHERE status NOT IN ('lost')"))?.count ?? 0;
@@ -543,11 +543,11 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-  // ONBOARDING â€” post-sale client intake pipeline
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ONBOARDING — post-sale client intake pipeline
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  // GET /api/pfp/onboardings â€” list all onboardings (admin)
+  // GET /api/pfp/onboardings — list all onboardings (admin)
   app.get('/api/pfp/onboardings', async (req, res) => {
     try {
       const rows = await query(
@@ -560,7 +560,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // GET /api/pfp/onboarding/:token â€” get onboarding by token (client-facing)
+  // GET /api/pfp/onboarding/:token — get onboarding by token (client-facing)
   app.get('/api/pfp/onboarding/:token', async (req, res) => {
     try {
       const onboarding = await queryOne(
@@ -577,7 +577,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // PUT /api/pfp/onboarding/:token/design â€” save design
+  // PUT /api/pfp/onboarding/:token/design — save design
   app.put('/api/pfp/onboarding/:token/design', async (req, res) => {
     try {
       const onboarding = await queryOne(
@@ -610,7 +610,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // POST /api/pfp/onboarding/:token/submit â€” submit final design
+  // POST /api/pfp/onboarding/:token/submit — submit final design
   app.post('/api/pfp/onboarding/:token/submit', async (req, res) => {
     try {
       const onboarding = await queryOne(
@@ -634,7 +634,7 @@ export default function register(app) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             agent: 'system',
-            message: `ðŸ“‹ ${onboarding.client_name} (${onboarding.client_email}) submitted their print design!`,
+            message: `📋 ${onboarding.client_name} (${onboarding.client_email}) submitted their print design!`,
             channel: 'fleet'
           }),
           signal: AbortSignal.timeout(5000),
@@ -644,7 +644,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // POST /api/pfp/onboarding/:token/chat â€” send chat message
+  // POST /api/pfp/onboarding/:token/chat — send chat message
   app.post('/api/pfp/onboarding/:token/chat', async (req, res) => {
     try {
       const onboarding = await queryOne(
@@ -664,7 +664,7 @@ export default function register(app) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             agent: 'system',
-            message: `ðŸ’¬ ${onboarding.client_name}: ${message}`,
+            message: `💬 ${onboarding.client_name}: ${message}`,
             channel: 'fleet'
           }),
           signal: AbortSignal.timeout(5000),
@@ -674,7 +674,7 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // POST /api/pfp/stripe-webhook â€” receive Stripe payment confirmation
+  // POST /api/pfp/stripe-webhook — receive Stripe payment confirmation
   app.post('/api/pfp/stripe-webhook', async (req, res) => {
     try {
       const { session_id, client_name, client_email, client_phone,
@@ -700,7 +700,7 @@ export default function register(app) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             agent: 'system',
-            message: `ðŸŽ‰ New booking paid! ${client_name} (${client_email}) â€” ${package_type || 'standard'} ${hours || '?'}h. Onboarding link: /intake/${token}`,
+            message: `🎉 New booking paid! ${client_name} (${client_email}) — ${package_type || 'standard'} ${hours || '?'}h. Onboarding link: /intake/${token}`,
             channel: 'fleet'
           }),
           signal: AbortSignal.timeout(5000),
@@ -710,9 +710,9 @@ export default function register(app) {
     } catch (e) { error(res, e.message, 500); }
   });
 
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
   // OPTIONS handler for all PFP routes
-  // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+  // ═══════════════════════════════════════════════════════════════════════════
 
   app.options('/api/pfp/*path', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
