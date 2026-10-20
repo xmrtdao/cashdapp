@@ -185,11 +185,16 @@
 
   /* Tap targets stay 44px+ on a phone. A 64px swatch is thumb-sized; the
      desktop rule below shrinks it only once there is a pointer. */
-  .ob-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .hide{display:none}
+  .ob-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  /* A real button, not a div with a click handler: the tiles have to be
+     reachable by keyboard and by a screen reader, and a tile you cannot
+     Tab to is a tile some clients simply cannot choose. */
   .ob-bd{border:2px solid var(--line);border-radius:12px;overflow:hidden;cursor:pointer;
-         background:var(--ink-2);position:relative;transition:.15s}
+         background:var(--ink-2);position:relative;transition:.15s;
+         font:inherit;color:inherit;text-align:left;padding:0;display:block;width:100%}
   .ob-bd img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block}
-  .ob-bd span{display:block;font-size:10.5px;padding:6px 4px;color:var(--muted);
+  .ob-bd span{display:block;font-size:9.5px;padding:5px 3px;color:var(--muted);
               text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .ob-bd.sel{border-color:var(--gold);box-shadow:0 0 0 3px rgba(184,134,11,.18)}
   .ob-bd.sel span{color:var(--gold-deep);font-weight:600}
@@ -205,6 +210,18 @@
   .ob-file img{width:44px;height:44px;border-radius:8px;object-fit:cover;flex:none}
   .ob-file b{display:block;font-size:12.5px}
   .ob-file em{font-style:normal;font-size:11px;color:var(--muted);display:block}
+  /* The list of documents the client has given us. */
+  .ob-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+  .ob-list .ob-file{margin-top:0}
+
+  /* The confirmation fields: what will actually be printed. */
+  .ob-field{display:block;margin:0 0 12px}
+  .ob-field span{display:block;font-size:11px;font-weight:600;color:var(--gold-deep);
+                  text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
+  .ob-field input{width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);
+                   background:var(--paper);color:var(--ink);font:inherit;font-size:14px}
+  .ob-field input:focus{outline:none;border-color:var(--gold);
+                         box-shadow:0 0 0 3px rgba(184,134,11,.16)}
 
   .ob-types{display:grid;grid-template-columns:repeat(2,1fr);gap:9px}
   .ob-ty{padding:14px 12px;border:1px solid var(--line);border-radius:11px;background:var(--ink-2);
@@ -224,7 +241,10 @@
     .ob-head h1{font-size:24px}
     .ob-body{padding:26px 24px 14px}
     .ob-body>div{max-width:760px;margin:0 auto;width:100%}
-    .ob-grid{grid-template-columns:repeat(6,1fr);gap:12px}
+    /* Eight across on a desktop, four on a phone: the client is choosing a
+       curtain, not studying it, and the whole gallery should be visible
+       without scrolling. The 3/4 shape stays - it mirrors the 4x6 print. */
+    .ob-grid{grid-template-columns:repeat(8,1fr);gap:10px}
     .ob-bd img{aspect-ratio:3/4}
     .ob-types{grid-template-columns:repeat(3,1fr)}
     .ob-foot{max-width:760px;margin:0 auto;width:100%;padding-bottom:24px}
@@ -255,9 +275,9 @@
   <div class="ob-head">
     <img src="/api/visual/pfp/brand/logo.png" alt="Party Favor Photo" />
     <h1>Let's build your photo template</h1>
-    <p>Three quick steps, then Eliza draws your first draft.</p>
+    <p>Five quick steps, then Eliza draws your first draft.</p>
   </div>
-  <div class="ob-steps"><i class="on"></i><i></i><i></i></div>
+  <div class="ob-steps"><i class="on"></i><i></i><i></i><i></i><i></i></div>
 
   <div class="ob-body">
   <div>
@@ -268,24 +288,51 @@
       <div class="ob-grid" id="ob-bd"></div>
     </div>
 
-    <!-- 2. Inspiration -->
+    <!-- 2. The invitation or logo: CONTENT -->
     <div class="ob-step" data-step="2">
       <h2>Add your invitation or logo</h2>
-      <p class="lede">One file is usually all it takes. We'll read the colours and fonts and match your design to them. If you don't have one handy, skip this — you can always add it later.</p>
+      <p class="lede">One file is usually all it takes, but you can add more — a menu and a details sheet, say. We'll read the wording, the colours and the fonts, and build the design around them — and if it's a logo, we'll place it exactly as you sent it.</p>
       <div class="ob-drop" id="ob-drop">
         <b>Drop your invitation or logo here</b>
-        <span>or tap to choose a file<br/>We'll never alter your logo.</span>
+        <span>or tap to choose a file<br/>We can take several.</span>
       </div>
-      <input type="file" id="ob-file-input" accept="image/*" hidden />
-      <div class="ob-file hide" id="ob-picked">
-        <img id="ob-thumb" alt="" />
-        <div style="flex:1;min-width:0"><b id="ob-name"></b><em id="ob-note"></em></div>
-      </div>
+      <input type="file" id="ob-file-input" accept="image/*" multiple hidden />
+      <div class="ob-list" id="ob-files"></div>
       <p class="ob-note" id="ob-skip-note"></p>
     </div>
 
-    <!-- 3. Event type -->
+    <!-- 3. The words on the print: CONFIRM -->
     <div class="ob-step" data-step="3">
+      <h2>Check the words on your print</h2>
+      <p class="lede" id="ob-confirm-lede">These are the words that will be printed. Change anything that isn't right.</p>
+      <label class="ob-field">
+        <span>Text on the print</span>
+        <input id="ob-title" type="text" autocomplete="off" placeholder="e.g. Happy 25th Birthday, Alex" />
+      </label>
+      <label class="ob-field">
+        <span>Date</span>
+        <input id="ob-date" type="text" autocomplete="off" placeholder="e.g. 12 June 2026" />
+      </label>
+      <p class="ob-note" id="ob-confirm-note"></p>
+    </div>
+
+    <!-- 4. The design reference: THE LOOK -->
+    <div class="ob-step" data-step="4">
+      <h2>Show us the look you want</h2>
+      <p class="lede">This one is about the artwork around the photo — the mood, the colours, the feel. Drop in anything that shows the style you're after: a picture you liked, a screenshot, a colour you want the room to feel like. If you don't have one, skip it.</p>
+      <div class="ob-drop" id="ob-drop2">
+        <b>Drop a design you like here</b>
+        <span>or tap to choose a file<br/>Any picture of the background style you have in mind.</span>
+      </div>
+      <input type="file" id="ob-file-input2" accept="image/*" hidden />
+      <div class="ob-file hide" id="ob-picked2">
+        <img id="ob-thumb2" alt="" />
+        <div style="flex:1;min-width:0"><b id="ob-name2"></b><em id="ob-note2"></em></div>
+      </div>
+    </div>
+
+    <!-- 5. Event type -->
+    <div class="ob-step" data-step="5">
       <h2>What kind of event?</h2>
       <p class="lede">This sets the starting style. Eliza will take it from here and you can change anything later.</p>
       <div class="ob-types" id="ob-types"></div>
@@ -297,6 +344,7 @@
     <button class="btn" id="ob-back" style="flex:0 0 auto">Back</button>
     <button class="btn pri" id="ob-next">Continue</button>
   </div>
+  <p class="ob-note" id="ob-hint" style="flex:none;padding:0 18px calc(10px + env(safe-area-inset-bottom))"></p>
 </div>
 
 <div id="app">
@@ -337,7 +385,7 @@
           <div id="drop">
             <div>
               <b>Drop your logo or invitation here</b>
-              <span>One file is usually all it takes.<br/>We'll read it and never alter your logo.</span>
+              <span>One file is usually all it takes.<br/>We'll read it and never alter your logo.<br/>A file called "theme" is read as a design reference instead.</span>
             </div>
           </div>
         </div>
@@ -543,13 +591,32 @@
   }
 
   // ── Onboarding ───────────────────────────────────────────────────────────
-  // Backdrop -> inspiration -> event type -> chat and the first draft.
+  // Backdrop -> invitation/logo(s) -> confirm the words -> design reference ->
+  // event type -> chat and the first draft.
   //
-  // The gate is honest about skipping. Step 2 is skippable because "upload your
-  // invitation" is the one step a client may genuinely not be able to do right
-  // now; blocking on it strands them on a blank screen. Steps 1 and 3 are not
-  // skippable, but both have a default so "Continue" always works.
-  const OB = { step: 1, backdrop: null, file: null, type: null };
+  // The two uploads are not the same question. The first is about CONTENT -
+  // the wording, the fonts, the logo to keep - so it drives the client's
+  // colours and, when it reads clearly enough, the event style. It takes
+  // SEVERAL files: a menu and a details sheet are two documents, not two
+  // versions of one, and keeping only the last would throw half of their
+  // wording away. The second is about the LOOK - the mood and the colours of
+  // the background artwork. They are kept apart so that a picture of a floral
+  // arrangement cannot end up overwriting the colours on the invitation.
+  //
+  // The confirmation step exists because reading a title off a picture is a
+  // guess. We show what we think the print should say and ask. It can be
+  // dropped later if the booking flow turns out to be reliable enough - but a
+  // date nobody checked is a date that arrives at the wrong wedding.
+  //
+  // The gate is honest about skipping. The upload steps are skippable because
+  // "upload your invitation" is the one thing a client may genuinely not be
+  // able to do right now; blocking on it strands them on a blank screen. The
+  // other steps are not skippable, but both have a default, so there is
+  // always a way forward.
+  const OB = {
+    step: 1, backdrop: null, files: [], themeFile: null, type: null,
+    backdrops: 0, parsedTitle: '', parsedDate: '',
+  };
 
   // Only ids that actually exist in STYLE_BANK. A first draft is generated
   // immediately on selection, so an id that does not exist is not a label that
@@ -566,6 +633,16 @@
 
   const obNext = () => $('#ob-next');
   const obBack = () => $('#ob-back');
+  const obHint = () => $('#ob-hint');
+
+  /** Move to a step. */
+  function obGo(step) {
+    OB.step = step;
+    // The confirmation step is filled in when it is opened, not before: the
+    // documents have to have been read first.
+    if (step === 3) obFillConfirm();
+    obRender();
+  }
 
   function obRender() {
     document.querySelectorAll('.ob-step').forEach(el =>
@@ -575,7 +652,18 @@
       el.classList.toggle('done', i + 1 < OB.step);
     });
     obBack().style.visibility = OB.step === 1 ? 'hidden' : 'visible';
-    obNext().textContent = OB.step === 3 ? 'Start my design' : 'Continue';
+
+    // On the backdrop step, picking a backdrop IS the way forward, so there
+    // is no Continue button to press. The button is only there for the case
+    // where there is nothing to pick - a gallery that failed to load - and
+    // then it carries on without a curtain, which Eliza can change later.
+    const pickOnly = OB.step === 1 && OB.backdrops > 0;
+    obNext().style.display = pickOnly ? 'none' : 'flex';
+    obNext().style.flex = pickOnly ? 'none' : '1';
+    obNext().textContent = OB.step === 5 ? 'Start my design' : 'Continue';
+    obHint().textContent = pickOnly
+      ? 'Tap a backdrop to carry on — you can change it later.'
+      : '';
   }
 
   async function obLoadBackdrops() {
@@ -583,24 +671,32 @@
       const r = await fetch(`${API}/backdrops`);
       const j = await r.json();
       const list = j.backdrops || [];
+      OB.backdrops = list.length;
       $('#ob-bd').innerHTML = list.map(b => `
-        <div class="ob-bd" data-slug="${b.slug}">
-          <img src="${b.url}" alt="${prettyBackdrop(b.slug)}" loading="lazy" />
+        <button class="ob-bd" type="button" data-slug="${b.slug}"
+                aria-label="Use the ${prettyBackdrop(b.slug)} backdrop">
+          <img src="${b.url}" alt="" loading="lazy" />
           <span>${prettyBackdrop(b.slug)}</span>
-        </div>`).join('');
+        </button>`).join('');
       $('#ob-bd').querySelectorAll('.ob-bd').forEach(el => {
         el.onclick = () => {
           OB.backdrop = el.dataset.slug;
           $('#ob-bd').querySelectorAll('.ob-bd').forEach(x =>
             x.classList.toggle('sel', x === el));
+          // Choosing a curtain advances on its own. A second click on
+          // "Continue" to say what the tap already said is a step nobody
+          // should have to take.
+          setTimeout(() => obGo(2), 200);
         };
       });
       if (!list.length) $('#ob-skip-note').textContent = '';
+      obRender();
     } catch (e) {
       // Say it. An empty grid is indistinguishable from "you have no backdrops".
       $('#ob-bd').innerHTML =
         '<p class="ob-note" style="grid-column:1/-1">The backdrop gallery did not load. '
         + 'You can carry on and tell Eliza which one you want by name.</p>';
+      obRender();
     }
   }
 
@@ -618,35 +714,157 @@
     });
   }
 
-  function obBindUpload() {
-    const drop = $('#ob-drop'), input = $('#ob-file-input');
+  /**
+   * Wire one dropzone.
+   *
+   * Two of them: the invitation/logo and the design reference. They are the
+   * same mechanism with different ids and different questions, and wiring
+   * them separately is clearer than one handler guessing which one was meant.
+   */
+  function obBindUpload(suffix, onFile) {
+    const drop = $('#ob-drop' + suffix), input = $('#ob-file-input' + suffix);
     drop.onclick = () => input.click();
-    input.onchange = e => { if (e.target.files[0]) obPick(e.target.files[0]); e.target.value = ''; };
+    // EVERY file in the selection, not just the first: a client who selects a
+    // menu and a details sheet at once has given us two documents, and
+    // silently taking one of them is how half their wording disappears.
+    input.onchange = e => {
+      const files = [...(e.target.files || [])];
+      for (const f of files) onFile(f);
+      e.target.value = '';
+    };
     ['dragenter', 'dragover'].forEach(ev =>
       drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
     ['dragleave', 'drop'].forEach(ev =>
       drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
     drop.addEventListener('drop', e => {
       const f = e.dataTransfer.files[0];
-      if (f) obPick(f);
+      if (f) onFile(f);
     });
   }
 
-  function obPick(file) {
-    OB.file = file;
+  /** Show a picked file: its picture, its name, how big it is. */
+  function obShowFile(suffix, file) {
     const rd = new FileReader();
-    rd.onload = () => { $('#ob-thumb').src = rd.result; };
+    rd.onload = () => { $('#ob-thumb' + suffix).src = rd.result; };
     rd.readAsDataURL(file);
-    $('#ob-name').textContent = file.name;
-    $('#ob-note').textContent = Math.round(file.size / 1024) + ' KB — ready to read';
-    $('#ob-picked').classList.remove('hide');
-    $('#ob-drop').classList.add('hide');
+    $('#ob-name' + suffix).textContent = file.name;
+    $('#ob-note' + suffix).textContent = Math.round(file.size / 1024) + ' KB — ready to read';
+    $('#ob-picked' + suffix).classList.remove('hide');
+    $('#ob-drop' + suffix).classList.add('hide');
   }
 
-  function obSkipUpload() {
-    OB.file = null;
-    $('#ob-drop').classList.remove('hide');
-    $('#ob-picked').classList.add('hide');
+  /**
+   * One document added to the list.
+   *
+   * It is uploaded straight away, quietly: the detector reads it while the
+   * client is still adding the next one, and nothing is drawn until the
+   * onboarding ends. Reading it now also means the confirmation step has
+   * something to show.
+   */
+  async function obPick(file) {
+    OB.files.push({ file, name: file.name, size: file.size, state: 'reading' });
+    obRenderFiles();
+    try {
+      const j = await upload(file, null, true);
+      const item = OB.files[OB.files.length - 1];
+      item.state = j && j.ok ? 'read' : 'failed';
+      if (j && j.parsedTitle) OB.parsedTitle = j.parsedTitle;
+      if (j && j.parsedDate) OB.parsedDate = j.parsedDate;
+      obRenderFiles();
+    } catch (e) {
+      const item = OB.files[OB.files.length - 1];
+      if (item) item.state = 'failed';
+      obRenderFiles();
+    }
+  }
+
+  /** The list of documents the client has given us. */
+  function obRenderFiles() {
+    const box = $('#ob-files');
+    box.innerHTML = OB.files.map((f, i) => `
+      <div class="ob-file" data-i="${i}">
+        <img src="${f.thumb || ''}" alt="" />
+        <div style="flex:1;min-width:0">
+          <b>${f.name}</b>
+          <em>${f.state === 'read' ? Math.round(f.size / 1024) + ' KB — read'
+            : f.state === 'failed' ? Math.round(f.size / 1024) + ' KB — we could not read this one'
+            : Math.round(f.size / 1024) + ' KB — reading…'}</em>
+        </div>
+      </div>`).join('');
+    // Thumbnails are small; fill them in after the list is in the DOM.
+    OB.files.forEach((f, i) => {
+      if (f.thumb) return;
+      const rd = new FileReader();
+      rd.onload = () => {
+        f.thumb = rd.result;
+        const img = box.querySelector(`[data-i="${i}"] img`);
+        if (img) img.src = f.thumb;
+      };
+      rd.readAsDataURL(f.file);
+    });
+  }
+
+  function obPickTheme(file) {
+    OB.themeFile = file;
+    obShowFile('2', file);
+  }
+
+  /**
+   * A date a client would recognise on a print.
+   *
+   * The booking stores a timestamp - 2026-06-12T06:00:00.000Z - and showing
+   * that back to them is how a date becomes a support ticket.
+   */
+  function obFormatDate(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const d = new Date(raw);
+    if (isNaN(d.getTime())) return raw;
+    return d.toLocaleDateString('en-GB', {
+      day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+    });
+  }
+
+  /**
+   * Fill in what will be printed, and say where it came from.
+   *
+   * The booking is the record of what the client actually paid for, so it
+   * wins; a title read off a picture is a reading, and is used only when
+   * there is nothing better. Either way the client is shown it and asked.
+   */
+  function obFillConfirm() {
+    // "your celebration" is the placeholder the studio uses when there is no
+    // booking at all - it is the studio's words, not the client's, so it must
+    // not be offered back to them as if they had written it.
+    const rawTitle = (B && (B.event_name || B.event)) || '';
+    const bookedTitle = /your celebration/i.test(rawTitle) ? '' : rawTitle;
+    const bookedDate = obFormatDate(B && B.event_date);
+
+    // What the session already remembers wins: that is the words the client
+    // CONFIRMED, and asking them to type them again is asking them to do the
+    // work twice.
+    const title = (B && B.line1) || bookedTitle || OB.parsedTitle || '';
+    const date = (B && obFormatDate(B.line2)) || bookedDate || OB.parsedDate || '';
+
+    const titleEl = $('#ob-title'), dateEl = $('#ob-date');
+    if (!titleEl.value) titleEl.value = title;
+    if (!dateEl.value) dateEl.value = date;
+
+    const lede = $('#ob-confirm-lede'), note = $('#ob-confirm-note');
+    if ((B && B.line1) || (B && B.line2)) {
+      lede.textContent = 'These are the words we have for your print. '
+        + 'Change anything that isn\'t right.';
+    } else if (bookedTitle || bookedDate) {
+      lede.textContent = 'These are the words that will be printed — from your booking. '
+        + 'Change anything that isn\'t right.';
+    } else if (OB.parsedTitle || OB.parsedDate) {
+      lede.textContent = 'We read these off your document. Please check them — '
+        + 'these are the words that will be printed.';
+    } else {
+      lede.textContent = 'We could not work out what to print. Tell us the words '
+        + 'and the date, and we will put them on.';
+    }
+    note.textContent = '';
   }
 
   /** Finish onboarding and hand everything to the studio. */
@@ -656,11 +874,17 @@
     $('#etype-sel').value = OB.type || 'celebration';
     backdrop = OB.backdrop;
 
-    // The upload runs first when present, because the detector can change the
-    // event style. If we drew first and uploaded after, the client would watch
-    // a draft appear and then immediately change underneath them.
-    if (OB.file) {
-      try { await upload(OB.file); } catch (e) { /* upload() reports its own failure */ }
+    // The words the client confirmed, which are the words on the print.
+    OB.line1 = ($('#ob-title').value || '').trim();
+    OB.line2 = ($('#ob-date').value || '').trim();
+
+    // The uploads ran as they were picked - quietly, without drawing. The
+    // onboarding draws ONCE, at the end, with the backdrop, the colours, the
+    // mood, the event and the words all in place. An upload that drew its own
+    // draft would cost a second render for a picture the client was about to
+    // replace anyway.
+    if (OB.themeFile) {
+      try { await upload(OB.themeFile, 'theme', true); } catch (e) { /* upload() reports its own failure */ }
     }
     say_('eliza', OB.backdrop
       ? `Lovely. ${prettyBackdrop(OB.backdrop)} backdrop, and we're building for a `
@@ -670,25 +894,25 @@
     newDraft(true, { backdrop: OB.backdrop, type: OB.type });
   }
 
-  obBack().onclick = () => { if (OB.step > 1) { OB.step--; obRender(); } };
+  obBack().onclick = () => { if (OB.step > 1) obGo(OB.step - 1); };
   obNext().onclick = () => {
-    if (OB.step === 2 && !$('#ob-drop').classList.contains('hide') && !OB.file) {
-      // No file: step 2 was declined, not failed. Do not make anyone explain it.
-      OB.step = 3; obRender(); return;
-    }
-    if (OB.step === 3) { obFinish(); return; }
-    OB.step++; obRender();
+    // The upload steps are skippable: a client who has not got a file to
+    // hand is not a client who has done something wrong, and making them
+    // explain it would strand them on a blank screen.
+    if (OB.step === 5) { obFinish(); return; }
+    obGo(OB.step + 1);
   };
 
   obLoadBackdrops();
   obRenderTypes();
-  obBindUpload();
+  obBindUpload('', obPick);
+  obBindUpload('2', obPickTheme);
   obRender();
 
   // ── Boot ─────────────────────────────────────────────────────────────────
   function boot() {
     $('#hName').textContent = B.client_name || 'Your event';
-    $('#hEvent').textContent = [B.event_name, B.event_date,
+    $('#hEvent').textContent = [B.event_name, obFormatDate(B.event_date),
       B.hours ? `${B.hours} hours` : null].filter(Boolean).join(' · ');
 
     $('#style').innerHTML = styles.map(s =>
@@ -761,6 +985,10 @@
           theme: got.theme || undefined,
           palette: got.palette || undefined,
           backdrop: got.backdrop || backdrop || undefined,
+          // The words the client confirmed on the confirmation step. These
+          // are what gets printed, so they travel with every draft.
+          line1: OB.line1 || undefined,
+          line2: OB.line2 || undefined,
         }),
       });
       const j = await r.json();
@@ -943,9 +1171,26 @@
   window.addEventListener('dragover', e => e.preventDefault());
   window.addEventListener('drop', e => e.preventDefault());
 
-  async function upload(file) {
+  /**
+   * Send one file to the studio.
+   *
+   * @param {File} file
+   * @param {string|null} kindOverride  'theme' for the design reference; null
+   *        to let the filename decide (a file called "logo" is a logo).
+   * @param {boolean} quiet  true during onboarding: do not redraw and do not
+   *        touch the studio's own dropzone, because the onboarding draws once,
+   *        at the end, with everything in place.
+   */
+  async function upload(file, kindOverride, quiet) {
     if (!file.type.startsWith('image/')) { sys('Please drop an image file.'); return; }
-    const kind = /logo/i.test(file.name) ? 'logo' : 'inspiration';
+    // 'theme' is the design reference: a picture of the LOOK, not of the
+    // words. It never moves the style dropdown - the client's event type was
+    // chosen on purpose, and a picture of a floral arrangement is not a reason
+    // to call it a wedding. A file called "theme" is a reference wherever it
+    // comes from, so the studio's own dropzone can take one too.
+    const kind = kindOverride
+      || (/theme|mood|reference/i.test(file.name) ? 'theme'
+        : /logo/i.test(file.name) ? 'logo' : 'inspiration');
     sys(`Reading ${file.name}…`);
     const dataUrl = await new Promise((res, rej) => {
       const fr = new FileReader();
@@ -960,9 +1205,23 @@
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || 'Upload failed.');
 
+      if (kind === 'theme') {
+        // The reference sets the mood of the background. Say what it changed,
+        // or it looks like the upload did nothing.
+        const mood = j.themeMood || '';
+        say_('eliza',
+          `I've got ${j.name}. That one is about the look rather than the wording, so I'll `
+          + `use it for the background itself`
+          + (mood ? ` — ${mood}` : '')
+          + ` — and leave your colours and your wording exactly as they are.`);
+        if (quiet) return j;
+        await newDraft();
+        return j;
+      }
+
       if (kind === 'logo') {
         uploadedLogo = true;
-        drop.classList.add('gone');          // disappears permanently
+        if (!quiet) drop.classList.add('gone');   // disappears permanently
         const hex = (j.brandHexes || []).join(' ');
         say_('eliza',
           `Thank you — I've got ${j.name}. Your logo is stored exactly as you sent it and will be ` +
@@ -970,17 +1229,20 @@
           (hex ? ` I've read its colours (${hex}) and the artwork around it will be built to match.` : ''));
         if (j.styleId) $('#style').value = j.styleId;
         sayElizaPicked(j);
+        if (quiet) return j;
         await newDraft();
       } else {
         uploadedLogo = true;
-        drop.classList.add('gone');
+        if (!quiet) drop.classList.add('gone');
         // The upload chose the style on its own. Say so, or the switch looks
         // arbitrary to the client.
         if (j.styleId) $('#style').value = j.styleId;
         sayElizaPicked(j, j.detected || {});
+        if (quiet) return j;
         await newDraft();
       }
-    } catch (e) { sys(e.message); }
+      return j;
+    } catch (e) { sys(e.message); return null; }
   }
 
   /** Tell the client, in their language, what the upload taught Eliza. */

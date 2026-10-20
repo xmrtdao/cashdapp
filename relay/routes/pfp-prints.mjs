@@ -138,12 +138,37 @@ router.get('/context', async (req, res) => {
   // The booking reference can arrive in the URL path, in ?booking=, or not at
   // all. Absent any reference, the client still gets a full studio.
   const bookingId = String(req.query.booking || req.query.b || '').trim() || 'anon-' + uuid();
+
+  // The booking record is the authority on what this client actually booked:
+  // their name, their event, their date. The studio link carries the booking
+  // token, so those details are ALREADY in the system by the time the client
+  // gets here - and reading them from the booking is the only way they
+  // survive, because a link that lost its query string arrives with nothing.
+  //
+  // This is what lets the confirmation step show the client their own words
+  // instead of asking them to type what they already told us.
+  let booked = null;
+  if (/^[A-Za-z0-9_-]{8,64}$/.test(bookingId)) {
+    try {
+      const rows = await localQuery(
+        `SELECT client_name, event_name, event_date
+           FROM app.pfp_bookings WHERE booking_token = $1 LIMIT 1`,
+        [bookingId]);
+      booked = rows[0] || null;
+    } catch (e) {
+      // A missing table or a database that is down must not take the studio
+      // with it: the client gets the studio without the remembered details
+      // and can still type them in.
+      booked = null;
+    }
+  }
+
   const b = {
     booking_id: bookingId,
-    client_name: req.query.name || 'there',
-    event_name: req.query.event || 'your celebration',
+    client_name: req.query.name || (booked && booked.client_name) || 'there',
+    event_name: req.query.event || (booked && booked.event_name) || 'your celebration',
     event_type: req.query.type || 'celebration',
-    event_date: req.query.date || null,
+    event_date: req.query.date || (booked && booked.event_date) || null,
     hours: req.query.hours ? Number(req.query.hours) : null,
     package_type: req.query.package || null,
   };
@@ -155,6 +180,24 @@ router.get('/context', async (req, res) => {
     christmas: 'corporate_holiday', birthday: 'celebration',
     quince: 'celebration', 'bar mitzvah': 'celebration',
   }[String(b.event_type).toLowerCase()] || 'corporate_holiday';
+
+  // RESUME, do not start again.
+  //
+  // This route used to build a brand new session every time it was opened, so
+  // a client who refreshed the page - or opened the studio in a second tab -
+  // lost the draft they had already paid for, the documents they had
+  // uploaded, and the conversation they had with Eliza. The session is the
+  // work; opening the studio is not a request to throw it away.
+  const existing = sessions.get(bookingId);
+  if (existing) {
+    // The booking is still the authority, but only where it says something
+    // real: the placeholder must not overwrite what the client has already
+    // told us.
+    if (booked && booked.client_name) existing.client_name = booked.client_name;
+    if (booked && booked.event_name) existing.event_name = booked.event_name;
+    if (booked && booked.event_date) existing.event_date = booked.event_date;
+    return res.json({ ...existing, styles, resuming: true });
+  }
 
   const session = {
     ...b,
@@ -185,9 +228,32 @@ router.get('/context', async (req, res) => {
 // every visitor. A client who has no booking reference gets an anonymous
 // session immediately; there is nothing to recover.)
 
-// ── 2. Client upload: logo or inspiration ──────────────────────────────────
+/**
+ * The theme line for the artwork prompt.
+ *
+ * Two things can carry a theme: what the client typed, and the mood read off
+ * the design reference they uploaded. Both are the client's own words, so both
+ * are passed through - but the typed one goes first, because it is the more
+ * deliberate signal and the mood is a reading of a picture.
+ */
+function themeText(typed, mood) {
+  const bits = [String(typed || '').trim(), String(mood || '').trim()].filter(Boolean);
+  return bits.join(' — ').slice(0, 400);
+}
+
+// ── 2. Client upload: logo, inspiration, or design theme ───────────────────
 // A logo is stored as an immutable asset and its palette is read from pixels.
 // Inspiration (an invitation) is noted and will drive the next draft.
+//
+// The THIRD kind is the design reference: a picture of the look the client
+// wants, rather than of the words on the invitation. It is kept separate on
+// purpose. The invitation upload is about CONTENT - the wording, the fonts,
+// the logo to keep - so it drives the client's brand colours and, when it
+// reads clearly enough, the event style. The theme upload is about the
+// BACKGROUND - the mood, the colours, the feel of the artwork - so it must
+// never overwrite the brand colours or the event type the client already
+// chose. One upload answering two different questions at once is how a
+// client's invitation colours end up nowhere.
 router.post('/upload', async (req, res) => {
   const { booking, kind = 'logo', dataUrl, fileName } = req.body || {};
   const s = sessions.get(booking);
@@ -205,7 +271,16 @@ router.post('/upload', async (req, res) => {
   await fs.writeFile(file, buf);
 
   const rec = { kind, file, name: fileName || file, url: `/api/visual/pfp/file/${path.basename(file)}` };
-  s.uploaded = s.uploaded.filter(u => u.kind !== kind).concat(rec);
+  // A logo is stamped verbatim, so there is only ever one: a new one replaces
+  // the old. A design reference is one picture, so it replaces too. Everything
+  // else is a DOCUMENT the client gave us, and those ACCUMULATE - a menu and
+  // a details sheet are two documents, not two versions of one, and keeping
+  // only the last would silently throw half of their wording away.
+  if (kind === 'inspiration') {
+    s.uploaded = s.uploaded.concat(rec);
+  } else {
+    s.uploaded = s.uploaded.filter(u => u.kind !== kind).concat(rec);
+  }
 
   // A logo is uploaded so the compositor can stamp it verbatim. Its palette is
   // also read here so the artwork can be built around the client's brand.
@@ -228,10 +303,29 @@ router.post('/upload', async (req, res) => {
     detected = await detector.classify({
       imageUrl: rec.url, w, h, bytes: buf.length, filename: rec.name,
     });
-    chosenStyle = styleForEvent(detected.event, detected.kind);
-    if (chosenStyle) s.style_id = chosenStyle;
-    if (detected.palette && detected.palette.length && kind !== 'logo') {
-      s.brandHexes = detected.palette;
+    if (kind === 'theme') {
+      // A design reference is not an event document. It must not move the
+      // style: the client has already said what kind of event this is, and a
+      // picture of a floral arrangement is not a reason to call it a wedding.
+      // What it does carry is the mood and the colours of the background.
+      s.themeMood = String(detected.mood || '').slice(0, 120);
+      s.themePalette = Array.isArray(detected.palette) ? detected.palette.slice(0, 3) : [];
+    } else {
+      chosenStyle = styleForEvent(detected.event, detected.kind);
+      // A logo is a logo wherever it came from; anything else only moves the
+      // style if it actually reads as an event. The most recent definite read
+      // wins, and a file that reads as nothing leaves the style alone.
+      if (chosenStyle) s.style_id = chosenStyle;
+      if (detected.palette && detected.palette.length && kind !== 'logo') {
+        s.brandHexes = detected.palette;
+      }
+      // The words on the document, when they can be read. These are what the
+      // client is asked to confirm - we would rather ask than print a date
+      // nobody checked.
+      if (kind === 'inspiration') {
+        if (detected.title) s.parsedTitle = String(detected.title).slice(0, 120);
+        if (detected.date) s.parsedDate = String(detected.date).slice(0, 60);
+      }
     }
   } catch (e) {
     console.warn('[pfp-prints] upload detection failed:', e.message);
@@ -240,9 +334,16 @@ router.post('/upload', async (req, res) => {
   res.json({
     ok: true, ...rec, brandHexes: s.brandHexes || [],
     detected, styleId: chosenStyle || s.style_id,
+    themeMood: s.themeMood || '', themePalette: s.themePalette || [],
+    // What the documents said, so the client can be shown it and asked to
+    // confirm it rather than printing a date nobody checked.
+    parsedTitle: s.parsedTitle || '', parsedDate: s.parsedDate || '',
+    documents: s.uploaded.filter(u => u.kind === 'inspiration').length,
     note: kind === 'logo'
       ? 'Logo stored untouched and used as-is. It will not be redrawn or enhanced.'
-      : 'Inspiration received — the next draft will be built around it.',
+      : kind === 'theme'
+        ? 'Design reference received — the background will be built around it.'
+        : 'Inspiration received — the next draft will be built around it.',
   });
 });
 
@@ -319,8 +420,9 @@ router.post('/draft', async (req, res) => {
       styleId,
       brandHexes: s.brandHexes || [],
       hasLogo: !!logoRec,
-      theme: (theme ?? s.theme ?? '').toString().slice(0, 400),
+      theme: themeText(theme ?? s.theme, s.themeMood),
       palette: (palette ?? s.palette ?? '').toString().slice(0, 120),
+      moodHexes: s.themePalette || [],
       backdropPath: s.backdrop ? backdropFile(s.backdrop) : null,
       workDir: RENDERS,
     });
@@ -349,6 +451,7 @@ router.post('/draft', async (req, res) => {
       geometry: out.geometry, cost: shell.cost,
       seconds: Math.round((Date.now() - started) / 1000),
       styleId, theme: s.theme, palette: s.palette,
+      themeMood: s.themeMood || '', themePalette: s.themePalette || [],
       ink: out.ink, spent: d.spent,
     });
   } catch (e) {
@@ -378,7 +481,10 @@ router.post('/revise', async (req, res) => {
       styleId: s.style_id,
       brandHexes: s.brandHexes || [],
       shellUrl: s.shellUrl,
-      theme: (theme ?? '').toString().slice(0, 400),
+      // A refinement keeps the client's own direction, including the mood of
+      // the design reference they uploaded - otherwise the first refinement
+      // would quietly lose it.
+      theme: themeText(theme ?? s.theme, s.themeMood),
       palette: (palette ?? '').toString().slice(0, 120),
       // A refine must keep showing the curtain the client chose. Dropping it
       // here would silently swap the backdrop back to transparent on the very
