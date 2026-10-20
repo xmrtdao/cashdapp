@@ -251,7 +251,10 @@ section('the stylesheet features it emits are the ones that are styled');
   // The .board-post-body rules style exactly this set. Emitting a tag with no rule
   // is a silent visual regression, so the two lists are compared rather than
   // assumed to match.
-  const server = readFileSync(join(RELAY_DIR, 'server.js'), 'utf8');
+  // The .board-post-body rules moved out of server.js with the rest of the
+  // dashboard template: the inline page was extracted to campus-page.mjs on
+  // 2026-10-10, and the rules travelled with it.
+  const server = readFileSync(join(RELAY_DIR, 'campus-page.mjs'), 'utf8');
   const css = (server.match(/\.board-post-body[^{]*\{[^}]*\}/g) || []).join('\n');
   const styled = new Set();
   for (const m of css.matchAll(/(\w[\w-]*)\s*[,{]/g)) styled.add(m[1]);

@@ -24,6 +24,15 @@ const section = t => console.log('\n=== ' + t + ' ===');
 
 const src = execFileSync('node', ['-e', `
   const fs = require('fs');
+  process.stdout.write(fs.readFileSync('campus-page.mjs', 'utf8'));
+`], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+
+// The page template was extracted out of server.js into campus-page.mjs on
+// 2026-10-10. The generator and the domain registry stayed in server.js and
+// are handed to the page, so the two halves live in different files now and
+// each assertion has to look in the right one.
+const server = execFileSync('node', ['-e', `
+  const fs = require('fs');
   process.stdout.write(fs.readFileSync('server.js', 'utf8'));
 `], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
 
@@ -123,15 +132,17 @@ section('the log viewer has its filter, search and refresh');
 
 section('the inbox tiles are generated, not written out');
 {
-  check('the template calls the generator', tpl.includes('${resendTileHtml()}'));
+  // The template calls the generator once per domain, which is why the call
+  // carries an argument now and no longer looks like a bare resendTileHtml().
+  check('the template calls the generator', tpl.includes('${resendTileHtml('));
   check('no tile id is hardcoded in the template',
     !/id="(?:pfp|mm|hb|jobby)-inbox"/.test(tpl),
     (tpl.match(/id="(?:pfp|mm|hb|jobby)-inbox"/g) || []));
   check('the generator escapes the label it interpolates',
-    src.includes(".replace(/&/g, '&amp;')"), 'a label is config, so it is escaped');
+    server.includes(".replace(/&/g, '&amp;')"), 'a label is config, so it is escaped');
   check('the generator sanitises the element id',
-    src.includes("replace(/[^a-zA-Z0-9_-]/g, '')"));
-  check('a jobby tile is defined in the registry', src.includes("tile: 'jobby-inbox'"));
+    server.includes("replace(/[^a-zA-Z0-9_-]/g, '')"));
+  check('a jobby tile is defined in the registry', server.includes("tile: 'jobby-inbox'"));
 }
 
 console.log(fails === 0
