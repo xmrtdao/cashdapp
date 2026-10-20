@@ -140,6 +140,61 @@ section('a held task is not the executor\'s to work');
     'the executor selects .is(\'blocking_reason\', null)');
 }
 
+section('the evidence belongs to the task that earned it');
+{
+  // This is the bug the helper function had. It was written as
+  //
+  //   where a.task_id = task_id
+  //
+  // and in PostgreSQL an unqualified name that is both a parameter and a
+  // column resolves to the COLUMN. So the filter collapsed to
+  // "a.task_id = a.task_id" - true of every row - and the function answered
+  // "does ANY artifact anywhere carry a real URL?" instead of "does THIS
+  // task?". Every artifact the fleet had produced was either empty or a
+  // pointer to its own task, so the wrong answer and the right answer
+  // happened to be the same answer, and nothing showed.
+  //
+  // The first real deliverable - a pull request URL - would have opened the
+  // gate for every task on the board at once.
+  const evidenced = await makeTask();
+  await addArtifact(evidenced, 'pr', 'https://github.com/xmrtdao/mobilemonero/pull/4242');
+
+  const bare = await makeTask();
+  const bareHas = await q(`select app.task_has_real_evidence($1) as has_real`, [bare]);
+  check("another task's evidence is not this task's evidence",
+    bareHas.rows[0].has_real === false, bareHas.rows[0].has_real);
+
+  const ownerHas = await q(`select app.task_has_real_evidence($1) as has_real`, [evidenced]);
+  check('and the task that earned it still counts', ownerHas.rows[0].has_real === true,
+    ownerHas.rows[0].has_real);
+
+  const ghost = await q(`select app.task_has_real_evidence($1) as has_real`, ['no-such-task-id-xyz']);
+  check('a task that does not exist has no evidence', ghost.rows[0].has_real === false,
+    ghost.rows[0].has_real);
+}
+
+section('an artifact belongs to a task');
+{
+  // There was no foreign key, so an artifact could outlive the task it
+  // described. With the helper answering about the whole table, one orphan
+  // URL was enough to satisfy the gate for every task on the board.
+  try {
+    await q(
+      `insert into app.task_artifacts (task_id, artifact_type, artifact_url, description)
+       values ('no-such-task-id-xyz', 'pr', 'https://github.com/xmrtdao/mobilemonero/pull/1', 'orphan')`);
+    check('an artifact for a task that does not exist is refused', false, 'the insert was accepted');
+  } catch (e) {
+    check('an artifact for a task that does not exist is refused', e.code === '23503',
+      `${e.code} ${String(e.message).slice(0, 90)}`);
+  }
+
+  const id = await makeTask();
+  await addArtifact(id, 'pr', 'https://github.com/xmrtdao/mobilemonero/pull/2');
+  await q(`delete from app.tasks where id = $1`, [id]);
+  const left = await q(`select count(*)::int as n from app.task_artifacts where task_id = $1`, [id]);
+  check('and deleting the task takes its evidence with it', left.rows[0].n === 0, left.rows[0].n);
+}
+
 // cleanup
 for (const id of made) {
   await q(`update app.tasks set primary_contact_id = null where id = $1`, [id]).catch(() => {});
