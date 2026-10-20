@@ -1524,11 +1524,17 @@ async function callAI(prompt: string): Promise<string> {
     console.error("❌ WARNING: OPENROUTER_API_KEY not found. Falling back to Ollama Cloud.");
   }
 
-  // Tier 2: Ollama Cloud (OpenAI-compatible). OLLAMA_MODEL is operator config
-  // (gemma4:31b); note Pro-quota 429s surface here when the cap is hit.
+  // Tier 2: Ollama Cloud (OpenAI-compatible).
+  //
+  // The model is operator config, and the default is the one Ollama actually
+  // serves for free: minimax-m3.1-flash, measured 2026-10-20 at 200 in
+  // 790-1403ms with native tool_calls on all three accounts. The old default
+  // (gemma4:31b) is in the free plan but its weekly allowance is spent on
+  // every account (429), and there is no "-free" slug on Ollama to fall back
+  // to - minimax-m3.1-flash-free is a 404.
   const ollamaKey = Deno.env.get("OLLAMA_API_KEY") || Deno.env.get("OLLAMA_XMRT_API_KEY");
   if (ollamaKey) {
-    const ollamaModel = Deno.env.get("OLLAMA_MODEL") || "gemma4:31b";
+    const ollamaModel = Deno.env.get("OLLAMA_MODEL") || "minimax-m3.1-flash";
     try {
       return await chatCompletion("https://ollama.com/v1/chat/completions", ollamaKey, ollamaModel, prompt);
     } catch (error) {
