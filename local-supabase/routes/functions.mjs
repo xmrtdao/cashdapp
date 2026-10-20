@@ -19,6 +19,7 @@
 
 import { Router } from 'express';
 import { spawn } from 'child_process';
+import net from 'node:net';
 import { existsSync, readdirSync, statSync, writeFileSync, unlinkSync, readFileSync, mkdirSync, createWriteStream } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -100,7 +101,17 @@ function startIdleReaper() {
 // Derive a stable port from the function name (37000-37999 range)
 function functionPort(name) {
   const hash = createHash('md5').update(name).digest('hex');
-  return 37000 + (parseInt(hash.slice(0, 4), 16) % 1000);
+  // Four hex digits gave 1,000 ports for ~350 functions, so 57 pairs of
+  // functions were allocated the same port - and the first one to bind it
+  // answered for the other. The catalogue endpoint was being answered by the
+  // task orchestrator, which is why the dashboard's function list had lost
+  // every description.
+  //
+  // Eight hex digits spread the names over 28,000 slots, which is as much
+  // room as there is: Deno refuses a port of 65536 or above, so the window
+  // runs from 37,000 to 64,999. The caller still checks the port is not
+  // already held, which is what actually makes a collision harmless.
+  return 37000 + (parseInt(hash.slice(0, 8), 16) % 28000);
 }
 
 // Health-check a running Deno process
@@ -109,6 +120,20 @@ async function isProcessHealthy(port) {
     const r = await fetch(`http://127.0.0.1:${port}/_health`, { method: 'GET', signal: AbortSignal.timeout(2000) });
     return r.ok;
   } catch { return false; }
+}
+
+// Is anything already listening on this port? A leftover process from an
+// earlier run keeps its port, and a new function that lands on it would
+// silently be served by the old one.
+function portInUse(port) {
+  return new Promise((resolve) => {
+    const sock = net.connect(port, '127.0.0.1');
+    const done = (used) => { try { sock.destroy(); } catch {} resolve(used); };
+    sock.setTimeout(1200);
+    sock.on('connect', () => done(true));
+    sock.on('error', () => done(false));
+    sock.on('timeout', () => done(false));
+  });
 }
 
 // Kill and remove a pooled process
@@ -283,7 +308,11 @@ async function ensureFunctionProcess(name, funcFile, functionsDir, denoPath) {
     killPoolEntry(name);
   }
 
-  const port = functionPort(name);
+  // A port that is already taken belongs to somebody else's function. Step
+  // past it rather than serve two functions from one process. Deno refuses a
+  // port of 65536 or above, so the walk stops there too.
+  let port = functionPort(name);
+  for (let i = 0; i < 50 && port < 65535 && await portInUse(port); i++) port++;
   const src = readFileSync(funcFile, 'utf8');
   const extracted = extractServeHandler(src);
   if (!extracted) {
@@ -328,7 +357,7 @@ const wrapped = (req) => {
     if (req && req.method === 'GET') {
       const u = new URL(req.url);
       if (u.pathname === '/_health' || u.pathname === '/_ping') {
-        return new Response('{"status":"ok"}', {
+        return new Response('{"status":"ok","fn":"${name}"}', {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
