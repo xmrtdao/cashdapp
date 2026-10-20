@@ -128,29 +128,53 @@ async function startBrowser() {
   });
 
   page = context.pages()[0] || (await context.newPage());
-  page.setDefaultTimeout(30_000);
+  await watchPage(page);
 
-  cdp = await context.newCDPSession(page);
-  await cdp.send('Page.enable');
+  log(`browser up (headless=${HEADLESS}) cdp=127.0.0.1:${CDP_PORT} profile=${PROFILE_DIR}`);
+}
 
-  cdp.on('Page.screencastFrame', async (frame) => {
+/**
+ * Wire a page up: the screencast that streams frames, and the listeners.
+ */
+async function watchPage(p) {
+  p.setDefaultTimeout(30_000);
+
+  const session = await context.newCDPSession(p);
+  await session.send('Page.enable');
+  cdp = session;
+
+  session.on('Page.screencastFrame', async (frame) => {
     // Ack FIRST. Chrome will not send the next frame until this lands.
     try {
-      await cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId });
+      await session.send('Page.screencastFrameAck', { sessionId: frame.sessionId });
     } catch { /* page may have navigated; the next frame will re-sync */ }
     try {
       broadcastFrame(Buffer.from(frame.data, 'base64'));
     } catch { /* a viewer hung up mid-write */ }
   });
 
-  await cdp.send('Page.startScreencast', SCREENCAST);
+  await session.send('Page.startScreencast', SCREENCAST);
 
-  page.on('framenavigated', (f) => {
-    if (f === page.mainFrame()) lastUrl = f.url();
+  p.on('framenavigated', (f) => {
+    if (f === p.mainFrame()) lastUrl = f.url();
   });
-  page.on('close', () => log('page closed'));
 
-  log(`browser up (headless=${HEADLESS}) cdp=127.0.0.1:${CDP_PORT} profile=${PROFILE_DIR}`);
+  p.on('close', async () => {
+    // A person closed the window. That is not the service dying: this is a
+    // browser the stack owns, and it is here to be driven, so it opens another
+    // one and carries on. Without this the service kept answering /status with
+    // "up: false" forever, which is the worst kind of broken: it looked alive
+    // and did nothing.
+    log('page closed - opening a new one');
+    try {
+      if (!context) return;
+      page = await context.newPage();
+      await watchPage(page);
+      log('new page open');
+    } catch (e) {
+      log('could not open a new page:', e?.message || e);
+    }
+  });
 }
 
 const json = (res, code, body) => {
