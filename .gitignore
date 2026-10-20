@@ -53,9 +53,18 @@ face-service/identities/
 # A PostgreSQL install (9,016 files) and two JDK copies (2,902 files) sat in
 # the working tree. They are builds: reproducible from the installers, and the
 # reason `git status` was unreadable. Nothing under them was ever tracked.
+#
+# The slashes matter. A bare "tools/" matches a directory called tools ANYWHERE
+# in the tree, and that quietly swallowed relay/tools/ - forty-seven source
+# files, including the whole print design engine (the designer, the
+# compositor, the upload detector and the MuAPI client). They were on disk and
+# nowhere else: not in git, not in a backup, one `git clean` away from gone.
+# Anchor the pattern to the root, and name the vendored directories inside
+# relay/tools explicitly.
 pg/
-tools/
+/tools/
 jdk17*/
+relay/tools/node_modules/
 
 # ── Runtime state, caches and logs ─────────────────────────────────────────
 # relay-data/ holds the supervisor's state file, the browser profile and the

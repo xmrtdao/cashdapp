@@ -15,7 +15,21 @@ const DATA_DIR = path.join(__dirname, '..', 'relay-data');
 const CONTACTS_FILE = path.join(DATA_DIR, 'campaign-contacts.json');
 const LOG_FILE = path.join(DATA_DIR, 'campaign.log');
 
-const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZhd291dWd0endtZWp4cWtlcXFqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1Mjc2OTcxMiwiZXhwIjoyMDY4MzQ1NzEyfQ.QH0k26R2xbf4U5z6BmdYG1h_lkeNQ41zDjqL2zWxzxU';
+// The key is the environment's, not this file's.
+//
+// It used to be a literal here: a Supabase service_role JWT, which is the
+// most privileged credential the project has, written into a source file
+// that gets copied around. The environment already carries it - the supervisor
+// loads relay/.env for every service it starts - so reading it from there
+// costs nothing and stops the key travelling with the code.
+const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+  || process.env.LOCAL_SUPABASE_SERVICE_ROLE_KEY
+  || process.env.SUPABASE_ANON_KEY
+  || '';
+if (!KEY) {
+  console.error('No Supabase key in the environment. Set SUPABASE_SERVICE_ROLE_KEY in relay/.env.');
+  process.exit(1);
+}
 const SB_URL = process.env.SUPABASE_URL || 'http://127.0.0.1:54321';
 const SB_PARSED = new URL(SB_URL);
 const SB_HTTP = SB_PARSED.protocol === 'https:' ? https : http;

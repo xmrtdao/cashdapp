@@ -928,3 +928,82 @@ on all three accounts, which suggests it does not - but Ollama exposes no
 remaining-balance meter (`/api/usage` reported 380 requests and did not move
 across ten calls, so it is not a live meter). If it ever starts 429ing, the
 fix is the same: another account, or OpenRouter.
+
+## 19. The print studio (2026-10-20, later)
+
+`prints.partyfavorphoto.com` is where a booked client designs the print that
+is photographed on the night. It is the part of the business a paying client
+actually touches, and it had four things wrong. All four were found by
+walking it in a browser, not by reading it.
+
+### 19.1 The tiles were large, and picking one did nothing
+
+The backdrop gallery was six across, and choosing a backdrop did not move the
+client anywhere - there was a Continue button to press afterwards, which is a
+second thing to do to say what the tap already said. The tiles are now four
+across on a phone and eight on a desktop (83x135), each one a real `<button>`
+so it can be Tabbed to, and tapping one advances on its own. The Continue
+button only appears when there is nothing to pick - a gallery that failed to
+load - and then it carries on without a curtain.
+
+### 19.2 One document was asked for, when a client has two things to say
+
+The invitation or logo is about CONTENT: the wording, the fonts, the logo to
+keep, the colours to build around. A design reference is about the LOOK: the
+mood and the colours of the background artwork. They are now separate steps,
+and separate server-side kinds, so that a picture of a floral arrangement
+cannot overwrite the colours on the invitation:
+
+- `/studio/upload` takes a `theme` kind. It is stored in its own slot, it
+  never moves the event style, and it never touches the brand colours.
+- The artwork prompt carries the reference's mood and colours in a line of
+  its own, so it steers the background without displacing the accents.
+
+### 19.3 Several documents, and the words confirmed
+
+The invitation step takes **several** files - a menu and a details sheet are
+two documents, not two versions of one. A multi-selection that silently took
+only the first file was throwing half a client's wording away.
+
+And a new step confirms what will actually be printed. The booking record
+(`app.pfp_bookings`, reached by the token in the studio link) is the authority
+on the client's name, event and date, so the step is pre-filled from it; a
+title read off the document is used when there is no booking; and when neither
+knows, the client is asked. Reading a date off a picture is a guess, and a
+guessed date on a wedding invitation is worse than no date.
+
+**Verified end to end**: a booking with "Alex's Graduation Party" on
+2026-06-12, a backdrop tapped, the date changed to 14 June 2026 on the
+confirmation step, and the render that came back carries **"Alex's Graduation
+Party / 14 June 2026"** on the graduation backdrop, in the style the client
+picked - one render, 4.7 MB, the words on the actual print.
+
+### 19.4 The studio threw away the client's work on every open
+
+`/studio/context` built a brand new session every time it was opened, so a
+client who refreshed the page - or opened the studio in a second tab - lost
+the draft they had already paid for, the documents they had uploaded, and the
+conversation they had with Eliza. It resumes now.
+
+### 19.5 Nine files that were never in git
+
+`.gitignore` had `tools/`, which matches a directory called `tools` ANYWHERE
+in the tree. It was meant for the root toolchain directory, and it quietly
+swallowed `relay/tools/` - where nine files had never been tracked, including
+**the whole print design engine**: `pfp-template-designer.mjs`,
+`pfp-upload-detector.mjs`, `pfp-compositor.mjs`, `muapi.mjs` and the rest.
+They were on disk and nowhere else - not in git, not in a backup, one
+`git clean` away from gone. The pattern is anchored to the root now
+(`/tools/`), the vendored `relay/tools/node_modules/` is named explicitly, and
+the fifteen Python scripts under `face-service/tools/` that the same rule had
+been hiding came back with it.
+
+Two of the tracked files had a **Supabase service-role key written into them**
+as a literal - the most privileged credential the project has, valid until
+2035. Both read it from the environment now. The key is in this repository's
+history and could not be tested from this box (the cloud project does not
+answer here), so it should be revoked at the dashboard if the project still
+exists.
+
+**53 of 53 pass**, including `relay/tests/pfp-prints-designer.test.mjs`, which
+is new and audits the flow, the prompt and the API.
