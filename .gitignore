@@ -49,3 +49,232 @@ jobby-mcjobberson/**/__pycache__/
 # into git is worse than none, because it looks authoritative.
 face-service/identities/
 
+# ── Installed toolchains, not source ───────────────────────────────────────
+# A PostgreSQL install (9,016 files) and two JDK copies (2,902 files) sat in
+# the working tree. They are builds: reproducible from the installers, and the
+# reason `git status` was unreadable. Nothing under them was ever tracked.
+pg/
+tools/
+jdk17*/
+
+# ── Runtime state, caches and logs ─────────────────────────────────────────
+# relay-data/ holds the supervisor's state file, the browser profile and the
+# cron log - all of it changes on every request. The things in it that ARE
+# source stay tracked: the job list, the record of removed jobs, and the SQL.
+relay-data/*
+!relay-data/cron-jobs.json
+!relay-data/cron-job-removed.json
+!relay-data/CRON-JOBS-REVIEW.md
+!relay-data/create_inbox_table.sql
+!relay-data/registry-ddl.sql
+!relay-data/schema-pfp-onboarding.sql
+local-supabase/storage-data/
+local-supabase/.deno_cache/
+logs/
+
+# ── Test and evidence output ──────────────────────────────────────────────
+_probe_results/
+_pfp_prints/
+_pfp_booking/
+dogfood-evidence/
+backups/postgres/
+
+# ── Model weights and service output ──────────────────────────────────────
+face-service/models/
+face-service/deck-assets/
+face-service/graytech/*.log
+face-service/graytech/*.err
+
+# ── Copies of other checkouts, living inside this one ─────────────────────
+# Each of these duplicates a repository that has its own checkout beside it,
+# and xmrtdao-full/ alone is 168,629 files. They are not part of this repo.
+suite_fresh/
+xmrtdao-full/
+.ci-workflows/
+lumen/
+dsh/
+
+# ── Credential handling ───────────────────────────────────────────────────
+# These install a live Cloudflare token. The token belongs in relay/.env,
+# which is already ignored above.
+_cf_tunnel_token.py
+_install_cf_token.py
+
+
+# ── Other repositories checked out inside this one ────────────────────────
+# 72 of them, each with its own .git. This repository is the
+# XMRT-DAO stack; the projects it builds on live beside it, not inside it.
+# Without this, "git add -A" records them as submodules.
+/31harbor-agency-dashboard/
+/31harborsoftware/
+/MESHNET/
+/TempCashDapp/
+/XMRT-DAO-Ecosystem/
+/XMRT-Ecosystem/
+/XMRT-EcosystemV3/
+/XMRT.io/
+/XMRT_EcosystemV2/
+/_agentsview/
+/_aws-agent-toolkit/
+/_iroh/
+/_iroh-blobs/
+/_iroh-ffi/
+/_iroh-gossip/
+/_landpage/cashdapp-landing/
+/_septimus_deep/
+/_skillspector/
+/_temp_audit/suite/
+/cf-os/
+/elze/
+/fleet-harness-gui/
+/freecad-setup/freecad-mcp/
+/gh-deploy/
+/gh-deploy-nm/
+/gh-deploy-ok/
+/gh-push/
+/gh-push-nm/
+/graytech/
+/graytech-security/
+/hottiehouse/
+/jobby-mcjobberson/
+/jungle-juice/
+/lead-scraper/
+/mmlauncher/
+/mobilegpt/
+/mobilemonero/
+/mobilemonero-site/
+/moltmall/
+/muapi-workflows/
+/night-moves/
+/nm-deploy/
+/nm-update/
+/partyfavor-photo-ai-booth/
+/partyfavorphoto/
+/partyfavorphoto-repo/
+/relay-go/
+/smart-scanner/
+/suite/
+/suite - Copy/
+/suite-party-redirect/
+/suite-xmrt-redirect/
+/suite_new/
+/supabase-functions/
+/toptourscostarica/
+/uni-dash/
+/viamas/
+/wifi-radar/
+/xmrt-agents/
+/xmrt-ai-law-finance-book/
+/xmrt-ai-organization/
+/xmrt-dao/
+/xmrt-eliza/
+/xmrt-gov-contracting/
+/xmrt-mesh/
+/xmrt-node/
+/xmrt-opencode/
+/xmrt-openwork/
+/xmrt-pocketpal-ai/
+/xmrtdao.github.io/
+/xmrtnet/
+/zero-claw/
+
+# ── One-off scripts and dumps left at the repo root ───────────────────────
+# Hundreds of them accumulated over many sessions. The keepers live in
+# scripts/ and relay/scripts/. These are debris, and they are what made
+# "git status" unreadable.
+/_*.py
+/_*.mjs
+/_*.js
+/_*.cjs
+/_*.sh
+/_*.bat
+/_*.ps1
+/_*.log
+/_*.err
+/_*.json
+/_*.jsonl
+/_*.txt
+/_*.out
+/_*.lock
+/_*.docx
+/_*.zip
+/_*.png
+/_*.exe
+/_*.sql
+
+# Backups of files that have been edited since.
+*.bak
+*.bak-*
+*.broken-reorg
+
+# The relay's own log files, and two files whose names came out of a shell
+# quoting mistake.
+/relay/*.log
+/relay/*.err
+/relay/=
+/relay/nul
+
+# A downloaded installer.
+WinRAR.exe
+
+# ── One-off analysis scripts and data dumps at the repo root ──────────────
+# The fleet's scanning sessions leave hundreds of these: scan_*.py, tg_scan_*.py,
+# fleet_db_messages_*.json, build.log, and so on. The keepers are the
+# launchers, the lockfiles and the documents, so those are re-included.
+/*.py
+/*.cjs
+/*.js
+/*.json
+/*.jsonl
+/*.txt
+/*.log
+/*.err
+/*.out
+/*.lock
+/*.exe
+/*.zip
+/*.ps1
+/*.bat
+/*.patch
+/*.sql
+/*.docx
+!/launch-supervisor.cjs
+!/launch-vite-build.cjs
+!/launch-vite-detached.cjs
+!/start-supervisor.bat
+!/start-relay.bat
+!/start-relay.mjs
+!/start-local-sb.mjs
+!/setup-cron-engine-v2.bat
+!/fix-vex-supervisor.bat
+!/cron-runner.bat
+!/hermes-cron.mjs
+!/package.json
+!/package-lock.json
+!/deno.lock
+!/requirements.txt
+
+# Client material, a dated scan report, and a stray copy of another project's
+# source. None of it belongs to this repository.
+/contracts/
+/scan_report_*.md
+/mobilemonero-web/
+/src/protocol.rs
+/temp_docs/
+/tests/
+/bin/
+/xmrt_suite_backup_*.sql
+
+# ── Apps and material that are not this repository's ──────────────────────
+# intake/ is a Vite app with its own node_modules; reviews/ holds signed
+# client contracts, which are other people's documents; scan_work/ holds dumps
+# of the fleet database; temp/ holds test documents.
+intake/
+reviews/
+scan_work/
+temp/
+backups/
+_devgrgold_cleanup_bak/
+
+# local-sb writes its log beside the server.
+local-supabase/*.log

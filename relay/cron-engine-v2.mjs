@@ -57,6 +57,15 @@ const PG_URL = process.env.LOCAL_DATABASE_URL
 // env var if the suite runtime comes back.
 const RUNTIME_URL = process.env.LOCAL_RUNTIME_URL || 'http://127.0.0.1:54321';
 
+// The relay's own API key, for the calls this engine makes back into the
+// relay (the python-exec tool below). It was a literal in this file, which put
+// a live credential in every copy of the source and in git history.
+//
+// The environment already carries it: the supervisor starts this process with
+// relay/.env loaded, so the key is read from there rather than written down
+// here.
+const RELAY_API_KEY = process.env.RELAY_API_KEY || '';
+
 function log(msg, level = 'INFO') {
   const line = `[${new Date().toISOString()}] [${level}] ${msg}`;
   console.log(line);
@@ -198,7 +207,38 @@ async function logCronExecution(job, res, startedAt) {
   );
 }
 
-async function loadJobsFromPg() {
+/**
+ * Is this command shell code rather than SQL?
+ *
+ * The trailing \s is load-bearing: it means "this token, followed by
+ * whitespace", so a shell word that merely starts with one of these names
+ * cannot be captured by accident.
+ *
+ * `py` was missing, and on Windows `py` is the launcher - `py
+ * relay/cron-python/arch-ecosystem-scanner.py` is how that job is written. It
+ * did not match, so it fell through to type 'sql' and was handed to Postgres,
+ * which replied `syntax error at or near "py"`. arch-ecosystem-scanner failed
+ * every 6 hours, 449 times in cron_execution_log, and the only evidence was a
+ * Postgres error that says nothing about the real cause. A misclassification
+ * that reports itself as a database problem is worse than no classification.
+ *
+ * Audited against all 85 commands in cron.job plus cron-jobs.json: the first
+ * tokens actually present are SELECT, UPDATE, DELETE, node, cd, python and py.
+ * All seven classify correctly under this pattern and none is captured by
+ * accident. If a new interpreter appears, add it here AND the audit in
+ * tests/cron-classify.test.mjs will fail until you do.
+ */
+const SHELL_COMMAND_RE = /^(?:python3?|py|node|cd|bash|sh|pwsh|powershell)\s/i;
+
+/** Classify a cron.job command into the three kinds the runner understands. */
+export function classifyCommand(cmd) {
+  const c = String(cmd || '').trim();
+  if (/^SELECT\s+extensions\.http/i.test(c)) return 'edge';
+  if (SHELL_COMMAND_RE.test(c)) return 'shell';
+  return 'sql';
+}
+
+export async function loadJobsFromPg() {
   const c = await getSharedPool().connect();
   try {
     // The supabase schema has cron jobs in cron.job (pg_cron). The
@@ -209,57 +249,74 @@ async function loadJobsFromPg() {
       const r = await c.query("SELECT id, name, schedule, command, enabled FROM cron.job ORDER BY id");
       rows = r.rows;
       // Detect type: SQL, edge function, or shell command
-      rows = rows.map((j) => {
-        const cmd = (j.command || '').trim();
-        let type = 'sql';
-        if (/^SELECT\s+extensions\.http/i.test(cmd)) {
-          type = 'edge';
-        } else if (/^(python3?|node|cd\s|bash|sh\s)/i.test(cmd)) {
-          type = 'shell';
-        }
-        return { ...j, type, name: j.name || ('job-' + j.id), disabled: j.enabled === false };
-      });
-      // If cron.job is empty, fall back to JSON file
-      if (rows.length === 0) {
-        const f = join(DATA_DIR, 'cron-jobs.json');
-        if (existsSync(f)) {
-          rows = JSON.parse(readFileSync(f, 'utf8'));
-          rows = rows.map((j) => {
-            if (j.type === 'sql' && j.sql) {
-              return { id: j.id, schedule: j.schedule, type: 'sql', command: j.sql, name: j.name, disabled: j.disabled };
-            }
-            if (j.type === 'ef' && j.fn) {
-              return { id: j.id, schedule: j.schedule, type: 'edge', fn: j.fn, body: j.body || {}, name: j.name, disabled: j.disabled };
-            }
-            return j;
-          });
-          log(`loaded ${rows.length} jobs from cron-jobs.json (cron.job was empty)`);
-        }
+      rows = rows.map((j) => ({
+        ...j,
+        type: classifyCommand(j.command),
+        name: j.name || ('job-' + j.id),
+        disabled: j.enabled === false,
+      }));
+      // ── MERGE, do not replace ─────────────────────────────────────────
+      //
+      // This used to read cron-jobs.json only when cron.job was EMPTY, so the
+      // moment cron.job had a single row in it, the 84 hand-maintained jobs in
+      // the JSON stopped being scheduled - including 303 jobby-heartbeat, 304
+      // the morning summary and 305 the evening summary. The daemon logged
+      // "loaded 56 jobs" and looked perfectly healthy while the Jobby loop had
+      // silently stopped running.
+      //
+      // A fallback that replaces is a fallback in the wrong direction. The two
+      // sources are additive, so they are merged: cron.job wins on ids it has,
+      // JSON-only ids are added, and both counts are logged so a shadowed job
+      // cannot go unnoticed again.
+      const jsonJobs = readJobsJson();
+      const tableIds = new Set(rows.map((r) => Number(r.id)));
+      const jsonOnly = jsonJobs.filter((j) => !tableIds.has(Number(j.id)));
+      const tableOnly = rows.filter((r) => !jsonJobs.some((j) => Number(j.id) === Number(r.id)));
+
+      rows = rows.concat(jsonOnly);
+
+      if (jsonOnly.length) {
+        log(`merged cron-jobs.json: +${jsonOnly.length} job(s) not in cron.job ` +
+          `(ids ${jsonOnly.slice(0, 12).map(j => j.id).join(',')}${jsonOnly.length > 12 ? ',...' : ''})`);
+      }
+      if (tableOnly.length) {
+        log(`cron.job has ${tableOnly.length} job(s) not in cron-jobs.json ` +
+          `(${tableOnly.slice(0, 8).map(r => `${r.id}:${r.name}`).join(',')}${tableOnly.length > 8 ? ',...' : ''})`);
       }
     } catch (e) {
       // pg_cron not available; read from relay-data/cron-jobs.json
-      const f = join(DATA_DIR, 'cron-jobs.json');
-      if (!existsSync(f)) {
+      if (!existsSync(join(DATA_DIR, 'cron-jobs.json'))) {
         log('no cron.job table and no cron-jobs.json; nothing to do', 'WARN');
         return [];
       }
-      rows = JSON.parse(readFileSync(f, 'utf8'));
-      // Normalize field names: source has {id, schedule, type, sql/fn}
-      // runtime expects {id, schedule, type, command: (sql) or fn+body}
-      rows = rows.map((j) => {
-        if (j.type === 'sql' && j.sql) {
-          return { id: j.id, schedule: j.schedule, type: 'sql', command: j.sql, name: j.name, disabled: j.disabled };
-        }
-        if (j.type === 'ef' && j.fn) {
-          return { id: j.id, schedule: j.schedule, type: 'edge', fn: j.fn, body: j.body || {}, name: j.name, disabled: j.disabled };
-        }
-        return j;
-      });
+      rows = readJobsJson();
     }
     return rows;
   } finally {
     c.release();
   }
+}
+
+/**
+ * relay-data/cron-jobs.json, normalised to the shape the runner expects.
+ *
+ * The JSON keeps a job's payload under a type-specific key (`sql`, `fn`,
+ * `action`); the runner wants `command` for sql, `fn`+`body` for edge, and
+ * `action` for local. This mapping was inline in two places and is here once
+ * now.
+ */
+function readJobsJson() {
+  const f = join(DATA_DIR, 'cron-jobs.json');
+  if (!existsSync(f)) return [];
+  const parsed = JSON.parse(readFileSync(f, 'utf8'));
+  const jobs = Array.isArray(parsed) ? parsed : (parsed.jobs || Object.values(parsed).flat());
+  return jobs.map((j) => {
+    const common = { id: j.id, schedule: j.schedule, name: j.name, disabled: j.disabled === true };
+    if (j.type === 'sql' && j.sql) return { ...common, type: 'sql', command: j.sql };
+    if (j.type === 'ef' && j.fn) return { ...common, type: 'edge', fn: j.fn, body: j.body || {} };
+    if (j.type === 'local' && j.action) return { ...common, type: 'local', action: j.action };
+    return j;
+  });
 }
 
 async function runSql(sql) {
@@ -353,7 +410,10 @@ async function runFleetChatFollowUp() {
     // Hard cooldown: skip if we already followed up on this prompt in the last 10 minutes
     const promptId = lastSystemPrompt.id || lastSystemPrompt.ts || lastSystemPrompt.time;
     if (promptId) {
-      const cooldowns = state.followUpCooldowns || {};
+      // `state` is not defined in this module - the daemon keeps cooldowns in
+      // the state file via loadState(). The old line threw a ReferenceError on
+      // every follow-up check (232 failures in 24h).
+      const cooldowns = loadState().followUpCooldowns || {};
       const lastFollowUp = cooldowns[promptId];
       if (lastFollowUp && (Date.now() - lastFollowUp) < 600000) {
         return { ok: true, result: `Follow-up for prompt ${promptId.slice(0,12)} already sent <10min ago, skipping` };
@@ -428,6 +488,34 @@ async function runFleetChatTaskCreator() {
       taskTitle = 'Process update request from fleet discussion'; taskDescription = 'Agents discussed updates in fleet chat. Review the conversation and implement changes.'; taskPriority = 2;
     }
     if (!taskTitle) return { ok: true, result: 'No actionable topic detected' };
+
+    // ── Dedupe, before the write ────────────────────────────────────────
+    //
+    // This job read the last 20 fleet-chat messages and matched keywords in
+    // them. Every task it created was announced to fleet chat, and every
+    // announcement said "Task created from fleet discussion: Investigate cron
+    // job errors" - which contains both "cron" and "error". On the next run
+    // it read its own announcement, matched the same keywords, derived the
+    // same title, and filed another. Twenty-seven copies in four hours.
+    //
+    // The schema now refuses a duplicate open title (app.tasks
+    // tasks_one_open_per_title), so the loop cannot close. The check below is
+    // for the message, not for safety: the index is what actually stops it.
+    // This endpoint answers with a bare array, not {tasks:[...]}.
+    const already = await fetch(
+      `http://127.0.0.1:8080/api/suite/tasks?status_in=PENDING,IN_PROGRESS&limit=500`,
+      { signal: AbortSignal.timeout(5000) }
+    ).then(r => r.json()).catch(() => null);
+    const rows = Array.isArray(already) ? already : ((already && (already.tasks || already.data)) || []);
+    const openTitles = new Set(
+      rows
+        .filter(t => !['DONE', 'CANCELLED', 'COMPLETED'].includes(String(t.status || '').toUpperCase()))
+        .map(t => String(t.title || '').trim().toLowerCase())
+    );
+    if (openTitles.has(taskTitle.trim().toLowerCase())) {
+      return { ok: true, result: `Already tracked: ${taskTitle}` };
+    }
+
     const createRes = await fetch('http://127.0.0.1:8080/api/suite/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: taskTitle, description: taskDescription, status: 'PENDING', stage: 'DISCUSS', priority: taskPriority, category: 'fleet-chat', metadata: { source: 'fleet-chat', agent_a: agentAResponse.agent, agent_b: agentBResponse.agent, agent_a_message: agentAResponse.message.slice(0, 200), agent_b_message: agentBResponse.message.slice(0, 200) } }),
@@ -441,8 +529,304 @@ async function runFleetChatTaskCreator() {
       });
       return { ok: true, result: `Task created: ${taskTitle}` };
     }
-    return { ok: false, result: 'Failed to create task' };
+    // 409 from the open-task-per-title index means another writer won the race.
+    // That is the loop closing, not a failure.
+    if (createRes.status === 409) {
+      return { ok: true, result: `Already tracked (raced): ${taskTitle}` };
+    }
+    return { ok: false, result: `Failed to create task (HTTP ${createRes.status})` };
   } catch (err) { return { ok: false, error: err.message }; }
+}
+
+// ── Jobby Heartbeat ────────────────────────────────────────
+export async function runJobbyHeartbeat() {
+  try {
+    // Import the loop module and run one heartbeat tick
+    const { createHeartbeat, defaultWorkerId } = await import('./jobby/loop.mjs');
+    const pool = await import('./lib/db.mjs').then(m => m.getPool());
+
+    const workerId = defaultWorkerId();
+    const heartbeat = createHeartbeat({
+      pool,
+      workerId,
+      intervalMs: 15 * 60 * 1000, // 15 minutes
+      quietHours: { from: 22, to: 7 }, // 10pm-7am local
+      log: (msg) => console.log(`[Jobby Heartbeat] ${msg}`),
+      // The steps. Empty before now, which is why 543 cycles decided "source"
+      // and did nothing: decide() picks a decision and then
+      // `for (const name of Object.keys(steps))` iterates nothing at all.
+      steps: { worklist: jobbyWorklistStep(pool) },
+    });
+
+    // Run one tick
+    await heartbeat.tick();
+
+    return { ok: true, result: `Jobby heartbeat tick completed for ${workerId}` };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * The worklist step: keep the candidate's list current, and say what is next.
+ *
+ * It deliberately does not MARK anything done. classifyAction() sorts each
+ * action into agent-doable or candidate-only, and this step reports both, but
+ * closing a candidate's action is theirs to do — a loop that ticks off
+ * "Confirm your rate floor" because it read the word is manufacturing
+ * progress, which is the failure this whole subsystem exists to prevent.
+ *
+ * ok:false when there is no dossier to build a list from. That is reported as a
+ * failure on purpose: an empty queue must never be mistaken for an empty
+ * calendar.
+ */
+function jobbyWorklistStep(pool) {
+  return {
+    run: async ({ clientId }) => {
+      const { syncWorklist, nextAction, classifyAction } = await import('./jobby/worklist.mjs');
+
+      const sync = await syncWorklist(pool, clientId);
+      if (!sync.ok) {
+        return { ok: false, note: sync.reason };
+      }
+
+      const next = await nextAction(pool, clientId);
+      if (!next) {
+        return { ok: true, note: `worklist current (${sync.inserted} new, ${sync.updated} refreshed); nothing open` };
+      }
+
+      const who = classifyAction(next.title, next.detail);
+      return {
+        ok: true,
+        note: `next: [p${next.priority}] ${next.title} (${who.who})`,
+      };
+    },
+  };
+}
+
+// ── Jobby Morning Summary Email ──────────────────────────────
+export async function runJobbyMorningSummary() {
+  try {
+    const { getPool } = await import('./lib/db.mjs');
+    const { composeCheckin } = await import('./jobby/composer.mjs');
+    const { sendViaResend, resolveJobbySender } = await import('./server.js');
+    
+    const pool = await import('./lib/db.mjs').then(m => m.getPool());
+    
+    // Get all clients with claimed emails (active users)
+    const { rows: clients } = await pool.query(`
+      SELECT id, display_name, claimed_email, daily_send_cap
+      FROM app.job_clients
+      WHERE claimed_email IS NOT NULL
+    `);
+    
+    if (!clients.length) {
+      return { ok: true, result: 'No clients with claimed emails to notify' };
+    }
+    
+    let sent = 0;
+    let failed = 0;
+    
+    for (const client of clients) {
+      try {
+        // Get the day's plan for this client
+        const { rows: planRows } = await pool.query(`
+          SELECT priority, title, detail, track, status
+          FROM app.job_actions
+          WHERE client_id = $1 AND status IN ('pending', 'active')
+          ORDER BY priority, track, id
+        `, [client.id]);
+        
+        const plan = {
+          actions: planRows.map(r => ({
+            priority: r.priority,
+            track: r.track,
+            title: r.title,
+            detail: r.detail,
+            status: r.status
+          }))
+        };
+        
+        // Get recent cycles for context
+        const { rows: cycleRows } = await pool.query(`
+          SELECT decision, reason, status, steps, finished_at
+          FROM app.job_cycles
+          WHERE client_id = $1 AND finished_at > now() - INTERVAL '24 hours'
+          ORDER BY finished_at DESC LIMIT 5
+        `, [client.id]);
+        
+        const recentCycles = cycleRows.map(r => ({
+          decision: r.decision,
+          reason: r.reason,
+          status: r.status,
+          steps: r.steps,
+          finished_at: r.finished_at
+        }));
+        
+        // Build a dossier summary for the composer
+        const { rows: clientInfo } = await pool.query(`
+          SELECT display_name, email, phone, location
+          FROM app.job_clients WHERE id = $1
+        `, [client.id]);
+        
+        const dossier = {
+          name: clientInfo[0]?.display_name || 'there',
+          current_title: clientInfo[0]?.current_title || 'Professional',
+          current_company: clientInfo[0]?.current_company || 'Self-employed',
+          location: clientInfo[0]?.location
+        };
+        
+        // Compose the morning email
+        const email = composeCheckin({
+          kind: 'progress',
+          decision: 'Morning briefing',
+          reason: `Your Jobby agent has ${plan.actions.filter(a => a.status === 'pending').length} pending actions for today`,
+          dossier,
+          plan: { actions: planRows.map(r => ({ title: r.title, status: r.status, track: r.track, priority: r.priority })) },
+          recentCycles,
+          client: { name: clientInfo[0]?.display_name || 'there', display_name: clientInfo[0]?.display_name }
+        });
+        
+        // Send via Resend — first ensure the candidate has a jobbymcjobserson.com mailbox
+        const { ensureCandidateMailbox } = await import('./server.js');
+        const mailboxInfo = await ensureCandidateMailbox(client);
+        console.log(`[Morning Summary] mailboxInfo for client ${client.id}:`, JSON.stringify(mailboxInfo));
+        const sender = resolveJobbySender({ mailbox: mailboxInfo.mailbox, claimed_email: client.claimed_email });
+        console.log(`[Morning Summary] sender for client ${client.id}:`, JSON.stringify(sender));
+        // Use sender.address (raw email) for Resend's from field; formatted name is in the email body
+        const fromAddress = sender.address || 'jobby@31harbor.com';
+        console.log(`[Morning Summary] fromAddress for client ${client.id}:`, fromAddress);
+        const result = await sendViaResend({
+          from: fromAddress,
+          to: client.claimed_email,
+          subject: email.subject,
+          text: email.body
+        });
+        console.log(`[Morning Summary] sendViaResend result for client ${client.id}:`, JSON.stringify(result));
+        
+        if (result.error) {
+          failed++;
+          console.error(`[Morning Summary] Failed to send to ${client.claimed_email}:`, result.error);
+        } else {
+          sent++;
+          console.log(`[Morning Summary] Sent to ${client.claimed_email} (Resend ID: ${result.id})`);
+        }
+      } catch (e) {
+        failed++;
+        console.error(`[Morning Summary] Error for client ${client.id}:`, e.message);
+      }
+    }
+    
+    return { ok: true, result: `Morning summaries: ${sent} sent, ${failed} failed` };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// ── Jobby Evening Summary Email ──────────────────────────────
+export async function runJobbyEveningSummary() {
+  try {
+    const { getPool } = await import('./lib/db.mjs');
+    const { composeCheckin } = await import('./jobby/composer.mjs');
+    const { sendViaResend, resolveJobbySender } = await import('./server.js');
+    
+    const pool = await import('./lib/db.mjs').then(m => m.getPool());
+    
+    // Get all clients with claimed emails
+    const { rows: clients } = await pool.query(`
+      SELECT id, display_name, claimed_email, daily_send_cap
+      FROM app.job_clients
+      WHERE claimed_email IS NOT NULL
+    `);
+    
+    if (!clients.length) {
+      return { ok: true, result: 'No clients with claimed emails to notify' };
+    }
+    
+    let sent = 0;
+    let failed = 0;
+    
+    for (const client of clients) {
+      try {
+        // Get today's completed work
+        const { rows: completedRows } = await pool.query(`
+          SELECT decision, reason, status, steps, finished_at
+          FROM app.job_cycles
+          WHERE client_id = $1 AND status IN ('ran', 'no_work')
+            AND finished_at > CURRENT_DATE
+          ORDER BY finished_at DESC
+        `, [client.id]);
+        
+        // Get today's planned vs completed
+        const { rows: plannedRows } = await pool.query(`
+          SELECT title, status FROM app.job_actions
+          WHERE client_id = $1 AND priority <= 2
+          ORDER BY priority, track, id
+        `, [client.id]);
+        
+        // Get dossier for context
+        const { rows: clientInfo } = await pool.query(`
+          SELECT display_name, email, phone, location
+          FROM app.job_clients WHERE id = $1
+        `, [client.id]);
+        
+        const dossier = {
+          name: clientInfo[0]?.display_name || 'there',
+          current_title: clientInfo[0]?.current_title || 'Professional',
+          current_company: clientInfo[0]?.current_company || 'Self-employed',
+          location: clientInfo[0]?.location
+        };
+        
+        const completedCount = completedRows.filter(r => r.status === 'ran').length;
+        const pendingPlanned = plannedRows.filter(r => r.status === 'pending').length;
+        
+        const email = composeCheckin({
+          kind: 'progress',
+          decision: `Day complete: ${completedCount} cycles ran`,
+          reason: `${pendingPlanned} high-priority actions remain for tomorrow`,
+          dossier: {
+            name: clientInfo[0]?.display_name || 'there',
+            current_title: clientInfo[0]?.current_title,
+            current_company: clientInfo[0]?.current_company
+          },
+          plan: { actions: plannedRows.map(r => ({ title: r.title, status: r.status })) },
+          recentCycles: completedRows.map(r => ({
+            decision: r.decision,
+            reason: r.reason,
+            status: r.status,
+            steps: r.steps,
+            finished_at: r.finished_at
+          })),
+          client: { name: clientInfo[0]?.display_name || 'there', display_name: clientInfo[0]?.display_name }
+        });
+        
+        const { ensureCandidateMailbox } = await import('./server.js');
+        const mailboxInfo = await ensureCandidateMailbox(client);
+        const sender = resolveJobbySender({ mailbox: mailboxInfo.mailbox, claimed_email: client.claimed_email });
+        const result = await sendViaResend({
+          from: sender.address || 'jobby@31harbor.com',
+          to: client.claimed_email,
+          subject: email.subject,
+          text: email.body
+        });
+        
+        if (result.error) {
+          failed++;
+          console.error(`[Evening Summary] Failed to send to ${client.claimed_email}:`, result.error);
+        } else {
+          sent++;
+          console.log(`[Evening Summary] Sent to ${client.claimed_email} (Resend ID: ${result.id})`);
+        }
+      } catch (e) {
+        failed++;
+        console.error(`[Evening Summary] Error for client ${client.id}:`, e.message);
+      }
+    }
+    
+    return { ok: true, result: `Evening summaries: ${sent} sent, ${failed} failed` };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 }
 
 async function runEdgeFunctionByName(fnName, body = {}) {
@@ -455,7 +839,19 @@ async function runEdgeFunctionByName(fnName, body = {}) {
       signal: AbortSignal.timeout(60_000),
     });
     const text = await r.text();
-    return { ok: r.ok, status: r.status, preview: text.slice(0, 200) };
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch { /* non-JSON body */ }
+    // Surface how many rows the function says it changed. A 200 with no count
+    // is not evidence that anything happened; the task loops used to report
+    // {"rows": null} and "ran" was mistaken for "did something".
+    const rows = typeof parsed?.rows === 'number'
+      ? parsed.rows
+      : typeof parsed?.update_summary?.rows === 'number'
+        ? parsed.update_summary.rows
+        : typeof parsed?.advance_summary?.rows === 'number'
+          ? parsed.advance_summary.rows
+          : null;
+    return { ok: r.ok, status: r.status, rows, preview: text.slice(0, 200) };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -473,12 +869,18 @@ async function runEdgeFunction(job) {
 // The job's `code` field contains the Python script.
 async function runPythonJob(code) {
   if (!code) return { ok: false, error: 'no code in job definition' };
+  if (!RELAY_API_KEY) {
+    return {
+      ok: false,
+      error: 'RELAY_API_KEY is not set. The cron engine is started by the supervisor, which loads relay/.env.',
+    };
+  }
   try {
     const res = await fetch('http://127.0.0.1:8080/tools/run', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': '3a02d6eecc89f1c700c097f9034479c24a56787acfbc996c5d17086ecd364602',
+        'x-api-key': RELAY_API_KEY,
         'x-agent-id': 'cron',
       },
       body: JSON.stringify({ tool: 'python-exec', args: { code, timeout: 120 } }),
@@ -734,6 +1136,12 @@ async function tick() {
       res = await runFleetChatFollowUp();
     } else if (job.type === 'local' && job.action === 'fleet-chat-task-creator') {
       res = await runFleetChatTaskCreator();
+    } else if (job.type === 'local' && job.action === 'jobby-heartbeat') {
+      res = await runJobbyHeartbeat();
+    } else if (job.type === 'local' && job.action === 'jobby-morning-summary') {
+      res = await runJobbyMorningSummary();
+    } else if (job.type === 'local' && job.action === 'jobby-evening-summary') {
+      res = await runJobbyEveningSummary();
     } else if (job.type === 'python' && job.code) {
       res = await runPythonJob(job.code);
     } else if (job.type === 'shell') {

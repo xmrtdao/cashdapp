@@ -44,6 +44,7 @@
  */
 
 import { LEAD_STAGE_CODES } from './pfp-lead-stage-codes.mjs';
+import { suppress } from './pfp-campaign-log.mjs';
 
 export const STAGES = Object.freeze([
   Object.freeze({
@@ -99,7 +100,7 @@ export const TRANSITIONS = Object.freeze({
 export const LOSS_REASONS = Object.freeze([
   'declined_by_client', 'booked_elsewhere', 'no_response',
   'unreachable', 'outside_service_area', 'price_too_high',
-  'not_a_lead', 'duplicate', 'other',
+  'not_a_lead', 'duplicate', 'opted_out', 'other',
 ]);
 
 /** How close an event may be before auto-expiry refuses to fire. */
@@ -153,15 +154,26 @@ export async function ensureLeadStageSchema(query) {
       received_at  timestamptz NOT NULL DEFAULT NOW()
     )`);
 
+  // The timestamp columns must be timestamps, not text.
+  //
+  // stage_entered_at was always corrected here. first_reply_at and
+  // contract_sent_at were not, and the code writes NOW() into both and then
+  // reads one back as a timestamp - COALESCE(text, NOW()) has no common type,
+  // so every reply from a known contact raised 42804 and left its inbound row
+  // with outcome IS NULL. See migrations/pfp_012_lead_timestamp_types.sql.
+  const timestampColumns = ['stage_entered_at', 'contract_sent_at', 'first_reply_at'];
   for (const col of ['stage', 'stage_entered_at', 'lost_reason', 'contract_sent_at', 'first_reply_at']) {
     const has = await query(
       `SELECT 1 FROM information_schema.columns
         WHERE table_schema='public' AND table_name='pfp_leads' AND column_name=$1`, [col]);
-    if (!has.rows.length) await query(`ALTER TABLE public.pfp_leads ADD COLUMN ${col} text`);
+    if (!has.rows.length) {
+      await query(`ALTER TABLE public.pfp_leads ADD COLUMN ${col} ${timestampColumns.includes(col) ? 'timestamptz' : 'text'}`);
+    }
   }
-  // stage_entered_at must be a timestamp, not text.
-  await query(
-    `ALTER TABLE public.pfp_leads ALTER COLUMN stage_entered_at TYPE timestamptz USING stage_entered_at::timestamptz`);
+  for (const col of timestampColumns) {
+    await query(
+      `ALTER TABLE public.pfp_leads ALTER COLUMN ${col} TYPE timestamptz USING ${col}::timestamptz`);
+  }
 
   await query(
     `CREATE INDEX IF NOT EXISTS pfp_lead_history_lead_idx ON public.pfp_lead_stage_history (lead_id, created_at DESC)`);
@@ -172,6 +184,38 @@ export async function ensureLeadStageSchema(query) {
       WHERE stage IN ('new','negotiating')`);
   await query(
     `CREATE INDEX IF NOT EXISTS pfp_inbound_sender_idx ON public.pfp_inbound_emails (lower(sender_email))`);
+
+  // One event, several people. Runtime DDL mirrors
+  // migrations/pfp_011_lead_contacts.sql so a fresh database has the model even
+  // if the migration was never run; the migration is still the record of it.
+  await query(
+    `ALTER TABLE public.pfp_contacts ADD COLUMN IF NOT EXISTS lead_id uuid
+       REFERENCES public.pfp_leads(id) ON DELETE SET NULL`);
+  await query(
+    `ALTER TABLE public.pfp_contacts ADD COLUMN IF NOT EXISTS is_primary boolean NOT NULL DEFAULT false`);
+  await query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS pfp_contacts_email_uniq
+       ON public.pfp_contacts (lower(email)) WHERE email IS NOT NULL`);
+  await query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS pfp_contacts_one_primary_per_lead
+       ON public.pfp_contacts (lead_id) WHERE is_primary AND lead_id IS NOT NULL`);
+  await query(
+    `ALTER TABLE public.pfp_inbound_emails ADD COLUMN IF NOT EXISTS thread_key text`);
+  await query(
+    `CREATE INDEX IF NOT EXISTS pfp_inbound_thread_idx
+       ON public.pfp_inbound_emails (thread_key, received_at) WHERE thread_key IS NOT NULL`);
+  await query(
+    `ALTER TABLE public.pfp_leads ADD COLUMN IF NOT EXISTS merged_into_lead_id uuid
+       REFERENCES public.pfp_leads(id) ON DELETE SET NULL`);
+  await query(
+    `CREATE INDEX IF NOT EXISTS pfp_leads_merged_into_idx
+       ON public.pfp_leads (merged_into_lead_id) WHERE merged_into_lead_id IS NOT NULL`);
+  await query(`
+    CREATE TABLE IF NOT EXISTS public.pfp_internal_addresses (
+      email      text PRIMARY KEY,
+      reason     text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT NOW()
+    )`);
 }
 
 export async function seedStages(query) {
@@ -373,6 +417,153 @@ export async function sweepExpiredLeads(query, { actor = 'sweep' } = {}) {
   return { examined: candidates.length, expired: expired.length, held: held.length, expired_rows: expired, held_rows: held };
 }
 
+// ── people and events ─────────────────────────────────────────────────────
+
+/**
+ * The identity of a thread is its subject with every leading Re:/Fw: removed.
+ *
+ * Email has no portable thread id in the data we store, and the inbound webhook
+ * gives us a subject but not the References headers. The normalized subject is
+ * the best available key, and it is deliberately conservative: an exact match
+ * only, so "Re: Hello" from a stranger is not folded into an unrelated lead
+ * unless the subject really is identical.
+ */
+/**
+ * Does this message ask us to stop?
+ *
+ * This is deliberately narrow. A keyword gate that fires on "stop" alone would
+ * catch "stop by the venue", and a gate that fires on "remove" would catch
+ * "remove the backdrop from the quote". Both would silently suppress a client.
+ * So it looks for the shapes people actually use to opt out: the bare word, an
+ * unsubscribe/opt-out line, "remove me/us", "do not contact", or "stop ...
+ * emails/list/newsletter".
+ */
+const OPT_OUT_PATTERNS = [
+  /\bunsubscribe\b/i,
+  /\bopt[\s-]?out\b/i,
+  /\bremove (me|us)\b/i,
+  /\btake me off\b/i,
+  /\bdo not (email|contact|reach out|send)\b/i,
+  /\bstop (emailing|contacting|sending|the emails|messages)\b/i,
+  /^\s*(please\s+)?stop\s*[.!]*\s*$/i,
+  /\bstop\b[^.\n]{0,40}\b(list|emails?|mailings?|newsletter)\b/i,
+];
+
+export function detectOptOut(subject, snippet) {
+  const text = `${subject ?? ''} ${snippet ?? ''}`.replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  for (const re of OPT_OUT_PATTERNS) {
+    const m = text.match(re);
+    if (m) return { matched: m[0], excerpt: text.slice(0, 300) };
+  }
+  return null;
+}
+
+/**
+ * The identity of a thread is its subject with every leading Re:/Fw: removed.
+ *
+ * Email has no portable thread id in the data we store, and the inbound webhook
+ * gives us a subject but not the References headers. The normalized subject is
+ * the best available key, and it is deliberately conservative: an exact match
+ * only, so "Re: Hello" from a stranger is not folded into an unrelated lead
+ * unless the subject really is identical.
+ */
+export function normalizeThreadKey(subject) {
+  return String(subject ?? '')
+    .toLowerCase()
+    .replace(/^\s*((re|fw|fwd)\s*:\s*)+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Follow `merged_into_lead_id` to the surviving lead.
+ *
+ * A chain is followed rather than assumed one hop deep, because a second merge
+ * (a planner address merged into a wedding lead, then that lead merged into a
+ * venue event) must not strand the first pointer.
+ */
+export async function resolveLeadId(query, leadId) {
+  let cur = leadId;
+  const seen = new Set();
+  for (let i = 0; i < 10; i++) {
+    if (!cur) return null;
+    if (seen.has(cur)) throw new Error(`merge cycle at lead ${cur}`);
+    seen.add(cur);
+    const { rows } = await query(
+      'SELECT id, merged_into_lead_id FROM public.pfp_leads WHERE id = $1', [cur]);
+    if (!rows.length) return null;
+    if (!rows[0].merged_into_lead_id) return rows[0].id;
+    cur = rows[0].merged_into_lead_id;
+  }
+  throw new Error(`merge chain longer than 10 starting at ${leadId}`);
+}
+
+/**
+ * Attach a person to a lead. One row per person, one primary per lead.
+ *
+ * Refuses to silently move a contact who is already attached to a different
+ * live lead: two events sharing a planner is a real thing, and deciding which
+ * one a phone call belongs to is a human's job. `force` is the override, used
+ * only by an explicit merge.
+ */
+export async function attachContact(query, {
+  lead_id, email, name = null, role = 'contact', is_primary = false,
+  notes = null, force = false,
+}) {
+  const address = String(email ?? '').trim().toLowerCase();
+  if (!address || !address.includes('@')) {
+    return { ok: false, error: 'a valid email is required to attach a contact' };
+  }
+  const target = await resolveLeadId(query, lead_id);
+  if (!target) return { ok: false, error: `no live lead for ${lead_id}` };
+
+  const { rows: existing } = await query(
+    `SELECT id, lead_id, is_primary, name
+       FROM public.pfp_contacts WHERE lower(email) = $1 LIMIT 1`, [address]);
+
+  if (existing.length && existing[0].lead_id && existing[0].lead_id !== target && !force) {
+    const other = await resolveLeadId(query, existing[0].lead_id);
+    if (other && other !== target) {
+      return {
+        ok: false,
+        error: `contact ${address} is already attached to lead ${other}; ` +
+          'merge that lead first or pass force',
+        contact_id: existing[0].id,
+        existing_lead_id: other,
+      };
+    }
+  }
+
+  // Exactly one primary per lead. Demote the incumbent before promoting.
+  if (is_primary) {
+    await query(
+      `UPDATE public.pfp_contacts SET is_primary = false, updated_at = NOW()
+        WHERE lead_id = $1 AND is_primary AND lower(email) <> $2`, [target, address]);
+  }
+
+  const { rows } = await query(
+    `INSERT INTO public.pfp_contacts (name, email, role, notes, lead_id, is_primary)
+     VALUES (COALESCE($1, split_part($2,'@',1)), $2,$3,$4,$5,$6)
+     ON CONFLICT (lower(email)) WHERE email IS NOT NULL DO UPDATE SET
+       lead_id = EXCLUDED.lead_id,
+       is_primary = pfp_contacts.is_primary OR EXCLUDED.is_primary,
+       name = COALESCE(pfp_contacts.name, EXCLUDED.name),
+       role = COALESCE(pfp_contacts.role, EXCLUDED.role),
+       notes = COALESCE(pfp_contacts.notes, EXCLUDED.notes),
+       updated_at = NOW()
+     RETURNING id, lead_id, is_primary`,
+    [name, address, role, notes, target, is_primary]);
+
+  const contact = rows[0];
+  if (contact.is_primary) {
+    await query(
+      `UPDATE public.pfp_leads SET primary_contact_id = $1, updated_at = NOW() WHERE id = $2`,
+      [contact.id, target]);
+  }
+  return { ok: true, contact_id: contact.id, lead_id: target, is_primary: contact.is_primary };
+}
+
 // ── inbound capture ───────────────────────────────────────────────────────
 
 /**
@@ -395,44 +586,198 @@ export async function captureInboundEmail(query, email) {
     return { ok: false, error: 'a valid from_email is required' };
   }
 
-  // 1. Dedupe.
+  // 1. Dedupe - but an unfinished capture is not a duplicate.
+  //
+  //    The inbound row is written before anything is decided, so a capture
+  //    that threw halfway leaves a row with no outcome and no lead. That is
+  //    not a processed message, it is an unfinished one, and the only way it
+  //    can ever get an outcome is by being processed again. A row that HAS an
+  //    outcome was processed, and must not be processed twice.
+  let inboundId = null;
   if (email.message_id) {
     const dupe = await query(
       'SELECT id, lead_id, outcome FROM public.pfp_inbound_emails WHERE message_id = $1',
       [email.message_id]);
     if (dupe.rows.length) {
-      return {
-        ok: true, duplicate: true,
-        lead_id: dupe.rows[0].lead_id, outcome: dupe.rows[0].outcome,
-        note: 'this message_id was already processed; no second lead created',
-      };
+      const existing = dupe.rows[0];
+      if (existing.outcome === null && existing.lead_id === null) {
+        inboundId = existing.id;
+      } else {
+        return {
+          ok: true, duplicate: true,
+          lead_id: existing.lead_id, outcome: existing.outcome,
+          note: 'this message_id was already processed; no second lead created',
+        };
+      }
     }
   }
 
-  // 2. Existing lead for this address? One person, one lead.
-  const { rows: found } = await query(
-    `SELECT id, stage, event_type, venue_name, contact_name
-       FROM public.pfp_leads
-      WHERE lower(contact_email) = $1
-      ORDER BY created_at ASC LIMIT 1`, [from]);
-  const lead = found[0];
+  const threadKey = normalizeThreadKey(email.subject) || null;
 
-  // 3. Was it a campaign contact? Asked, not inferred.
+  // 2. Insert the inbound record first. Always, so the message exists even when
+  //    it turns out to belong to no lead (or to us).
+  //
+  //    The select above is not a lock. The webhook and the 15-minute poller can
+  //    both see the same message as new and both try to insert it, and two
+  //    leads for one reply is exactly what the contact model exists to prevent.
+  //    The unique index on message_id is what actually stops it, so a collision
+  //    is caught here and answered as the duplicate it is.
+  if (inboundId === null) {
+    let inbound;
+    try {
+      inbound = await query(
+        `INSERT INTO public.pfp_inbound_emails
+           (message_id, sender_email, sender_name, subject, snippet, thread_key)
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+        [email.message_id ?? null, from, email.sender_name ?? null,
+         email.subject ?? null, email.snippet ?? null, threadKey]);
+    } catch (err) {
+      if (err?.code !== '23505') throw err;
+      const existing = await query(
+        'SELECT id, lead_id, outcome FROM public.pfp_inbound_emails WHERE message_id = $1',
+        [email.message_id]);
+      return {
+        ok: true,
+        duplicate: true,
+        lead_id: existing.rows[0]?.lead_id ?? null,
+        outcome: existing.rows[0]?.outcome ?? null,
+        note: 'another caller captured this message first; no second lead created',
+      };
+    }
+    inboundId = inbound.rows[0].id;
+  }
+
+  const finish = async (outcome, leadId, extra = {}) => {
+    await query(
+      'UPDATE public.pfp_inbound_emails SET lead_id = $1, outcome = $2 WHERE id = $3',
+      [leadId, outcome, inboundId]);
+    return { ok: true, created: false, lead_id: leadId, outcome, ...extra };
+  };
+
+  // 3. Our own addresses never become leads. The studio emailing itself is not
+  //    organic inbound, and the old behaviour made it look like a hot prospect.
+  const { rows: internal } = await query(
+    `SELECT reason FROM public.pfp_internal_addresses WHERE lower(email) = $1`, [from]);
+  if (internal.length) {
+    return finish('internal_ignored', null, {
+      internal: true,
+      reason: internal[0].reason,
+      note: 'this address belongs to the studio; no lead was created',
+    });
+  }
+
+  // 3b. Opt-out. "STOP", "unsubscribe", "remove me" is not a lead - it is an
+  //     instruction never to contact this address again. The old path filed
+  //     tdent@lpc.com's "STOP - Remove for list" as `lead_created` on 2026-10-19
+  //     and left the suppression table empty, so the campaign could keep
+  //     emailing someone who had asked it to stop.
+  //
+  //     The inbound row is still recorded, and still linked to a known lead if
+  //     we have one, so the request is traceable. The address is what gets
+  //     suppressed; the event is not resurrected.
+  const optOut = detectOptOut(email.subject, email.snippet);
+  if (optOut) {
+    // `suppress` returns false when the write failed. Do not report a
+    // suppression that did not happen.
+    const recorded = await suppress(query, null, from, 'inbound_opt_out', optOut.excerpt);
+    let known = null;
+    const { rows: k } = await query(
+      `SELECT lead_id FROM public.pfp_contacts
+        WHERE lower(email) = $1 AND lead_id IS NOT NULL LIMIT 1`, [from]);
+    if (k.length) known = await resolveLeadId(query, k[0].lead_id);
+    return finish(recorded ? 'suppressed' : 'opt_out_not_recorded', known, {
+      suppressed: recorded,
+      matched: optOut.matched,
+      note: recorded
+        ? 'sender asked not to be contacted; address added to the suppression list'
+        : 'sender asked not to be contacted, but the suppression write failed - do not email this address',
+    });
+  }
+
+  // 4. A known person. Their contact row says which event they belong to, so a
+  //    reply from the groom lands on the wedding rather than opening a lead.
+  const { rows: contactRows } = await query(
+    `SELECT id, lead_id, is_primary
+       FROM public.pfp_contacts
+      WHERE lower(email) = $1 AND lead_id IS NOT NULL LIMIT 1`, [from]);
+  if (contactRows.length) {
+    const target = await resolveLeadId(query, contactRows[0].lead_id);
+    if (target) {
+      const { rows: tl } = await query(
+        'SELECT stage FROM public.pfp_leads WHERE id = $1', [target]);
+      const stage = tl[0]?.stage ?? null;
+      let move = null;
+      if (stage === 'stale' || stage === 'lost') {
+        move = await advanceLeadStage(query, {
+          lead_id: target, to_stage: 'new', actor: 'inbox',
+          reason: stage === 'lost' ? 'client_replied_after_lost' : 'client_replied_after_stale',
+          note: 'a dormant lead that came back',
+        });
+      } else {
+        await query(
+          `UPDATE public.pfp_leads
+              SET first_reply_at = COALESCE(first_reply_at, NOW()), updated_at = NOW()
+            WHERE id = $1`, [target]);
+      }
+      return finish(move ? 'resurrected' : 'contact_reply', target, {
+        contact_id: contactRows[0].id,
+        stage: move ? 'new' : stage,
+        resurrected: Boolean(move),
+        note: 'sender is already a contact on this lead; no second lead created',
+      });
+    }
+  }
+
+  // 5. Was it a campaign contact? Asked, not inferred.
   const { rows: camp } = await query(
     `SELECT count(*)::int AS n, max(sent_at) AS last_sent
        FROM public.pfp_campaign_sends
       WHERE lower(email) = $1 AND status <> 'error'`, [from]);
   const from_campaign = camp[0]?.n > 0;
 
-  // 4. Insert the inbound record. Always, so the reply exists even if no lead does.
-  const inbound = await query(
-    `INSERT INTO public.pfp_inbound_emails
-       (message_id, sender_email, sender_name, subject, snippet)
-     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-    [email.message_id ?? null, from, email.sender_name ?? null,
-     email.subject ?? null, email.snippet ?? null]);
+  // 6. Existing lead for this address? Merged duplicates are skipped - the
+  //    survivor is found through the contact table or the merge pointer.
+  const { rows: found } = await query(
+    `SELECT id, stage, event_type, venue_name, contact_name
+       FROM public.pfp_leads
+      WHERE lower(contact_email) = $1 AND merged_into_lead_id IS NULL
+      ORDER BY created_at ASC LIMIT 1`, [from]);
+  const lead = found[0];
 
-  // 5. No lead: create one in `new`.
+  // 7. Same thread, a different person. This is the wedding case: the groom
+  //    replies on the thread the bride started and the inbox used to invent a
+  //    second lead. Attach him to the event instead.
+  if (!lead && threadKey) {
+    const { rows: thread } = await query(
+      `SELECT i.lead_id
+         FROM public.pfp_inbound_emails i
+         JOIN public.pfp_leads l ON l.id = i.lead_id
+        WHERE i.thread_key = $1
+          AND i.lead_id IS NOT NULL
+          AND i.id <> $2
+          AND l.merged_into_lead_id IS NULL
+          AND i.received_at > NOW() - INTERVAL '90 days'
+        ORDER BY i.received_at ASC LIMIT 1`, [threadKey, inboundId]);
+    if (thread.length) {
+      const target = await resolveLeadId(query, thread[0].lead_id);
+      if (target) {
+        const attached = await attachContact(query, {
+          lead_id: target, email: from, name: email.sender_name ?? null,
+          role: 'contact',
+        });
+        if (attached.ok) {
+          await query(
+            `UPDATE public.pfp_leads SET updated_at = NOW() WHERE id = $1`, [target]);
+          return finish('contact_attached', target, {
+            contact_id: attached.contact_id,
+            note: 'same email thread as an existing lead; attached as a contact, no new lead',
+          });
+        }
+      }
+    }
+  }
+
+  // 8. No lead: create one in `new`, and make the sender its primary contact.
   if (!lead) {
     const created = await query(
       `INSERT INTO public.pfp_leads
@@ -455,17 +800,20 @@ export async function captureInboundEmail(query, email) {
        VALUES ($1,NULL,'new',$2,'inbox',$3)`,
       [leadId, from_campaign ? 'campaign_reply' : 'organic_reply',
        email.subject ? `re: ${email.subject}` : null]);
-    await query('UPDATE public.pfp_inbound_emails SET lead_id = $1, outcome = $2 WHERE id = $3',
-      [leadId, 'lead_created', inbound.rows[0].id]);
-    return {
-      ok: true, created: true, lead_id: leadId, stage: 'new',
+    await attachContact(query, {
+      lead_id: leadId, email: from, name: email.sender_name ?? null,
+      role: 'primary client', is_primary: true,
+    });
+    return finish('lead_created', leadId, {
+      created: true,
+      stage: 'new',
       from_campaign,
       source: from_campaign ? 'campaign reply' : 'organic inbound',
       next: 'Send a quote or contract within 30 days or the lead goes stale.',
-    };
+    });
   }
 
-  // 6. Existing lead: this is a reply, and it may resurrect a dormant one.
+  // 9. Existing lead: this is a reply, and it may resurrect a dormant one.
   const prior = lead.stage;
   let move = null;
   if (prior === 'stale' || prior === 'lost') {
@@ -480,16 +828,23 @@ export async function captureInboundEmail(query, email) {
         WHERE id = $1`, [lead.id]);
   }
 
-  await query('UPDATE public.pfp_inbound_emails SET lead_id = $1, outcome = $2 WHERE id = $3',
-    [lead.id, move ? 'resurrected' : 'reply_logged', inbound.rows[0].id]);
+  // Make sure the sender is a contact on their own lead. A lead created before
+  // this model existed has no contact row, and the next email would otherwise
+  // be the one that needed it.
+  await attachContact(query, {
+    lead_id: lead.id, email: from, name: email.sender_name ?? null,
+    role: 'contact',
+  });
 
-  return {
-    ok: true, created: false, lead_id: lead.id, stage: lead.stage,
-    was_stage: prior, resurrected: Boolean(move), from_campaign,
+  return finish(move ? 'resurrected' : 'reply_logged', lead.id, {
+    stage: lead.stage,
+    was_stage: prior,
+    resurrected: Boolean(move),
+    from_campaign,
     next: move
       ? `Resurrected from ${prior} into new. The 30-day clock starts again.`
       : `Reply logged against a lead already in "${prior}".`,
-  };
+  });
 }
 
 // ── reporting ─────────────────────────────────────────────────────────────

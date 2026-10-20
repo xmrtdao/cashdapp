@@ -24,6 +24,37 @@ import net from 'node:net';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = __dirname;
 
+// ── relay/.env ────────────────────────────────────────────────────────────
+//
+// A service runs with the supervisor's own environment, and the supervisor's
+// environment is whatever the operator's launcher happened to have. Two things
+// a service needs are not in it: the OpenCode API key, and the one password
+// the OpenCode server and its client must agree on. relay/.env is where both
+// live, so it is read here - once, at boot - and handed to the services that
+// ask for them.
+//
+// This was the reason the fleet could not drive OpenCode at all: the server
+// took its password from the supervisor's environment, the client had no way
+// to know it, and every connection was refused. Two sides that read the same
+// file cannot disagree.
+const RELAY_ENV = (() => {
+  try {
+    const p = join(ROOT, 'relay', '.env');
+    if (!existsSync(p)) return {};
+    const out = {};
+    for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i <= 0) continue;
+      out[t.slice(0, i).trim()] = t.slice(i + 1).trim().replace(/^["']|["']$/g, '');
+    }
+    return out;
+  } catch {
+    return {};
+  }
+})();
+
 // Pick a concrete Python interpreter for services we supervise.
 //
 // Supervising `py` (the Windows Python Launcher) supervises a process that exits
@@ -131,8 +162,19 @@ const SERVICE_DEFS = [
     args: ['serve', '--port', '4096', '--hostname', '0.0.0.0'],
     cwd: ROOT,
     env: {
-      OPENCODE_API_KEY: process.env.OPENCODE_API_KEY || 'O4Ih7uGdYZUG7vsKFcd7fDgSI_XNtZCNUxioMTHazjU',
-      OPENCODE_BASE_URL: process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1',
+      // The key lives in relay/.env, not in this file. A credential in source
+      // is a credential in every copy, every backup and every transcript that
+      // quotes the file - and the one that was here answered 401 "Invalid
+      // credential", so it was not even doing the job it was there for.
+      OPENCODE_API_KEY: process.env.OPENCODE_API_KEY || RELAY_ENV.OPENCODE_API_KEY || '',
+      OPENCODE_BASE_URL: process.env.OPENCODE_BASE_URL || RELAY_ENV.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1',
+      // The server and its client have to agree on ONE password. The client is
+      // the fleet's worker, and it reads this same file, so both sides take
+      // the value from here rather than from whatever the supervisor's own
+      // environment happened to carry - which is how the two ended up
+      // disagreeing and every connection was refused.
+      OPENCODE_PASSWORD: RELAY_ENV.OPENCODE_SERVER_PASSWORD || process.env.OPENCODE_PASSWORD || '',
+      OPENCODE_SERVER_PASSWORD: RELAY_ENV.OPENCODE_SERVER_PASSWORD || process.env.OPENCODE_SERVER_PASSWORD || '',
     },
     healthCheck: () => checkHttp('http://127.0.0.1:4096/health', 2000),
     startupGraceMs: 10000,
@@ -140,12 +182,51 @@ const SERVICE_DEFS = [
     dependsOn: [],
   },
   {
+    // The browser this stack owns. It is the one browser an agent can read:
+    // the operator's dashboard pane is an iframe in somebody else's window,
+    // but this one is a real Chrome with a control API (/navigate, /click,
+    // /type, /text, /elements, /fill, /press) and a live frame stream.
+    //
+    // It was written and never supervised, so it was only ever alive while
+    // somebody had started it by hand.
+    name: 'browser-view',
+    cmd: 'node',
+    args: ['relay/browser-view.mjs'],
+    cwd: ROOT,
+    healthUrl: 'http://127.0.0.1:9334/status',
+    tcpPort: 9334,
+    startupGraceMs: 15000,
+    maxRestartsPerHour: 3,
+    dependsOn: [],
+  },
+  {
+    // The OpenCode worker: the file-based bridge (agent-inbox/opencode/ ->
+    // agent-outbox/opencode/) that lets anything queue a prompt for an agent
+    // with hands. It used to spawn the OpenCode CLI, which never answered -
+    // the CLI and the server disagreed about the password, and the CLI's own
+    // background service was not the one running. It talks to the server over
+    // HTTP now, through the proxy that injects the credential.
+    name: 'opencode-agent',
+    cmd: 'node',
+    args: ['relay/opencode-agent.mjs'],
+    cwd: ROOT,
+    healthUrl: 'http://127.0.0.1:9335/health',
+    tcpPort: 9335,
+    startupGraceMs: 10000,
+    maxRestartsPerHour: 3,
+    dependsOn: ['opencode'],
+  },
+  {
     name: 'cuttlefishclaws-mcp',
     cmd: 'node',
     args: ['relay/cuttlefishclaws-mcp.mjs', '--http', '--port', '3120'],
     cwd: ROOT,
     healthUrl: 'http://127.0.0.1:3120/health',
-    healthCheck: () => true,
+    // The port is the authority when the endpoint does not answer. Without
+    // tcpPort the check fell through to "is the child process alive", and a
+    // process that is alive but no longer listening reported healthy forever -
+    // which is how the cuttlefish MCP went down and stayed down.
+    tcpPort: 3120,
     startupGraceMs: 10000,
     dependsOn: ['pg'],
   },
@@ -155,7 +236,7 @@ const SERVICE_DEFS = [
     args: ['relay/xmrtdao-suite-mcp.mjs', '--http', '--port', '3121'],
     cwd: ROOT,
     healthUrl: 'http://127.0.0.1:3121/health',
-    healthCheck: () => true,
+    tcpPort: 3121,
     startupGraceMs: 10000,
     dependsOn: ['pg'],
   },
@@ -396,7 +477,7 @@ const SERVICE_DEFS = [
 
 // graytech is independent of every other service - it needs no database and no
 // tunnel to answer on :8090 - so it starts last and blocks nothing.
-const START_ORDER = ['pg', 'local-sb', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'designer', 'alice', 'cron-engine-v2', 'campaign-scheduler', 'opencode', 'dsh', 'resume-server', 'graytech'];
+const START_ORDER = ['pg', 'local-sb', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'designer', 'alice', 'cron-engine-v2', 'campaign-scheduler', 'opencode', 'opencode-agent', 'browser-view', 'dsh', 'resume-server', 'graytech'];
 
 // ── State ────────────────────────────────────────────────────────────
 const state = {};
@@ -620,7 +701,7 @@ async function checkTcpPort(host, port, timeoutMs = 2000) {
 //
 // Definitions remain the source of truth: `def.tcpPort` wins, and this map is
 // only the fallback for services that predate the field.
-const TCP_PORTS = { pg: 5432, 'local-sb': 54321, relay: 8080, vite: 5173, 'cuttlefishclaws-mcp': 3120, 'xmrtdao-suite-mcp': 3121, 'cuttlefish-mcp': 3122, dsh: 3080, graytech: 8090 };
+const TCP_PORTS = { pg: 5432, 'local-sb': 54321, relay: 8080, vite: 5173, 'cuttlefishclaws-mcp': 3120, 'xmrtdao-suite-mcp': 3121, 'cuttlefish-mcp': 3122, dsh: 3080, graytech: 8090, opencode: 4096, 'browser-view': 9334, 'opencode-agent': 9335 };
 
 async function findExistingProcess(name) {
   // Read the existing state file (populated by server.js / previous runs)
@@ -796,7 +877,10 @@ async function startService(name) {
       detached: true,
       stdio: ['ignore', logFd || 'ignore', errFd || 'ignore'],
       windowsHide: true,
-      env: { ...process.env },
+      // A service's own env is applied LAST, so what it declares wins over
+      // whatever the supervisor inherited. It used to be ignored entirely,
+      // which meant a service could declare an env and never receive it.
+      env: { ...process.env, ...(def.env || {}) },
     });
     let stderrBuf = '';
     // Flush on exit — write any captured stderr to the crash log
