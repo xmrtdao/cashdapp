@@ -775,3 +775,94 @@ noticing.
 
 **51 of 51 pass.** That is the whole relay suite, against the throwaway test
 database, with the exit code checked.
+
+## 17. Why the pipeline was idle (2026-10-20, later)
+
+The question was whether the loops were running or stalled. They were
+running: 104 jobs loaded every thirty seconds, the executor firing every five
+minutes, the orchestrator assigning every ten. And the board had not moved in
+thirteen and a half hours.
+
+Two faults, both in the way a task gets from "filed" to "worked on".
+
+### 17.1 The clock never started
+
+`app.tasks` has two columns that only mean anything together:
+`stage_started_at` (when the task entered its stage) and
+`auto_advance_threshold_hours` (how long it may sit there).
+
+`stage_started_at` was written in exactly one place - a relay endpoint that
+changes a task's stage by hand. Nothing set it when a task was **created**,
+and nothing set it when an agent was **assigned** one. So a task filed through
+the fleet chat - the way most of them are filed - had no clock from the moment
+it was born.
+
+The auto-advance's progress pass skips tasks with no clock:
+
+```ts
+.not('stage_started_at', 'is', null)
+```
+
+so their checklist was never counted, their progress stayed at zero, and they
+never reached the 100% the advance pass needs. **Sixteen of the seventeen open
+tasks were invisible to both passes.** They were not stalled by a rule: they
+were invisible to one.
+
+The clock is now set by the database, not by each writer remembering to: a
+`BEFORE INSERT OR UPDATE OF stage` trigger starts it, and a stage change
+restarts it. The tasks that were filed without one were backfilled with the
+time they last moved - not with the time the migration ran, which would have
+made a 500-hour-old task look brand new.
+
+### 17.2 The scheduled job asked for the wrong half
+
+The auto-advance has two passes and an action that runs both. The scheduled
+job asked for the advance-only one:
+
+```json
+{ "fn": "task-auto-advance", "body": {} }     // -> action 'auto_advance'
+```
+
+The advance pass advances a task whose checklist progress has reached 100%.
+The progress pass is what turns a checklist into a number. With the advance
+pass alone, **nothing ever counted the checklist**, so no task ever reached
+100%, so no task ever advanced - while the job reported itself as healthy,
+every ten minutes, zero rows.
+
+Nothing in the tree called `update_progress`, and the function's `run_all`
+action existed for exactly this. The body now asks for `run_all`.
+
+**Verified**: the 13:40 run reports **3 rows** where every run for days
+reported 0. The progress pass now scans all 17 open tasks instead of 1, and
+records honestly that none of them has a checklist - which is the truth, and
+was previously invisible.
+
+### 17.3 What is actually left
+
+The machinery is healthy and now looking at the work. The work is the
+problem, and it is honest to say so plainly:
+
+- **19 tasks sit in REVIEW**, parked because the work was done but the only
+  evidence was a pointer at the task's own page. They need a deliverable URL
+  that can be opened, which needs push access (§11, decision 1).
+- **17 tasks have no checklist at all** - a title and nothing else. They are
+  now recorded as stalled rather than invisible, but the plan is missing: no
+  function in the tree writes one, so the planner is an agent, and every peer
+  heartbeat on this box is stale ("last heartbeat never"). The front of the
+  pipeline is waiting for an agent that is not connected.
+- **10 jobs have been disabled in `cron-jobs.json` since the registry was
+  created** (2026-07-25), with no `cron.job` twin doing their work: the
+  community posts (morning, daily, progress, evening, weekly, spotlight),
+  `event-dispatcher`, `superduper-router`, the two workflow-template
+  managers. They were born disabled - this is not a recent regression - but
+  the fleet has been silent on those channels since the beginning.
+- **3 jobs the dedupe pass disabled** have a live `cron.job` twin and are
+  running normally under that name.
+
+### 17.4 Tests
+
+`relay/tests/task-stage-clock.test.mjs` (new): a task filed with a stage gets
+a clock, a stage change restarts it, and the scheduled job asks for both
+passes.
+
+**52 of 52 pass.**

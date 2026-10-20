@@ -116,8 +116,9 @@
     "type": "ef",
     "name": "task-auto-advance-fast",
     "fn": "task-auto-advance",
-    "body": {},
-    "desc": "Task auto-advance (10min) — KEEPER of task-auto-advance family"
+    "body": { "action": "run_all" },
+    "desc": "Task auto-advance (10min) — KEEPER of task-auto-advance family",
+    "note": "[2026-10-20] run_all, not the default. The default action advances only, and the advance pass advances only a task whose checklist progress has reached 100% - so with the advance pass alone, nothing ever counted the checklist, no task ever reached 100%, and no task ever advanced. The progress pass is what turns a checklist into a number. Nothing in the tree called update_progress, so this body is the only thing keeping it alive.]"
   },
   {
     "id": 83,
