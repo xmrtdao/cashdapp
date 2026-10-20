@@ -73,10 +73,18 @@ const KNOWN = {
   DATA_DIR: join(ROOT, 'relay-data'),
   LOGS_DIR: join(ROOT, 'relay-data', 'logs'),
   join,
+  // The real `process`. A service that resolves its binary from
+  // process.env.APPDATA needs it, and without it the array cannot even be
+  // evaluated - which is how this test came to fail for a reason that had
+  // nothing to do with the thing it audits.
+  process,
 };
 
 const scope = new Proxy({}, {
-  has: () => true,
+  // Names that exist for real resolve to the function's own parameters, so the
+  // Proxy must NOT claim them. Everything else (the grace constants) resolves
+  // through the Proxy.
+  has: (_t, prop) => !(typeof prop === 'string' && prop in KNOWN),
   get: (_t, prop) => {
     if (prop === Symbol.unscopables) return undefined;
     if (typeof prop !== 'string') return undefined;
@@ -96,10 +104,10 @@ try {
   const body = `with (this) { return ${arraySrc}; }`;
   SERVICES = new Function(
     'checkHttp', 'checkProcessByName', 'checkProcessByScript', 'checkScheduledTasks',
-    'ROOT', 'DATA_DIR', 'LOGS_DIR',
+    'ROOT', 'DATA_DIR', 'LOGS_DIR', 'process', 'join',
     body
   ).call(scope, checkHttp, checkProcessByName, checkProcessByScript, checkScheduledTasks,
-    ROOT, join(ROOT, 'relay-data'), join(ROOT, 'relay-data', 'logs'));
+    ROOT, join(ROOT, 'relay-data'), join(ROOT, 'relay-data', 'logs'), process, join);
 } catch (e) {
   console.log('  FAIL  the SERVICES array does not evaluate: ' + e.message);
   process.exit(1);
