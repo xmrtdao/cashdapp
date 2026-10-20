@@ -133,7 +133,13 @@ export async function postGoalTender() {
 // digest from recent fleet memory. Operational tone, no essays, no opinions.
 // Falls back to a template line if Ollama is unreachable.
 const OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'deepseek-v4-flash:cloud';
+// This is the LOCAL Ollama (the /api/generate endpoint on 11434), so it asks
+// for the local model. OLLAMA_MODEL is the CLOUD model (minimax-m3.1-flash),
+// and the local server has never heard of it - it would 404 and fall back to
+// the template line every time. The old default here, deepseek-v4-flash:cloud,
+// was retired by Ollama on 2026-09-25 (410), so it could never have worked
+// either.
+const OLLAMA_MODEL = process.env.OLLAMA_LOCAL_MODEL || 'gemma3:1b';
 const OLLAMA_TIMEOUT_MS = 25_000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
