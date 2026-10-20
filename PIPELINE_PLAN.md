@@ -866,3 +866,65 @@ a clock, a stage change restarts it, and the scheduled job asks for both
 passes.
 
 **52 of 52 pass.**
+
+## 18. Ollama serves the same free model (2026-10-20, later)
+
+Told that Ollama supports MiniMax M3.1 Flash free. Measured it rather than
+took it on trust, and it is true - with a wrinkle worth writing down.
+
+**What Ollama actually serves.** All three accounts answer
+`minimax-m3.1-flash` with **200 in 790-1403ms and native tool_calls** (a
+real function call came back, not prose). The same moment, on the same
+accounts:
+
+| model | answer |
+|---|---|
+| `minimax-m3.1-flash` | **200** - native tool_calls |
+| `minimax-m3.1-flash:cloud` | **200** - native tool_calls |
+| `gemma4:31b` | 429 "you have reached your weekly usage limit" |
+| `glm-5.3-flash:cloud` | 402 "not included in your free usage" |
+| `deepseek-v4-pro` | 402 "not included in your free usage" |
+
+So the free tier on these accounts is alive. What had run out was the weekly
+allowance of the free-plan *model* that was named in the config, and the paid
+models are refused for want of credits - neither of which is the same thing
+as the free tier being gone.
+
+**The name.** There is no `-free` slug on Ollama:
+`minimax-m3.1-flash-free` is 404 ("Try gemma4:31b-cloud, which is in the
+Free plan"). The plain name is the one that answers.
+
+**What was wrong.** `OLLAMA_MODEL` was `gemma4:31b` - the free-plan model
+whose weekly allowance is spent on every account - and the gateway's third
+Ollama entry hardcoded the same thing. So every call that fell through to
+Ollama failed, and the failure was reported as "the quota resets, it will
+recover". Meanwhile the chat cascade had no Ollama entry at all.
+
+**What changed.**
+
+- The gateway's three Ollama entries now name `minimax-m3.1-flash` and sit
+  third, fourth and fifth in the cascade - ahead of the two providers that
+  cannot answer at all (`openrouter-gemma` 429, `opencode` 403/402).
+- The chat cascade has an Ollama entry, using the same model out of a
+  different quota pool, directly after the OpenRouter copy of it. An
+  OpenRouter rate limit no longer drops the request to a slower model.
+- The summariser was sending the OpenAI and DeepSeek keys to `ollama.com`
+  with the models `gpt-4o-mini` and `deepseek-chat` - neither of which
+  exists in Ollama's catalogue. Both 404'd, so every summary fell through to
+  the local heuristic. It now asks Ollama for a model Ollama serves.
+- The executor's Tier 2 fallback defaulted to the same dead model, and the
+  fleet firehose asked the **local** Ollama for a cloud model retired in
+  September (410) - it now asks for the local model, which is the one the
+  local server has.
+
+**Verified through the running runtime**: the new provider answers ("ollama
+works"), the default cascade answers with provider `ollama` and model
+`minimax-m3.1-flash`, and with OpenRouter blanked in a probe the gateway
+falls through to `ollama-minimax` and answers in 2279ms.
+
+**One thing nobody can see from here**: whether `minimax-m3.1-flash` draws on
+the same allowance as `gemma4:31b`. It answers while that allowance is spent
+on all three accounts, which suggests it does not - but Ollama exposes no
+remaining-balance meter (`/api/usage` reported 380 requests and did not move
+across ten calls, so it is not a live meter). If it ever starts 429ing, the
+fix is the same: another account, or OpenRouter.
