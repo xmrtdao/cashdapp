@@ -9,7 +9,7 @@
 // service list is NOT maintained.
 
 /**
- * supervisor.mjs â€” Vex's top-level watchdog
+ * supervisor.mjs — Vex's top-level watchdog
  *
  * Single long-running process that:
  *   1. Keeps the relay (relay/server.js) alive
@@ -35,7 +35,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
 
-// â”€â”€ Text Sanitization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Text Sanitization ──────────────────────────────────────────
 function sanitizeText(text) {
   if (typeof text !== 'string') return text;
   return text
@@ -59,7 +59,7 @@ const LOG_FILE = join(ROOT, 'relay-data', 'supervisor.log');
 mkdirSync(DATA_DIR, { recursive: true });
 mkdirSync(LOGS_DIR, { recursive: true });
 
-// â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Config ──────────────────────────────────────────────────
 const CHECK_INTERVAL_MS = 30_000;             // 30s health loop
 const RELAY_STARTUP_GRACE_MS = 8_000;         // wait for relay to bind :8080
 const CAMPAIGN_DAEMON_STARTUP_GRACE_MS = 3_000;
@@ -75,7 +75,7 @@ const TASK_FAIL_CODES = new Set([1, 2, 3221225786, 3221225477, -1073741511]);
 // Processes to supervise.
 // `wrapperExits` = true means the launcher script exits 0 after detaching its
 // real child. We track the *child's* process tree, not the launcher, via
-// healthCheck â€” otherwise we'd restart-loop on a healthy stack.
+// healthCheck — otherwise we'd restart-loop on a healthy stack.
 const SERVICES = [
   {
     name: 'relay',
@@ -218,7 +218,7 @@ const SERVICES = [
     startupGrace: 4_000,
     maxRestartsPerHour: 4,
   },
-  // â”€â”€ MCP Servers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── MCP Servers ──────────────────────────────────────────
   {
     name: 'cuttlefishclaws-mcp',
     cmd: 'node',
@@ -262,6 +262,19 @@ const SERVICES = [
     startupGrace: 30_000,
     maxRestartsPerHour: 3,
   },
+  {
+    // OpenCode server (port 4096) — the mobile client's entry point.
+    // The binary lives in the global npm prefix, not in this repo, so the path
+    // is resolved from the environment rather than hardcoded. The password is
+    // read from .env by the server itself at launch.
+    name: 'opencode',
+    cmd: join(process.env.APPDATA || '', 'npm', 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe'),
+    args: ['serve', '--port', '4096', '--hostname', '0.0.0.0'],
+    cwd: ROOT,
+    healthCheck: () => checkHttp('http://127.0.0.1:4096/health', 2000),
+    startupGrace: 10_000,
+    maxRestartsPerHour: 3,
+  },
 ];
 
 // Windows tasks we expect to fire (must match TaskName exactly)
@@ -273,7 +286,7 @@ const WATCHED_TASKS = [
   { name: 'Vex-Supervisor',              expectedMaxAgeMs: 7  * 24 * 60 * 60 * 1000 },  // logon, just monitor
 ];
 
-// â”€â”€ Env / Resend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Env / Resend ────────────────────────────────────────────
 function loadEnv() {
   const envPath = join(__dirname, '.env');
   if (!existsSync(envPath)) return {};
@@ -291,10 +304,10 @@ const ENV = loadEnv();
 const RESEND_KEY = ENV.RESEND_XMRT_API_KEY || ENV.RESEND_API_KEY;
 const ALERT_EMAILS = ['xmrtsolutions@gmail.com', 'xmrtnet@gmail.com'];
 // Disabled 2026-07-09: Resend 403 on mobilemonero.com domain verification.
-// Supervisor still runs and restarts services â€” just no email alerts.
+// Supervisor still runs and restarts services — just no email alerts.
 const ALERTS_DISABLED = true;
 
-// â”€â”€ State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── State ───────────────────────────────────────────────────
 function loadState() {
   const defaults = {
     services: {},        // name -> { childPid, startedAt, restartCount, restartTimestamps: [] }
@@ -328,7 +341,7 @@ for (const svc of SERVICES) {
   }
 }
 
-// â”€â”€ Logging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Logging ─────────────────────────────────────────────────
 const isDaemon = process.argv.includes('--daemon');
 function log(level, msg) {
   const line = `[${new Date().toISOString()}] [${level}] ${sanitizeText(msg)}`;
@@ -336,7 +349,7 @@ function log(level, msg) {
   if (!isDaemon) console.log(line);
 }
 
-// â”€â”€ Health checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Health checks ───────────────────────────────────────────
 function checkHttp(url, timeoutMs, skipAuth = false) {
   return new Promise((resolve) => {
     const parsed = new URL(url);
@@ -380,7 +393,29 @@ function checkProcessByName(exeName) {
       ['process', 'where', `name='${exeName}'`, 'get', 'processid', '/format:csv'],
       { encoding: 'utf8', timeout: 5000, windowsHide: true }
     );
-    return out.includes(',');
+    // WHY THIS IS NOT `out.includes(',')`
+    // -----------------------------------
+    // When the WHERE clause matches nothing, WMIC prints the CSV header anyway
+    // and then says so on the next line:
+    //
+    //     Node,
+    //
+    //     No Instance(s) Available.
+    //
+    // That header row contains a comma. So testing for one returned TRUE for
+    // every name, including ones with no process at all, and this function could
+    // not report unhealthy for any input.
+    //
+    // That is not theoretical. This is the ONLY health check pg has, so a dead
+    // Postgres was reported healthy on every tick and never restarted - the DB
+    // stayed down while the dashboard showed it green, and every /api/dao/*
+    // route and the activity log failed on ECONNREFUSED with nothing in the
+    // supervisor log to explain it.
+    //
+    // Require a real data row instead: a CSV line whose final field is a PID.
+    // The header's final field is empty, and the "No Instance" line has no
+    // comma at all, so neither can satisfy this.
+    return out.split(/\r?\n/).some((line) => /,\s*\d+\s*$/.test(line));
   } catch {
     return false;
   }
@@ -434,7 +469,7 @@ function pruneLegacyState() {
   if (stale.length > 0) saveState(state);
 }
 
-// â”€â”€ Duplicate Runtime Detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Duplicate Runtime Detection ──────────────────────────────
 // Scans for duplicate instances of known service scripts and kills extras.
 // Keeps the instance with the lowest PID (oldest process).
 // Runs on pre-flight and periodically in the health loop.
@@ -462,7 +497,7 @@ function deduplicateRuntimes() {
       );
       // Find all PIDs running this script
       const lines = out.split('\n').filter(l => l.includes(script));
-      if (lines.length <= 1) continue; // 0 or 1 instance â€” fine
+      if (lines.length <= 1) continue; // 0 or 1 instance — fine
 
       // Parse PIDs: format is "Node,PID,node relay/server.js" or similar
       const pids = [];
@@ -492,7 +527,7 @@ function deduplicateRuntimes() {
         }
       }
     } catch {
-      // WMIC failure â€” skip this script
+      // WMIC failure — skip this script
     }
   }
   if (totalKilled > 0) {
@@ -546,7 +581,7 @@ function startService(svc) {
       // detached its real child. The health check will catch a real outage.
       if (svc.wrapperExits && code === 0) {
         log('INFO', `${svc.name} wrapper detached (real child tracked via health check)`);
-        // Don't nullify childPid for wrappers â€” the health check handles it
+        // Don't nullify childPid for wrappers — the health check handles it
         return;
       }
       const reason = code !== null ? `exit_code_${code}` : `signal_${signal}`;
@@ -574,7 +609,7 @@ async function superviseLoop() {
     _dedupDone = true;
   }
 
-  // â”€â”€ Process agent-queued service actions â”€â”€
+  // ── Process agent-queued service actions ──
   // The relay's `service_control` tool writes actions here; supervisor executes them.
   try {
     const { readFileSync, writeFileSync } = await import('fs');
@@ -676,14 +711,14 @@ async function superviseLoop() {
   }
 }
 
-// â”€â”€ Scheduled task monitor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Scheduled task monitor ──────────────────────────────────
 // Cache the per-task PS scripts to avoid disk churn on every check.
 const TASK_SCRIPT_DIR = join(DATA_DIR, 'task-scripts');
 mkdirSync(TASK_SCRIPT_DIR, { recursive: true });
 
 function getTaskScriptPath(taskName) {
   // Sanitize task name for filesystem; Windows allows most chars in filenames
-  // but not <>:"/\|?* â€” and task names use '-' and '_' which are fine.
+  // but not <>:"/\|?* — and task names use '-' and '_' which are fine.
   const safe = taskName.replace(/[^A-Za-z0-9._-]/g, '_');
   return join(TASK_SCRIPT_DIR, `${safe}.ps1`);
 }
@@ -752,7 +787,7 @@ if ($info) {
   saveState(state);
 }
 
-// â”€â”€ Resend alert â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Resend alert ────────────────────────────────────────────
 async function sendAlert(subject, body) {
   if (ALERTS_DISABLED) {
     log('INFO', `[Alert suppressed] ${subject}: ${body.slice(0, 80)}`);
@@ -783,7 +818,7 @@ async function sendAlert(subject, body) {
   }
 }
 
-// â”€â”€ Install as Windows Task â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Install as Windows Task ─────────────────────────────────
 async function installTask() {
   const scriptPath = join(__dirname, 'supervisor.mjs').replace(/\\/g, '\\\\');
   const nodePath = process.execPath.replace(/\\/g, '\\\\');
@@ -792,7 +827,7 @@ async function installTask() {
   <RegistrationInfo>
     <Date>${new Date().toISOString()}</Date>
     <Author>Vex</Author>
-    <Description>Vex Supervisor â€” keeps relay + campaign scheduler alive, monitors scheduled tasks</Description>
+    <Description>Vex Supervisor — keeps relay + campaign scheduler alive, monitors scheduled tasks</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -834,7 +869,7 @@ async function installTask() {
   log('INFO', `  schtasks /create /tn "Vex-Supervisor" /xml "${xmlPath}" /f`);
 }
 
-// â”€â”€ Main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Main ────────────────────────────────────────────────────
 async function main() {
   log('INFO', `Vex supervisor starting (pid ${process.pid}, daemon=${isDaemon})`);
 

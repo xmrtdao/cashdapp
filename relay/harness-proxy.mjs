@@ -34,6 +34,27 @@ import net from 'net';
 import { readFileSync, statSync } from 'fs';
 import { join } from 'path';
 
+/**
+ * Read one value out of an env file, without reading the file into a log.
+ *
+ * The harness proxies need a credential, and a credential in a log is a
+ * credential in a transcript. This returns the value and nothing else.
+ */
+function readEnvValue(envPath, name) {
+  try {
+    const text = readFileSync(envPath, 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i <= 0) continue;
+      if (t.slice(0, i).trim() !== name) continue;
+      return t.slice(i + 1).trim().replace(/^["']|["']$/g, '');
+    }
+  } catch { /* no env file, or unreadable */ }
+  return null;
+}
+
 // Pull the newest one-time token dsh wrote to its launch log. The launcher
 // appends a "dsh web: http://127.0.0.1:3080/?token=..." line per launch, so
 // the LAST match in the file is the live one. Cached on mtime.
@@ -142,6 +163,25 @@ function makeHarnessProxy({ name, listenPort, targetPort, prepare, getInjectedHe
 export function startHarnessProxies({ root, logger = console }) {
   const servers = [];
 
+  // opencode's API is auth-walled: the CLI and the server must agree on one
+  // password, and the CLI presents it as
+  //   Authorization: Basic base64("opencode:" + password)
+  //
+  // The proxy injects it, the way it already injects dsh's auth cookie, so
+  // that nothing has to know the password to use the harness: the operator's
+  // dashboard pane and the fleet's worker both go through here.
+  //
+  // A request that already carries its own Authorization header keeps it - a
+  // client that knows the password is not overridden by ours.
+  const opencodePassword = readEnvValue(join(root, 'relay', '.env'), 'OPENCODE_SERVER_PASSWORD');
+  if (!opencodePassword) {
+    logger.warn?.('[harness-proxy] opencode: OPENCODE_SERVER_PASSWORD is not set in relay/.env, '
+      + 'so the API will refuse proxied calls');
+  }
+  const opencodeAuth = opencodePassword
+    ? 'Basic ' + Buffer.from(`opencode:${opencodePassword}`).toString('base64')
+    : null;
+
   // opencode web UI. Verified 2026-10-10: the UI and everything it polls
   // (/config, /session, /event, /provider, /path) are anonymous; only the
   // /api/* namespace is auth-walled and the UI doesn't use it. The proxy
@@ -151,6 +191,11 @@ export function startHarnessProxies({ root, logger = console }) {
     listenPort: 4130,
     targetPort: 4096,
     logger,
+    getInjectedHeaders: (req) => {
+      if (!opencodeAuth) return {};
+      if (req.headers.authorization) return {};
+      return { 'Authorization': opencodeAuth };
+    },
   }));
 
   // dsh (deepseek harness) web UI. Server-side token handshake:

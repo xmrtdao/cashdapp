@@ -109,3 +109,93 @@ constraint.
 `assertCanRepresent` is why a mistyped address cannot send anything. Never set
 `claimed_email` by hand to get past it, and never weaken it to make a test
 pass. If a test needs a verified client, verify one for real.
+
+### Never rewrite a source file with PowerShell
+
+On this machine PowerShell is **5.1 Desktop**. It decodes files with the ANSI
+code page (`cp1252`) and writes with `Set-Content -Encoding UTF8`, which adds a
+BOM. So a round-trip of
+
+```powershell
+$t = Get-Content f.mjs -Raw; $t = $t -replace 'x','y'; Set-Content f.mjs $t -Encoding UTF8
+```
+
+turns a real em dash (U+2014, bytes `E2 80 94`) into three separate
+characters — U+00E2, U+20AC, U+201D — and a box-drawing rule (U+2500) into
+three more. **The file is still valid UTF-8**, so every other tool opens it
+happily and nothing complains until a human notices that a client's surname is
+now misspelled in an error message.
+
+(This paragraph deliberately spells the affected codepoints instead of showing
+them: a literal example would be indistinguishable from real corruption, and
+`scripts/check-encoding.mjs` would correctly, permanently flag this file.)
+
+This happened three times in one session, corrupting user-facing strings in
+`relay/routes/pfp-booking.mjs`. It has also silently damaged two files that
+predate that work: `relay/routes/pfp.js` (158 characters) and
+`relay/tests/jobby-tracks-plan.test.mjs` (142).
+
+**The rule:** never use `Get-Content`/`Set-Content` to edit source. Use the
+editor tool, or `py`, or `node -e`. PowerShell is for running commands, not for
+rewriting files.
+
+**The backstop** — because a profile does not help (verified: the agent harness,
+CI and cron all start without one, so patching
+`Microsoft.PowerShell_profile.ps1` fixes nothing that matters):
+
+```
+node scripts/check-encoding.mjs          # report; exit 1 if anything is wrong
+node scripts/check-encoding.mjs --fix    # repair in place
+```
+
+A `pre-commit` hook runs the check on staged text files, so this cannot reach
+the repo again from *any* tool. It blocks on mojibake and on stray BOMs.
+
+If the hook blocks a file you believe is clean, trust it before overriding:
+the first version of that checker reported a file with 1400 mangled characters
+as clean, because Node has no `cp1252` encoding and the error was swallowed.
+The current one reverses the mangling and confirms the reversal *removes*
+mangled characters, which a clean file cannot satisfy.
+
+---
+
+## Fleet Operations: Project State and Verification
+
+> **Status: the work gate CLI is retired and no longer required.** The
+> `scripts/xmrt_workgate.py` CLI and its `fleet_ops` schema remain on disk as
+> dormant infrastructure — nothing invokes them. The CLI's behaviour was
+> checked by hand (mutual exclusion, refused no-op completion, refused rebase
+> from a failed receipt, stale-claim recovery all behaved correctly), but its
+> test suite fails 8 of 10 because it hardcodes a Git-Bash path, and it was
+> retired because it cost more in friction than it returned. **No part of the
+> running system depended on it** — nothing in `relay/`, `suite/`, the
+> supervisor, the cron engine or any MCP server references it. Do not run it.
+> See `README_PROJECT_STATE.md` before touching anything in `fleet_ops`.
+>
+> The rules below were the point of that tool, and they stand on their own. They
+> are conventions now, not mechanically enforced — which means **you** are
+> responsible for honouring them.
+
+### How work is actually tracked
+
+There is no automatic project-state record. Git history is the record. When you
+change something, say so plainly in your report: which files, what the change
+does, and **how you verified it**. A claim you cannot evidence is not a claim.
+
+### Operating rules
+
+- **Conversation history and generic logs are not authoritative state.** They
+  record what was said, not what is true. Verify against the running system.
+- **An inspection is not an implementation.** Reading a file does not change it.
+  If a task only ever involved reading, say that — do not report it as done.
+- **A modified file is not verified.** Editing something proves nothing about
+  whether it works. Run the test, hit the endpoint, or walk the flow. Report the
+  actual output. If you could not verify it, say so in those words.
+- **"Recovery proven" requires a restore you actually performed.** Do not claim
+  a backup restores correctly because a backup exists.
+- **Historical archive manifests must never be rewritten from live database
+  state.** Archive manifests are immutable records of what was; live database
+  state is the current truth. Do not use live state to rewrite archives.
+- **Do not manufacture a verification signal.** No marking something verified
+  because verifying it was inconvenient, and no weakening a check so a test
+  passes. If a gate blocks you, say the gate blocked you.

@@ -5,7 +5,9 @@
     "type": "sql",
     "name": "batch-vectorize-memories",
     "sql": "SELECT public.batch_vectorize_memories();",
-    "desc": "Batch vectorizes all new memories"
+    "desc": "Batch vectorizes all new memories",
+    "disabled": true,
+    "note": "[duplicate of cron.job 36; disabled so it runs once]"
   },
   {
     "id": 218,
@@ -44,7 +46,9 @@
     "type": "sql",
     "name": "check-knowledge-drift",
     "sql": "SELECT public.check_knowledge_snippet_drift_and_alert();",
-    "desc": "Detects when knowledge goes stale"
+    "desc": "Detects when knowledge goes stale",
+    "disabled": true,
+    "note": "[duplicate of cron.job 37; disabled so it runs once]"
   },
   {
     "id": 199,
@@ -52,7 +56,9 @@
     "type": "sql",
     "name": "repair-knowledge-drift",
     "sql": "SELECT public.repair_then_alert_knowledge_snippet_drift();",
-    "desc": "Auto-repairs stale knowledge"
+    "desc": "Auto-repairs stale knowledge",
+    "disabled": true,
+    "note": "[duplicate of cron.job 38; disabled so it runs once]"
   },
   {
     "id": 204,
@@ -81,8 +87,8 @@
     "name": "requeue-failed-vectorize",
     "sql": "SELECT * FROM public.requeue_safe_failed_vectorize_jobs(3, interval '7 days', 100);",
     "desc": "Retries failed vectorization",
-    "disabled": false,
-    "note": "Re-enabled 2026-07-20. webhook_logs is empty (0 rows), no runaway risk."
+    "disabled": true,
+    "note": "Re-enabled 2026-07-20. webhook_logs is empty (0 rows), no runaway risk. [duplicate of cron.job 39; disabled so it runs once]"
   },
   {
     "id": 82,
@@ -90,7 +96,9 @@
     "type": "sql",
     "name": "generate-conversation-insights",
     "sql": "SELECT public.generate_conversation_insights();",
-    "desc": "Deep conversation insight generation (daily 2AM)"
+    "desc": "Deep conversation insight generation (daily 2AM)",
+    "disabled": true,
+    "note": "[duplicate of cron.job 40; disabled so it runs once]"
   },
   {
     "id": 105,
@@ -98,31 +106,9 @@
     "type": "sql",
     "name": "refresh-conversation-view",
     "sql": "SELECT count(*) FROM public.recent_conversation_messages;",
-    "desc": "Keeps conversation view current (local-sb: base table, COUNT only)"
-  },
-  {
-    "id": 170,
-    "schedule": "2,17,32,47 * * * *",
-    "type": "ef",
-    "name": "task-auto-advance",
-    "fn": "task-auto-advance",
-    "body": {},
-    "desc": "Auto-advances pending tasks",
+    "desc": "Keeps conversation view current (local-sb: base table, COUNT only)",
     "disabled": true,
-    "note": "Duplicate of 169 (task-auto-advance-fast, */10)"
-  },
-  {
-    "id": 197,
-    "schedule": "9,39 * * * *",
-    "type": "ef",
-    "name": "task-auto-advance-batch",
-    "fn": "task-auto-advance",
-    "body": {
-      "action": "run_all"
-    },
-    "desc": "Batch task auto-advance",
-    "disabled": true,
-    "note": "Duplicate of 169 (task-auto-advance-fast, */10)"
+    "note": "[duplicate of cron.job 41; disabled so it runs once]"
   },
   {
     "id": 169,
@@ -191,48 +177,6 @@
     "note": " [DISABLED: was writing FABRICATION_DETECTED events directly, bypassing graduated scoring]"
   },
   {
-    "id": 168,
-    "schedule": "18,48 * * * *",
-    "type": "ef",
-    "name": "suite-task-automation-alt",
-    "fn": "suite-task-automation-engine",
-    "body": {
-      "action": "run_all"
-    },
-    "desc": "Suite task automation (alt schedule)",
-    "disabled": true,
-    "note": "Duplicate of 181 (suite-task-automation-engine, */10) [DISABLED: was writing FABRICATION_DETECTED events directly, bypassing graduated scoring]"
-  },
-  {
-    "id": 182,
-    "schedule": "4,19,34,49 * * * *",
-    "type": "ef",
-    "name": "suite-task-auto-engine",
-    "fn": "suite-task-automation-engine",
-    "body": {
-      "action": "run_all"
-    },
-    "desc": "Suite task automation (quad schedule)",
-    "disabled": true,
-    "note": "Duplicate of 181 (suite-task-automation-engine, */10) [DISABLED: was writing FABRICATION_DETECTED events directly, bypassing graduated scoring]"
-  },
-  {
-    "id": 178,
-    "schedule": "1,6,11,16,21,26,31,36,41,46,51,56 * * * *",
-    "type": "sql",
-    "name": "agent-work-executor",
-    "sql": "SELECT app.run_agent_work_executor(5);",
-    "desc": "Runs agent work executor (every 5min)"
-  },
-  {
-    "id": 179,
-    "schedule": "0 * * * *",
-    "type": "sql",
-    "name": "github-issue-scanner",
-    "sql": "SELECT app.run_github_issue_scanner();",
-    "desc": "Scans GitHub for new issues"
-  },
-  {
     "id": 87,
     "schedule": "0 */6 * * *",
     "type": "ef",
@@ -284,7 +228,9 @@
     "type": "sql",
     "name": "check-agent-heartbeats",
     "sql": "SELECT util.check_agent_heartbeats();",
-    "desc": "Checks agent heartbeats"
+    "desc": "Checks agent heartbeats",
+    "disabled": true,
+    "note": "[duplicate of cron.job 44; disabled so it runs once]"
   },
   {
     "id": 174,
@@ -292,7 +238,9 @@
     "type": "sql",
     "name": "capture-lock-blockers",
     "sql": "SELECT util.capture_lock_blockers();",
-    "desc": "Captures lock blockers"
+    "desc": "Captures lock blockers",
+    "disabled": true,
+    "note": "[duplicate of cron.job 45; disabled so it runs once]"
   },
   {
     "id": 192,
@@ -327,7 +275,9 @@
     "type": "sql",
     "name": "trigger-daily-discussion",
     "sql": "SELECT public.trigger_daily_discussion_post();",
-    "desc": "Triggers daily discussion post"
+    "desc": "Triggers daily discussion post",
+    "disabled": true,
+    "note": "[duplicate of cron.job 46; disabled so it runs once]"
   },
   {
     "id": 90,
@@ -540,7 +490,9 @@
     "type": "sql",
     "name": "cleanup-webhook-logs",
     "sql": "DELETE FROM public.webhook_logs WHERE created_at < now() - interval '30 days'; DELETE FROM public.conversation_sessions WHERE created_at < now() - interval '30 days';",
-    "desc": "Cleanup old logs and sessions (hourly)"
+    "desc": "Cleanup old logs and sessions (hourly)",
+    "disabled": true,
+    "note": "[duplicate of cron.job 47; disabled so it runs once]"
   },
   {
     "id": 103,
@@ -548,7 +500,9 @@
     "type": "sql",
     "name": "prune-http-responses",
     "sql": "SELECT public.prune_net_http_response(3, 5000);",
-    "desc": "Prune old net_http responses"
+    "desc": "Prune old net_http responses",
+    "disabled": true,
+    "note": "[duplicate of cron.job 48; disabled so it runs once]"
   },
   {
     "id": 104,
@@ -556,7 +510,9 @@
     "type": "sql",
     "name": "prune-http-responses-force",
     "sql": "SELECT public.prune_net_http_response_until_clear(3);",
-    "desc": "Force-prune http responses until clear"
+    "desc": "Force-prune http responses until clear",
+    "disabled": true,
+    "note": "[duplicate of cron.job 49; disabled so it runs once]"
   },
   {
     "id": 173,
@@ -564,7 +520,9 @@
     "type": "sql",
     "name": "cleanup-stale-device-sessions",
     "sql": "SELECT cleanup_stale_device_sessions();",
-    "desc": "Cleanup stale device sessions"
+    "desc": "Cleanup stale device sessions",
+    "disabled": true,
+    "note": "[duplicate of cron.job 50; disabled so it runs once]"
   },
   {
     "id": 175,
@@ -572,7 +530,9 @@
     "type": "sql",
     "name": "purge-lock-diagnostics",
     "sql": "SELECT util.purge_old_lock_diagnostics();",
-    "desc": "Purge old lock diagnostics (daily 3:08AM)"
+    "desc": "Purge old lock diagnostics (daily 3:08AM)",
+    "disabled": true,
+    "note": "[duplicate of cron.job 51; disabled so it runs once]"
   },
   {
     "id": 221,
@@ -580,7 +540,9 @@
     "type": "sql",
     "name": "purge-cron-execution-logs",
     "sql": "DELETE FROM cron_execution_log WHERE created_at < now() - interval '30 days';",
-    "desc": "Purge old cron execution logs (weekly)"
+    "desc": "Purge old cron execution logs (weekly)",
+    "disabled": true,
+    "note": "[duplicate of cron.job 31; disabled so it runs once]"
   },
   {
     "id": 79,
@@ -588,7 +550,9 @@
     "type": "sql",
     "name": "process-scheduled-actions",
     "sql": "UPDATE public.scheduled_actions SET next_execution = now() WHERE is_active = true AND next_execution <= now() AND (next_execution IS NULL OR next_execution <= now());",
-    "desc": "Process scheduled actions queue"
+    "desc": "Process scheduled actions queue",
+    "disabled": true,
+    "note": "[duplicate of cron.job 53; disabled so it runs once]"
   },
   {
     "id": 80,
@@ -596,7 +560,9 @@
     "type": "sql",
     "name": "timeout-stale-tasks",
     "sql": "UPDATE public.task_executions SET status = 'timeout', error_message = 'Task execution timeout', execution_end = now() WHERE status = 'running' AND execution_start < now() - interval '30 minutes';",
-    "desc": "Timeout stale running tasks"
+    "desc": "Timeout stale running tasks",
+    "disabled": true,
+    "note": "[duplicate of cron.job 54; disabled so it runs once]"
   },
   {
     "id": 149,
@@ -657,16 +623,20 @@
     "schedule": "0 3 * * 1",
     "type": "sql",
     "name": "cuttlefish-trustgraph-decay",
-    "sql": "UPDATE app.cuttlefish_agents SET trust_score = GREATEST(CASE cac_tier WHEN 'anchor' THEN 70 WHEN 'enterprise' THEN 55 WHEN 'studio' THEN 40 WHEN 'developer' THEN 30 ELSE 20 END, trust_score - 2.0), trust_score_updated_at = NOW() WHERE trust_score_updated_at < NOW() - INTERVAL '7 days' AND trust_score > CASE cac_tier WHEN 'anchor' THEN 70 WHEN 'enterprise' THEN 55 WHEN 'studio' THEN 40 WHEN 'developer' THEN 30 ELSE 20 END;",
-    "desc": "TG-001 Phase 2: Weekly decay (-2/week) for agents with stale positive signals"
+    "sql": "UPDATE app.registry_agents SET trust_score = GREATEST(CASE cac_tier WHEN 'anchor' THEN 70 WHEN 'enterprise' THEN 55 WHEN 'studio' THEN 40 WHEN 'developer' THEN 30 ELSE 20 END, trust_score - 2.0), trust_score_updated_at = NOW() WHERE trust_score_updated_at < NOW() - INTERVAL '7 days' AND trust_score > CASE cac_tier WHEN 'anchor' THEN 70 WHEN 'enterprise' THEN 55 WHEN 'studio' THEN 40 WHEN 'developer' THEN 30 ELSE 20 END;",
+    "desc": "TG-001 Phase 2: Weekly decay (-2/week) for agents with stale positive signals",
+    "disabled": true,
+    "note": "[duplicate of cron.job 55; disabled so it runs once]"
   },
   {
     "id": 302,
     "schedule": "15 * * * *",
     "type": "sql",
     "name": "cuttlefish-lifecycle-automation",
-    "sql": "UPDATE app.cuttlefish_agents SET lifecycle_status = 'revoked' WHERE trust_score < 10 AND lifecycle_status != 'revoked'; UPDATE app.cuttlefish_agents SET lifecycle_status = 'suspended' WHERE trust_score >= 10 AND trust_score < 20 AND lifecycle_status NOT IN ('suspended', 'revoked'); UPDATE app.cuttlefish_agents SET lifecycle_status = 'active' WHERE trust_score >= 25 AND lifecycle_status = 'suspended';",
-    "desc": "TG-001 Phase 2: Lifecycle automation (SUSPENDED/REVOKED with hysteresis)"
+    "sql": "UPDATE app.registry_agents SET lifecycle_status = 'revoked' WHERE trust_score < 10 AND lifecycle_status != 'revoked'; UPDATE app.registry_agents SET lifecycle_status = 'suspended' WHERE trust_score >= 10 AND trust_score < 20 AND lifecycle_status NOT IN ('suspended', 'revoked'); UPDATE app.registry_agents SET lifecycle_status = 'active' WHERE trust_score >= 25 AND lifecycle_status = 'suspended';",
+    "desc": "TG-001 Phase 2: Lifecycle automation (SUSPENDED/REVOKED with hysteresis)",
+    "disabled": true,
+    "note": "[duplicate of cron.job 56; disabled so it runs once]"
   },
   {
     "id": 225,
@@ -686,75 +656,11 @@
   },
   {
     "id": 227,
-    "schedule": "*/10 * * * *",
+    "schedule": "17,47 * * * *",
     "type": "local",
     "name": "fleet-chat-task-creator",
     "action": "fleet-chat-task-creator",
     "desc": "Fleet chat task creator — after a conversation cycle completes, creates a task from actionable findings (every 10min)"
-  },
-  {
-    "id": 1,
-    "name": "sync-hermes-memory",
-    "schedule": "*/5 * * * *",
-    "type": "sql",
-    "sql": "SELECT 1",
-    "disabled": false
-  },
-  {
-    "id": 2,
-    "name": "pipeline-orchestrator",
-    "schedule": "*/5 * * * *",
-    "type": "sql",
-    "sql": "SELECT 1",
-    "disabled": false
-  },
-  {
-    "id": 3,
-    "name": "agent-workflow-engine",
-    "schedule": "*/15 * * * *",
-    "type": "sql",
-    "sql": "SELECT 1",
-    "disabled": false
-  },
-  {
-    "id": 4,
-    "name": "trustgraph-violation-scanner",
-    "schedule": "*/15 * * * *",
-    "type": "sql",
-    "sql": "SELECT 1",
-    "disabled": false
-  },
-  {
-    "id": 5,
-    "name": "task-discussion-announcer",
-    "schedule": "*/15 * * * *",
-    "type": "sql",
-    "sql": "SELECT 1",
-    "disabled": false
-  },
-  {
-    "id": 6,
-    "name": "fleet-chat-productivity-agent",
-    "schedule": "0 * * * *",
-    "type": "sql",
-    "sql": "SELECT 1",
-    "disabled": false
-  },
-  {
-    "id": 7,
-    "name": "arch-ecosystem-scanner",
-    "schedule": "0 */6 * * *",
-    "type": "sql",
-    "sql": "SELECT 1",
-    "disabled": false
-  },
-  {
-    "id": 12,
-    "name": "hermes-comms",
-    "schedule": "* * * * *",
-    "type": "sql",
-    "sql": "SELECT 1",
-    "disabled": false
   },
   {
     "id": 14,
@@ -774,6 +680,33 @@
     "type": "ef",
     "fn": "paragraph-publisher",
     "desc": "Daily news research + publish to Paragraph",
+    "disabled": false
+  },
+  {
+    "id": 303,
+    "schedule": "*/15 * * * *",
+    "type": "local",
+    "action": "jobby-heartbeat",
+    "name": "Jobby Heartbeat",
+    "desc": "Runs the Jobby loop heartbeat tick: lease, decide, act, log. Runs every 15 minutes.",
+    "disabled": false
+  },
+  {
+    "id": 304,
+    "schedule": "0 8 * * *",
+    "type": "local",
+    "action": "jobby-morning-summary",
+    "name": "Jobby Morning Summary Email",
+    "desc": "Sends a morning summary email to registered users with the day's plan. Runs at 8:00 AM.",
+    "disabled": false
+  },
+  {
+    "id": 305,
+    "schedule": "0 18 * * *",
+    "type": "local",
+    "action": "jobby-evening-summary",
+    "name": "Jobby Evening Summary Email",
+    "desc": "Sends an evening summary email to registered users with what was accomplished. Runs at 6:00 PM.",
     "disabled": false
   }
 ]

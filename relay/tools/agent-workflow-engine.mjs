@@ -113,12 +113,33 @@ async function writeTrustEventViaMcp(did, eventType, delta, reference, note) {
 export async function runWorkflowEngine() {
   log('Starting agent workflow cycle...');
   const results = { tasksAdvanced: 0, trustEvents: 0, errors: [] };
-  
+
+  // ── ADVANCEMENT IS NOT THIS ENGINE'S JOB ──
+  //
+  // It used to be, in two places: it moved tasks out of 'VERIFY'/'REVIEW' into
+  // COMPLETED whenever they had an artifact, and it moved any task forward
+  // whenever a new artifact appeared. Both used a SECOND stage vocabulary
+  // (PENDING → PLAN → EXECUTE → DISCUSS → INTEGRATE → VERIFY → COMPLETED),
+  // and both advanced on the PRESENCE of an artifact rather than on the work
+  // being done. That is the same failure the evidence gate was built to stop,
+  // and it would have written stages ('PLAN', 'VERIFY') that do not exist in
+  // the board's vocabulary.
+  //
+  // There is one advancement authority now: task-auto-advance, which uses the
+  // board's own stage list, requires the checklist to be complete, and refuses
+  // to complete a task without an artifact that points at the work. This
+  // engine keeps the part that is genuinely its own - trust accounting for
+  // completed work.
+  const ADVANCEMENT_DISABLED = true;
+
   try {
     const { default: pg } = await import('pg');
     const pool = new pg.Pool({ connectionString: 'postgres://postgres@127.0.0.1:5432/xmrt_suite', max: 3 });
     
     // ── Phase 1: Advance tasks that have artifacts in VERIFY/REVIEW stage ──
+    if (ADVANCEMENT_DISABLED) {
+      log('  Phase 1 (advancement) is disabled: task-auto-advance owns stage changes.');
+    }
     try {
       const tasksToComplete = await pool.query(
         `SELECT t.id, t.title, t.assignee_agent_id, t.priority, t.category
@@ -131,7 +152,7 @@ export async function runWorkflowEngine() {
            )`
       );
       
-      for (const task of tasksToComplete.rows) {
+      for (const task of (ADVANCEMENT_DISABLED ? [] : tasksToComplete.rows)) {
         // Set to COMPLETED (engine's stage system) — advance_task's COMPLETION is also treated as terminal
         await pool.query(
           `UPDATE app.tasks SET stage = 'COMPLETED', status = 'COMPLETED', 
@@ -189,7 +210,7 @@ export async function runWorkflowEngine() {
          ORDER BY t.id`
       );
       
-      for (const task of tasksWithNewArtifacts.rows) {
+      for (const task of (ADVANCEMENT_DISABLED ? [] : tasksWithNewArtifacts.rows)) {
         // Map System A stage names to System B for index lookup
         const normalizedStage = STAGE_ALIAS[task.stage] || task.stage;
         const currentIdx = STAGE_ORDER.indexOf(normalizedStage);

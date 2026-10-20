@@ -116,6 +116,11 @@ serve(async (req) => {
           .select('*')
           .not('assignee_agent_id', 'is', null)
           .in('status', ['CLAIMED', 'IN_PROGRESS', 'REVIEW'])
+          // A task an operator has held is not this executor's to touch. The
+          // query never looked at blocking_reason, so a task parked for a
+          // decision - "awaiting operator decision" - was worked anyway, which
+          // is the opposite of what a hold means.
+          .is('blocking_reason', null)
           .order('priority', { ascending: false })
           .limit(max_tasks);
 
@@ -252,6 +257,20 @@ async function processTaskWork(supabase: any, task: Task): Promise<any> {
   console.log(`⚙️ Processing task ${task.id}: ${task.title}`);
   console.log(`   Checklist: ${checklist.length} items, ${completed.length} completed`);
 
+  // ── A HELD TASK IS NOT THIS EXECUTOR'S TO TOUCH ──
+  //
+  // The batch query filters these out, but process_single_task does not go
+  // through that query, so the check has to be here as well: an operator's hold
+  // means the work does not happen, on any path into this function.
+  if (task.blocking_reason) {
+    console.log(`   Task is held: "${task.blocking_reason}" - leaving it alone`);
+    return {
+      task_id: task.id,
+      status: 'skipped',
+      reason: `awaiting_operator: ${task.blocking_reason}`,
+    };
+  }
+
   // ── REVIEW is not automatically the executor's to close ──
   //
   // A task in REVIEW has been parked for a reason, and there are two different
@@ -282,6 +301,137 @@ async function processTaskWork(supabase: any, task: Task): Promise<any> {
   }
 
   // If no checklist, we can't do documented work
+  // ── IS THIS STILL WORK? ──
+  //
+  // The executor used to take whatever was assigned and work it, because
+  // "assigned" was the only test it applied. So a task whose problem had
+  // already been fixed by something else, a task another task had taken over,
+  // and a task that was really a duplicate of a third one all got executed -
+  // and every one of them produced a completion that looked identical to real
+  // work. The board looked busy and the work was hollow.
+  //
+  // The question cannot be answered from inside the task's own row. It is
+  // answered against the state of the whole board, so the pre-flight is given
+  // the other open tasks and asked one question with four answers.
+  //
+  // The asymmetry is deliberate: anything unclear is NEEDED. Doing a task that
+  // did not need doing costs a little time; dropping a task that did costs a
+  // real piece of work, and it is invisible.
+  const preflight = await preflightTask(supabase, task, checklist);
+  console.log(`   Pre-flight: ${preflight.verdict}${preflight.reason ? ` - ${preflight.reason}` : ''}`);
+
+  if (preflight.verdict === 'ALREADY_DONE' && preflight.proof_url) {
+    // The proof has to RESOLVE.
+    //
+    // Asking a model for a URL and believing the answer is how you get a
+    // completion with an invented address on it. In a live test the model
+    // answered ALREADY_DONE with "https://example.com/pfp-booking-tables-state"
+    // for a task whose only work had been a knowledge search that returned
+    // nothing - a URL that does not exist. A URL is evidence only if fetching
+    // it gets something back.
+    const proof = await verifyEvidenceUrl(preflight.proof_url);
+    if (!proof.ok) {
+      console.log(`   Pre-flight proof does not resolve (${proof.status || 'no response'}) - treating the task as still needing work`);
+      await supabase
+        .from('tasks')
+        .update({
+          metadata: {
+            ...(task.metadata || {}),
+            preflight_at: new Date().toISOString(),
+            preflight_verdict: 'ALREADY_DONE_REJECTED',
+            preflight_detail: `the offered proof did not resolve (${proof.status || 'no response'}): ${preflight.proof_url}`,
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', task.id);
+    } else {
+      // The work is finished and something shows it. That is a fact about the
+      // world, not a claim by the agent, so it closes the task - with the proof
+      // attached and the reason recorded.
+      await supabase.from('task_artifacts').insert({
+        task_id: task.id,
+        artifact_type: 'already-done',
+        artifact_url: preflight.proof_url,
+        description: `Closed without work: ${preflight.reason}`,
+        created_at: new Date().toISOString(),
+      });
+      const { error: doneErr } = await supabase
+        .from('tasks')
+        .update({
+          status: 'DONE',
+          closed_reason: 'already_done',
+          progress_percentage: 100,
+          metadata: {
+            ...(task.metadata || {}),
+            closed_at: new Date().toISOString(),
+            closed_by: 'agent-work-executor',
+            closed_detail: preflight.reason,
+            proof_url: preflight.proof_url,
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', task.id);
+      if (doneErr) {
+        console.log(`   Could not close as already done: ${doneErr.message}`);
+        return { task_id: task.id, status: 'work_failed', reason: 'close_already_done_failed', error: doneErr.message };
+      }
+      return { task_id: task.id, status: 'closed_already_done', reason: preflight.reason, proof_url: preflight.proof_url };
+    }
+  }
+
+  if (preflight.verdict === 'SUPERSEDED' && preflight.superseded_by) {
+    // Another task took this over. The survivor is named, because a task that
+    // says "superseded" without saying by what is a claim - and the database
+    // refuses it (tasks_superseded_needs_survivor).
+    const { error: supErr } = await supabase
+      .from('tasks')
+      .update({
+        status: 'CANCELLED',
+        closed_reason: 'superseded',
+        superseded_by: preflight.superseded_by,
+        metadata: {
+          ...(task.metadata || {}),
+          closed_at: new Date().toISOString(),
+          closed_by: 'agent-work-executor',
+          closed_detail: preflight.reason,
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', task.id);
+    if (supErr) {
+      console.log(`   Could not close as superseded: ${supErr.message}`);
+      return { task_id: task.id, status: 'work_failed', reason: 'close_superseded_failed', error: supErr.message };
+    }
+    return {
+      task_id: task.id,
+      status: 'closed_superseded',
+      reason: preflight.reason,
+      superseded_by: preflight.superseded_by,
+    };
+  }
+
+  if (preflight.verdict === 'CANNOT_PROCEED') {
+    // Record why, and leave the task where it is. It is not done, and it will
+    // not be done by pretending it was.
+    await supabase
+      .from('tasks')
+      .update({
+        metadata: {
+          ...(task.metadata || {}),
+          preflight_at: new Date().toISOString(),
+          preflight_verdict: 'CANNOT_PROCEED',
+          preflight_detail: preflight.reason,
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', task.id);
+    return {
+      task_id: task.id,
+      status: 'skipped',
+      reason: `cannot_proceed: ${preflight.reason || 'no reason given'}`,
+    };
+  }
+
   // If no checklist, generate one automatically
   if (checklist.length === 0) {
     if (completed.length > 0) {
@@ -368,7 +518,90 @@ async function processTaskWork(supabase: any, task: Task): Promise<any> {
     // status change is a fact rather than a claim, and the guard has something
     // real to check.
     const workLog = Array.isArray((task.metadata || {})?.work_log) ? (task.metadata as any).work_log : [];
-    const evidenceUrl = `${RELAY_BASE_URL}/api/suite/tasks/${task.id}`;
+    const selfUrl = `${RELAY_BASE_URL}/api/suite/tasks/${task.id}`;
+
+    // The evidence has to point at the WORK, not at the task.
+    //
+    // The task's own record is not evidence of anything: it is the page the
+    // work would be described on, so pointing at it says "this task exists"
+    // and nothing more. The database refuses to count it now
+    // (app.artifact_is_self_referential), which leaves one way to finish -
+    // name the thing that was actually changed: a pull request, a file, a
+    // deployed endpoint, a commit.
+    const deliverable = findDeliverable(workLog, task.id);
+    if (!deliverable) {
+      // Nothing was produced that points at the work. Record the trail
+      // honestly and send the task to REVIEW: the work is not proven, and a
+      // board that says otherwise is the thing this change exists to stop.
+      await supabase.from('task_artifacts').insert({
+        task_id: task.id,
+        artifact_type: 'work-log',
+        artifact_url: selfUrl,
+        description: `Executor work log: ${completed.length} checklist item(s) completed, ${workLog.length} work record(s). `
+          + 'No deliverable URL was produced, so this does not count as evidence.',
+        created_at: new Date().toISOString(),
+      });
+      await supabase
+        .from('tasks')
+        .update({
+          status: 'REVIEW',
+          metadata: {
+            ...(task.metadata || {}),
+            terminal_reason: 'no_deliverable_evidence',
+            work_log: workLog,
+            completed_checklist_items: completed,
+            last_work_at: new Date().toISOString(),
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', task.id);
+      return {
+        task_id: task.id,
+        status: 'needs_review',
+        reason: 'no_deliverable_evidence',
+        summary: `All ${completed.length} checklist items were completed, but no work produced a URL that points at the work itself. `
+          + 'The task is parked for a human rather than marked done.',
+      };
+    }
+
+    // And the deliverable has to resolve. A URL that 404s is a guess, not a
+    // thing that exists, and a completion whose evidence cannot be fetched is
+    // a claim.
+    const verified = await verifyEvidenceUrl(deliverable);
+    if (!verified.ok) {
+      await supabase.from('task_artifacts').insert({
+        task_id: task.id,
+        artifact_type: 'work-log',
+        artifact_url: selfUrl,
+        description: `Executor work log: ${completed.length} checklist item(s) completed, ${workLog.length} work record(s). `
+          + `The offered deliverable (${deliverable}) did not resolve (${verified.status || 'no response'}), so it does not count as evidence.`,
+        created_at: new Date().toISOString(),
+      });
+      await supabase
+        .from('tasks')
+        .update({
+          status: 'REVIEW',
+          metadata: {
+            ...(task.metadata || {}),
+            terminal_reason: 'evidence_url_unresolved',
+            work_log: workLog,
+            completed_checklist_items: completed,
+            unverified_deliverable: deliverable,
+            last_work_at: new Date().toISOString(),
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', task.id);
+      return {
+        task_id: task.id,
+        status: 'needs_review',
+        reason: 'evidence_url_unresolved',
+        summary: `The work named ${deliverable} as its deliverable, but that URL did not resolve `
+          + `(${verified.status || 'no response'}). The task is parked for a human rather than marked done.`,
+      };
+    }
+
+    const evidenceUrl = deliverable;
 
     const { error: artError } = await supabase
       .from('task_artifacts')
@@ -498,13 +731,19 @@ async function processTaskWork(supabase: any, task: Task): Promise<any> {
     // insert-only, so the trail of what was actually done survives whatever
     // happens to the task row afterwards — which is what makes the evidence
     // the completion guard asks for worth anything.
+    //
+    // The URL is the DELIVERABLE when there is one — the file the worker
+    // wrote, or an address it quoted. The task's own page is only a fallback,
+    // and the completion guard does not count it: pointing at yourself is not
+    // evidence of anything.
     const itemSummary = workResult.summary ? String(workResult.summary) : '';
+    const evidenceForItem = workResult.deliverable || `${RELAY_BASE_URL}/api/suite/tasks/${task.id}`;
     await supabase
       .from('task_artifacts')
       .insert({
         task_id: task.id,
-        artifact_type: 'work-item',
-        artifact_url: `${RELAY_BASE_URL}/api/suite/tasks/${task.id}`,
+        artifact_type: workResult.deliverable ? 'work-item' : 'work-note',
+        artifact_url: evidenceForItem,
         description: `${nextItem} — ${itemSummary.slice(0, 600)}`,
         created_at: new Date().toISOString(),
       });
@@ -542,8 +781,435 @@ async function processTaskWork(supabase: any, task: Task): Promise<any> {
   }
 }
 
-async function executeChecklistItem(supabase: any, task: Task, item: string): Promise<{ success: boolean; summary?: string; error?: string }> {
+/**
+ * Is this task still work?
+ *
+ * The question is asked against the state of the whole board, because the two
+ * most common reasons a task should NOT be worked - "this was solved by
+ * something else" and "another task took this over" - are both invisible from
+ * inside the task's own row.
+ *
+ * The answer is deliberately asymmetric. NEEDED is the default: a task that did
+ * not need doing costs one pass of the executor, while a task that DID need
+ * doing and was quietly dropped is a piece of work nobody will ever notice
+ * missing.
+ */
+async function preflightTask(
+  supabase: any,
+  task: Task,
+  checklist: string[]
+): Promise<{ verdict: string; reason: string; proof_url?: string; superseded_by?: string }> {
+  const fallback = { verdict: 'NEEDED', reason: 'no preflight answer' };
+
+  let related: any[] = [];
+  try {
+    const { data: others } = await supabase
+      .from('tasks')
+      .select('id, title, stage, status, created_at, assignee_agent_id')
+      .in('status', ['PENDING', 'CLAIMED', 'IN_PROGRESS', 'REVIEW', 'BLOCKED'])
+      .limit(150);
+
+    // Titles that share their distinctive words are the ones worth showing.
+    // An agent asked about a duplicate cannot spot a duplicate it was never
+    // shown, so the board is read in full and the near-misses are named.
+    const stop = new Set([
+      'the', 'and', 'for', 'with', 'that', 'this', 'from', 'not', 'but', 'are', 'was',
+      'has', 'have', 'into', 'your', 'you', 'its', 'our', 'use', 'using', 'new', 'make',
+      'made', 'add', 'added', 'fix', 'fixed', 'update', 'updated', 'implement',
+      'implemented', 'create', 'created', 'review', 'reviewed', 'plan', 'planning',
+      'analyze', 'analyse', 'requirements', 'requirement', 'implementation', 'solution',
+      'pr', 'merge', 'work', 'working', 'ensure', 'verifying', 'validate', 'testing',
+      'test', 'run', 'remove', 'check', 'checks', 'need', 'needs', 'across', 'every',
+    ]);
+    const wordsOf = (t: any) => new Set(
+      String(t || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9 ]/g, ' ')
+        .split(/\s+/)
+        .filter((w: string) => w.length > 2 && !stop.has(w))
+    );
+    const mine = wordsOf(task.title);
+    related = (others || [])
+      .filter((o: any) => o.id !== task.id)
+      .map((o: any) => ({ ...o, overlap: [...wordsOf(o.title)].filter((w: string) => mine.has(w)).length }))
+      .filter((o: any) => o.overlap >= 2)
+      .sort((a: any, b: any) => b.overlap - a.overlap)
+      .slice(0, 6);
+  } catch (e) {
+    console.warn('   Pre-flight could not read the board:', (e as Error).message);
+  }
+
+  const workLog = Array.isArray((task.metadata || {})?.work_log) ? (task.metadata as any).work_log : [];
+
+  const prompt = `
+You are deciding whether a task still needs doing, BEFORE anyone spends time on it.
+
+TASK: ${task.title}
+DESCRIPTION: ${String(task.description || '').slice(0, 1000)}
+STAGE: ${task.stage}   STATUS: ${task.status}
+CHECKLIST: ${checklist.slice(0, 8).join(' | ') || '(none yet)'}
+WORK ALREADY DONE ON THIS TASK: ${workLog.length ? workLog.map((w: any) => w.item).join(' | ') : '(none)'}
+
+OTHER OPEN TASKS ON THE BOARD:
+${related.length
+  ? related.map((o: any) => `- ${o.id} | ${o.title} | ${o.stage}/${o.status} | created ${o.created_at}`).join('\n')
+  : '(none with a similar title)'}
+
+Answer with ONLY this JSON:
+{
+  "verdict": "NEEDED" | "ALREADY_DONE" | "SUPERSEDED" | "CANNOT_PROCEED",
+  "reason": "one sentence",
+  "proof_url": "for ALREADY_DONE: a URL that shows the finished work. NOT this task's own page.",
+  "superseded_by": "for SUPERSEDED: the id of the task that took this over"
+}
+
+Rules:
+- Use NEEDED unless you are certain the work should not be done.
+- ALREADY_DONE needs a proof_url pointing at the finished work, not at this task's own record.
+- SUPERSEDED needs the id of the other task, and only when it clearly covers the same ground.
+- CANNOT_PROCEED is for work that cannot be started at all: no access, no capability, waiting on a person.
+`;
+
+  try {
+    const raw = await callAI(prompt);
+    if (!raw || raw.startsWith('AI analysis unavailable')) return fallback;
+    const clean = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+    let decision: any;
+    try {
+      decision = JSON.parse(clean);
+    } catch {
+      const start = clean.indexOf('{');
+      const end = clean.lastIndexOf('}');
+      if (start < 0 || end <= start) return fallback;
+      decision = JSON.parse(clean.slice(start, end + 1));
+    }
+    const verdict = String(decision?.verdict || '').toUpperCase();
+    if (!['NEEDED', 'ALREADY_DONE', 'SUPERSEDED', 'CANNOT_PROCEED'].includes(verdict)) return fallback;
+    const proof = typeof decision.proof_url === 'string' && decision.proof_url.trim()
+      ? decision.proof_url.trim() : undefined;
+    const survivor = typeof decision.superseded_by === 'string' && decision.superseded_by.trim()
+      ? decision.superseded_by.trim() : undefined;
+    return {
+      verdict,
+      reason: String(decision.reason || '').slice(0, 400),
+      proof_url: proof,
+      superseded_by: survivor,
+    };
+  } catch (e) {
+    console.warn('   Pre-flight failed:', (e as Error).message);
+    return fallback;
+  }
+}
+
+// ── OpenCode: the worker with hands ────────────────────────────────────────
+
+// The loopback proxy the operator's dashboard already uses for the opencode
+// button (relay/harness-proxy.mjs). It injects the server's own credential,
+// so this path carries no secret and needs no password of its own.
+const OPENCODE_URL = Deno.env.get('OPENCODE_PROXY_URL') || 'http://127.0.0.1:4130';
+
+// The model the worker uses.
+//
+// It is pinned rather than left to the server's choice, because the choice is
+// not stable: the same server answered with ollama-cloud/minimax-m3.1-flash on
+// one run and with an opencode-go model on the next, and the Go models answer
+// 403 "an active OpenCode Go subscription is required to use Go models" on this
+// account. The server had no provider credentials of its own, so its catalogue
+// emptied and everything fell back to the gated tier.
+//
+// The OpenCode server is now configured with the relay's OpenRouter key and
+// this free model (~/.config/opencode/opencode.json), which answers in about a
+// second and needs no subscription. If it fails, the worker is retried once
+// with the server's own choice, so a change at the provider does not silently
+// stop the fleet working.
+const OPENCODE_WORKER_PROVIDER = Deno.env.get('OPENCODE_WORKER_PROVIDER') || 'openrouter';
+const OPENCODE_WORKER_MODEL = Deno.env.get('OPENCODE_WORKER_MODEL') || 'minimax/minimax-m3.1-flash:free';
+
+// A verb that means "change something".
+const WORK_VERB = /\b(implement|fix|write|create|add|build|deploy|refactor|migrate|port|replace|rename|remove|delete|wire|integrate|patch|ship|publish|merge|install|configure|update)\b/;
+// An item that only asks to be understood.
+const ONLY_ANALYSIS = /\b(analy[sz]e requirements|plan implementation|research|document|documentation|summari[sz]e|summary|report|explain|describe|compare|investigate)\b/;
+
+/**
+ * Is this checklist item work that needs a capable agent, rather than a
+ * lookup? A knowledge search can describe a change; it cannot make one.
+ */
+function looksLikeImplementation(itemLower: string): boolean {
+  if (ONLY_ANALYSIS.test(itemLower)) return false;
+  return WORK_VERB.test(itemLower);
+}
+
+async function opencodeJson(base: string, method: string, path: string, body?: any): Promise<any> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 120000);
+  try {
+    const r = await fetch(`${base}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctl.signal,
+    });
+    const t = await r.text();
+    if (!r.ok) return null;
+    try { return JSON.parse(t); } catch { return null; }
+  } finally { clearTimeout(timer); }
+}
+
+/**
+ * Hand the step to OpenCode and wait for the answer.
+ *
+ * The server works in the repository, so the agent can write files and run
+ * commands. It is asked for the URL of what it changed, because that URL is
+ * the evidence the completion rule requires - and because an answer with no
+ * address behind it is exactly the kind of completion this system already
+ * learned not to trust.
+ */
+/**
+ * Wait for the assistant's finished reply in a session.
+ *
+ * A message that has not finished streaming holds only the model's
+ * reasoning, and reading it early is how a finished piece of work was once
+ * recorded as "the worker replied with nothing".
+ */
+async function waitForAssistant(base: string, sessionId: string, timeoutMs: number): Promise<{ parts: any[]; text: string; error?: any } | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const msgs = await opencodeJson(base, 'GET', `/api/session/${sessionId}/message`);
+    const arr = Array.isArray(msgs?.data) ? msgs.data : [];
+    const assistant = arr.filter((m: any) => m.type === 'assistant').pop();
+    if (assistant) {
+      if (assistant.finish === 'error' || assistant.error) {
+        return { parts: [], text: '', error: assistant.error };
+      }
+      if (assistant.time?.completed === undefined && assistant.finish === undefined) {
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      const parts = Array.isArray(assistant.content) ? assistant.content : [];
+      const text = parts.filter((c: any) => c.type === 'text').map((c: any) => c.text).join(' ').trim();
+      return { parts, text };
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return null;
+}
+
+/**
+ * Does this file exist? A path the worker names is only a deliverable if it
+ * can be opened - otherwise the model is describing an intention.
+ */
+async function fileExists(rel: string): Promise<boolean> {
+  try {
+    const abs = rel.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rel) ? rel : `${Deno.cwd()}/${rel}`;
+    const st = await Deno.stat(abs);
+    return st.isFile;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The files that exist in the working tree but are not tracked by git.
+ *
+ * This is how the SYSTEM sees what the worker did, rather than being told.
+ * A model that wrote a file and then narrated a plan instead of naming the
+ * file is common; a file that appeared is not a matter of opinion.
+ */
+async function untrackedFiles(): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    const cmd = new Deno.Command('git', {
+      args: ['status', '--porcelain', '--untracked-files=all'],
+      stdout: 'piped',
+      stderr: 'null',
+    });
+    const res = await cmd.output();
+    if (!res.success) return out;
+    for (const line of new TextDecoder().decode(res.stdout).split('\n')) {
+      if (!line.startsWith('?? ')) continue;
+      const p = line.slice(3).trim().replace(/^"|"$/g, '');
+      if (p) out.add(p);
+    }
+  } catch {
+    // git is not available to the function; the worker's own report is all
+    // there is.
+  }
+  return out;
+}
+
+async function runOpenCodeWorker(task: Task, item: string): Promise<{ ok: boolean; summary?: string; error?: string; deliverable?: string }> {
+  const base = OPENCODE_URL.replace(/\/$/, '');
+  const prompt = [
+    `TASK: ${task.title}`,
+    task.description ? `DESCRIPTION: ${String(task.description).slice(0, 2000)}` : '',
+    `THIS STEP: ${item}`,
+    '',
+    'Work on this repository and make the change the step describes.',
+    'When you are done:',
+    '1. commit the change: git add the files you touched, then git commit -m "...";',
+    '2. if it can be pushed, push it to the remote that belongs to this project. The https remote is rejected on this machine, so use the ssh one (git@github.com:...);',
+    '3. reply with the path of every file you changed, one per line, and nothing else after that;',
+    '4. reply with the URL of the commit or pull request, so the change can be checked;',
+    '5. if you could not make the change, exactly what is missing and what would unblock it.',
+  ].filter(Boolean).join('\n');
+
+  try {
+    // What the tree looked like before the worker started. The difference
+    // afterwards is what the worker did, observed rather than reported.
+    const before = await untrackedFiles();
+
+    const created = await opencodeJson(base, 'POST', '/api/session', { title: String(task.title || item).slice(0, 80) });
+    const sid = created?.data?.id;
+    if (!sid) return { ok: false, error: 'could not create a session' };
+
+    const sent = await opencodeJson(base, 'POST', `/api/session/${sid}/prompt`, {
+      text: prompt,
+      model: { providerID: OPENCODE_WORKER_PROVIDER, modelID: OPENCODE_WORKER_MODEL },
+      agent: 'build',
+    });
+    if (!sent) return { ok: false, error: 'the prompt was not accepted' };
+
+    let reply = await waitForAssistant(base, sid, 5 * 60 * 1000);
+    if (reply?.error) {
+      // The pinned model failed. Try once with the server's own choice before
+      // giving up: a provider-side change should not silently stop the fleet
+      // working.
+      console.log(`   Worker failed on the pinned model; retrying with the server's default`);
+      await opencodeJson(base, 'POST', `/api/session/${sid}/prompt`, {
+        text: prompt,
+        agent: 'build',
+      });
+      reply = await waitForAssistant(base, sid, 5 * 60 * 1000);
+    }
+    if (!reply) return { ok: false, error: 'the worker did not answer within five minutes' };
+    if (reply.error) {
+      return { ok: false, error: `worker failed: ${JSON.stringify(reply.error).slice(0, 200)}` };
+    }
+    const parts = reply.parts;
+    const text = reply.text;
+
+    // What the worker actually DID is in the tool calls, and that is the
+    // part worth keeping: "wrote the file" is evidence in a way that a
+    // paraphrase of it is not.
+    const tools: string[] = [];
+    const files: string[] = [];
+    for (const c of parts) {
+      if (!(c.type === 'tool' || c.tool || c.name)) continue;
+      const name = c.name || c.tool || (c.state && c.state.title) || 'tool';
+      const input = c.state?.input || c.input || c.arguments || c.args;
+      const target = input && typeof input === 'object'
+        ? (input.filePath || input.path || input.file || '')
+        : '';
+      tools.push(target ? `${name} (${String(target).slice(0, 120)})` : name);
+      if (target && /\.[a-z0-9]{1,8}$/i.test(String(target)) && !String(target).includes(' ')) {
+        files.push(String(target));
+      }
+      // A shell command that writes a file names the file. The worker often
+      // writes through the shell rather than a write tool, and the command is
+      // the record of what it touched.
+      const command = input && typeof input === 'object' ? (input.command || '') : '';
+      if (typeof command === 'string' && command) {
+        for (const token of command.split(/[\s"'`;|&><]+/)) {
+          const t = token.replace(/[,;]+$/, '');
+          if (/\.[a-z0-9]{1,8}$/i.test(t) && !t.includes('://') && !/\s/.test(t) && t.length < 200) {
+            files.push(t);
+          }
+        }
+      }
+    }
+
+    // The deliverable: the first address in the reply, or - when there is
+    // no address - the file the worker wrote.
+    //
+    // This box cannot push to GitHub (its credential is rejected), so a
+    // commit URL is not available. A file the worker wrote IS checkable: it is
+    // on this disk, and anyone can look at it. `file:<path>` is therefore a
+    // legitimate deliverable, and the verifier checks that the path exists
+    // rather than fetching a URL.
+    let deliverable = (text.match(/https?:\/\/\S+/g) || [])[0]?.replace(/[.,;]+$/, '')
+      || (files.length ? `file:${files[0]}` : null);
+
+    if (!deliverable) {
+      // The model did not say what it changed. Ask it, in the same session,
+      // and keep only a path that can actually be opened - a path that does
+      // not exist is the model describing an intention, not a deliverable.
+      await opencodeJson(base, 'POST', `/api/session/${sid}/prompt`, {
+        text: 'List the files you changed, one path per line, and nothing else. No commentary.',
+        agent: 'build',
+      });
+      const follow = await waitForAssistant(base, sid, 120000);
+      if (follow?.text) {
+        const named = (follow.text.match(/[^\s"'`]+/g) || [])
+          .filter((p) => /\.[a-z0-9]{1,8}$/i.test(p) && !/^https?:/i.test(p))
+          .slice(0, 6);
+        for (const p of named) {
+          if (await fileExists(p)) {
+            deliverable = `file:${p}`;
+            break;
+          }
+        }
+        if (deliverable) tools.push(`named by the worker: ${deliverable}`);
+      }
+    }
+
+    if (!deliverable) {
+      // Still nothing. Ask the TREE: a file that appeared while the worker
+      // was running is a file the worker made, whatever it chose to say.
+      const after = await untrackedFiles();
+      const appeared = [...after].filter((p) => !before.has(p));
+      if (appeared.length) {
+        for (const p of appeared) {
+          if (await fileExists(p)) {
+            deliverable = `file:${p}`;
+            break;
+          }
+        }
+        if (deliverable) tools.push(`appeared in the working tree: ${deliverable}`);
+      }
+    }
+
+    const summary = [
+      text,
+      tools.length ? `Tools used: ${[...new Set(tools)].join('; ')}` : '',
+      deliverable ? `Deliverable: ${deliverable}` : '',
+    ].filter(Boolean).join('\n').trim();
+    if (!summary) return { ok: false, error: 'the worker replied with nothing' };
+    return { ok: true, summary: summary.slice(0, 4000), deliverable: deliverable || undefined };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function executeChecklistItem(supabase: any, task: Task, item: string): Promise<{ success: boolean; summary?: string; error?: string; deliverable?: string }> {
   const itemLower = item.toLowerCase();
+
+  // ── WORK THAT NEEDS HANDS ──
+  //
+  // The knowledge-search path can only describe. "Implement X", "fix Y", "open
+  // a pull request" need an agent that can write files and run commands, and
+  // the stack HAS one: the OpenCode server, which the fleet already proxies
+  // for the operator's dashboard (relay/harness-proxy.mjs).
+  //
+  // It is reached through that proxy on purpose. The proxy injects the
+  // server's own credential, so nothing here has to know a password, and the
+  // path is the same one the dashboard's opencode button uses - one harness,
+  // one way in.
+  if (looksLikeImplementation(itemLower)) {
+    const worked = await runOpenCodeWorker(task, item);
+    if (worked.ok) {
+      return { success: true, summary: worked.summary, deliverable: worked.deliverable };
+    }
+    // No falling through to the knowledge path for an implementation item.
+    //
+    // It used to, and that is how a step called "create the file" was
+    // completed by a knowledge search that returned nothing - the hollow
+    // completion this whole change exists to end. A step that needs an agent
+    // with hands is not completed by an agent that can only describe.
+    return {
+      success: false,
+      error: `opencode_worker_failed: ${worked.error || 'no answer'}`,
+    };
+  }
 
   try {
     // 1. Search for relevant tools using the item text
@@ -591,6 +1257,8 @@ Decide the best course of action:
 2. ANALYZE: If the item requires thinking/reasoning, return { "action": "analyze", "response": "Your analysis here..." }
 3. PLAN: If the item requires planning, return { "action": "plan", "response": "Your plan here..." }
 4. DOCUMENT: If the item requires writing, return { "action": "document", "response": "Your documentation here..." }
+
+If you CHANGED something, your response must include the URL of what you changed - a file, a pull request, a deployed endpoint, a commit. If you did not change anything, say exactly that, and name the URL of whatever you inspected instead. A plan is not a change.
 
 Return ONLY the JSON object.
 `;
@@ -683,7 +1351,7 @@ Return ONLY the JSON object.
       return { success: true, summary: `${decision.action.toUpperCase()}: ${decision.response}` };
     }
 
-    return { success: true, summary: `Completed: ${item}` };
+    return { success: false, error: 'no_action_taken_no_progress_written' };
 
   } catch (error) {
     return {
@@ -691,6 +1359,97 @@ Return ONLY the JSON object.
       error: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+/**
+ * Does this URL actually point at something?
+ *
+ * Evidence is only evidence if it can be fetched. A model asked for a URL will
+ * produce one: in a live test it produced
+ * "https://example.com/pfp-booking-tables-state" for a task whose only work
+ * had been a knowledge search that returned nothing - and that address does
+ * not exist. So a URL is checked by asking for it, and the answer has to be a
+ * success.
+ *
+ * A URL that answers 404 fails, and so does one that needs credentials the
+ * fleet does not have (a private pull request). That is deliberate: the board
+ * should only claim what can be checked, and a completion nobody can check is
+ * a claim.
+ */
+async function verifyEvidenceUrl(url: string): Promise<{ ok: boolean; status?: number }> {
+  const target = String(url || '').trim();
+  if (!target) return { ok: false };
+
+  // A file the worker wrote: checkable by looking, not by fetching.
+  if (target.startsWith('file:')) {
+    const rel = target.slice('file:'.length).replace(/^["']|["']$/g, '');
+    try {
+      const abs = rel.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rel)
+        ? rel
+        : `${Deno.cwd()}/${rel}`;
+      const st = await Deno.stat(abs);
+      return { ok: st.isFile, status: st.isFile ? 200 : 404 };
+    } catch {
+      return { ok: false, status: 404 };
+    }
+  }
+
+  if (!/^https?:\/\//i.test(target)) return { ok: false };
+
+  const tryFetch = async (method: string): Promise<number | null> => {
+    try {
+      const r = await fetch(target, {
+        method,
+        redirect: 'follow',
+        headers: method === 'GET' ? { Range: 'bytes=0-2048' } : {},
+        signal: AbortSignal.timeout(15000),
+      });
+      return r.status;
+    } catch {
+      return null;
+    }
+  };
+
+  let status = await tryFetch('HEAD');
+  if (status === null || status === 405 || status === 403 || status >= 500) {
+    const viaGet = await tryFetch('GET');
+    if (viaGet !== null) status = viaGet;
+  }
+  if (status === null) return { ok: false };
+  return { ok: status >= 200 && status < 400, status };
+}
+
+/**
+ * The URL of the thing that was actually changed.
+ *
+ * The work log is prose written by the agent, so the deliverable is looked for
+ * in it: the first http(s) URL that is not this task's own record. A work log
+ * with no such URL describes an intention rather than a change - and the
+ * database guard agrees (app.artifact_is_self_referential refuses to count a
+ * task pointing at itself).
+ */
+function findDeliverable(workLog: any[], taskId: string): string | null {
+  const urls: string[] = [];
+  const files: string[] = [];
+  for (const entry of workLog || []) {
+    const text = String(entry?.summary || '');
+    urls.push(...(text.match(/https?:\/\/[^\s"'<>)\]]+/g) || []));
+    files.push(...(text.match(/file:[^\s"'<>)\]]+/g) || []));
+  }
+  for (const raw of urls) {
+    const url = raw.replace(/[.,;:]+$/, '');
+    if (!url) continue;
+    // The task's own record is not a deliverable.
+    if (url.includes(`/tasks/${taskId}`)) continue;
+    return url;
+  }
+  // A file the worker wrote is checkable on this machine, which is what this
+  // box can offer instead of a pushed commit URL.
+  for (const raw of files) {
+    const f = raw.replace(/[.,;:]+$/, '');
+    if (f && f.length > 'file:'.length) return f;
+  }
+  return null;
 }
 
 async function generateChecklist(task: Task): Promise<string[]> {

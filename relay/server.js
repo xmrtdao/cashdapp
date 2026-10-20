@@ -7273,11 +7273,64 @@ app.post('/webhook/resend-inbound', async (req, res) => {
   const webhookResendKey = resendKeyFor(toDomainKey) || process.env.RESEND_API_KEY;
   if (webhookResendKey && emailId) {
     fetchInboundBody(emailId, webhookResendKey).then(async (body) => {
+      const full = body?.fetched ? body : null;
+      // Resend webhooks carry no body, so it is fetched from their API. If that
+      // fetch fails, whatever the caller sent is all there is - and for a
+      // synthetic post that is the whole message.
+      const bodyText = String(full?.text || data.text || data.body || '');
+
+      // ── PFP lead capture: the reply becomes a lead, or a contact on one ──
+      //
+      // Until now this ran only in the 15-minute poller, so a reply waited up
+      // to a quarter of an hour before the pipeline knew about it, and if the
+      // poller was down the reply was never captured at all. The webhook is
+      // the first place a message exists, so it is the first place the lead
+      // belongs.
+      //
+      // The message id is Resend's own, so the webhook and the poller produce
+      // the SAME key and the unique index turns a race between them into one
+      // capture rather than two leads.
+      //
+      // A body is required, because an opt-out ("STOP - remove me") is only
+      // detectable from the text. With no body the capture is left to the
+      // poller, which fetches one: a lead recorded without reading the body
+      // could file a "stop contacting me" as an ordinary enquiry, and the
+      // unique index would then stop the poller from ever seeing it.
+      if (toDomainKey === 'pfp' && bodyText.trim()) {
+        try {
+          const rawFrom = String(data.from || '').trim();
+          const addrMatch = rawFrom.match(/<([^>]+)>/);
+          const fromEmail = (addrMatch ? addrMatch[1] : rawFrom).trim().toLowerCase();
+          const fromName = data.from_name
+            || (addrMatch ? rawFrom.replace(/<[^>]+>/, '').trim().replace(/^"|"$/g, '') : '');
+
+          if (fromEmail && fromEmail.includes('@')) {
+            const { captureInboundEmail } = await import('./lib/pfp-lead-stages.mjs');
+            const flat = bodyText.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+            const captured = await captureInboundEmail(queryLocalPg, {
+              from_email: fromEmail,
+              sender_name: fromName || null,
+              subject: full?.subject || data.subject || null,
+              snippet: flat ? flat.slice(0, 400) : null,
+              message_id: full?.messageId || data.message_id || emailId,
+              received_at: full?.createdAt || data.created_at || new Date().toISOString(),
+            });
+            console.log(`[Resend Inbound] PFP capture for ${fromEmail}: `
+              + `${captured.outcome || (captured.duplicate ? 'duplicate' : 'no-outcome')}`
+              + `${captured.lead_id ? ` lead=${captured.lead_id}` : ''}`);
+          }
+        } catch (captureErr) {
+          // A failed capture must not take the mail with it: the email is
+          // persisted below, and the poller will pick this message up on its
+          // next pass.
+          console.error(`[Resend Inbound] PFP lead capture failed: ${captureErr.message}`);
+        }
+      }
+
       if (!body.fetched) {
         console.warn(`[Resend Inbound] No body for ${emailId}: ${body.reason}`);
         return;
       }
-      const full = body;
 
       // ── PERSIST TO THE DATABASE ──
       // This is the write that was missing. Everything below this line put the body
@@ -7326,6 +7379,53 @@ app.post('/webhook/resend-inbound', async (req, res) => {
         console.error(`[Resend Inbound] DB persist failed for ${emailId}: ${dbErr.message}`);
       }
 
+      // ── PFP lead capture: the reply becomes a lead, or a contact on one ──
+      //
+      // Until now this ran only in the 15-minute poller, so a reply waited up
+      // to a quarter of an hour before the pipeline knew about it, and if the
+      // poller was down the reply was never captured at all. The webhook is
+      // the first place a message exists, so it is the first place the lead
+      // belongs.
+      //
+      // The body is needed, which is why this is here and not above: Resend
+      // webhooks carry no body, and an opt-out ("STOP - remove me") is only
+      // detectable from the text.
+      //
+      // The message id is Resend's own, so the webhook and the poller produce
+      // the SAME key and the unique index turns a race between them into one
+      // capture rather than two leads.
+      if (toDomainKey === 'pfp') {
+        try {
+          const rawFrom = String(data.from || '').trim();
+          const addrMatch = rawFrom.match(/<([^>]+)>/);
+          const fromEmail = (addrMatch ? addrMatch[1] : rawFrom).trim().toLowerCase();
+          const fromName = data.from_name
+            || (addrMatch ? rawFrom.replace(/<[^>]+>/, '').trim().replace(/^"|"$/g, '') : '');
+
+          if (fromEmail && fromEmail.includes('@')) {
+            const { captureInboundEmail } = await import('./lib/pfp-lead-stages.mjs');
+            const flat = String(full.text || full.html || '')
+              .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+            const captured = await captureInboundEmail(queryLocalPg, {
+              from_email: fromEmail,
+              sender_name: fromName || null,
+              subject: full.subject || data.subject || null,
+              snippet: flat ? flat.slice(0, 400) : null,
+              message_id: full.messageId || data.message_id || emailId,
+              received_at: full.createdAt || data.created_at || new Date().toISOString(),
+            });
+            console.log(`[Resend Inbound] PFP capture for ${fromEmail}: `
+              + `${captured.outcome || (captured.duplicate ? 'duplicate' : 'no-outcome')}`
+              + `${captured.lead_id ? ` lead=${captured.lead_id}` : ''}`);
+          }
+        } catch (captureErr) {
+          // A failed capture must not take the mail with it: the email is
+          // already persisted above, and the poller will pick this message up
+          // on its next pass.
+          console.error(`[Resend Inbound] PFP lead capture failed: ${captureErr.message}`);
+        }
+      }
+
       // Update legacy resend_inbox
       const inbox2 = state.get('resend_inbox') || [];
       const idx = inbox2.findIndex(e => e.email_id === emailId);
@@ -7366,11 +7466,18 @@ app.post('/webhook/resend-inbound', async (req, res) => {
 
   // ── Smart lead creation from inbound emails ──
   // Not every inbound email is a lead. Only create when:
-  // 1. Domain supports lead tracking (party, harbor, mobilemonero)
+  // 1. Domain supports lead tracking (harbor, mobilemonero)
   // 2. Sender is a person (not a system, not auto-reply)
   // 3. Sender doesn't already exist as a lead
   // 4. Email looks like an inquiry (has body, not out-of-office, not spam)
-  if ((toDomain === 'partyfavorphoto.com' || toDomain === '31harbor.com' || toDomain === 'mobilemonero.com') && emailId) {
+  //
+  // partyfavorphoto.com is NOT in this list on purpose. It has its own lead
+  // model - one event, many contacts, one booking - in pfp_leads, and the PFP
+  // dashboard reads that table. Adding a second lead per sender here was the
+  // exact behaviour the contact model exists to prevent: the groom's reply on
+  // the bride's thread became a second "lead" and, downstream, a second
+  // booking. PFP inbound goes through captureInboundEmail above.
+  if ((toDomain === '31harbor.com' || toDomain === 'mobilemonero.com') && emailId) {
     const fromEmail = (data.from || '').replace(/.*<([^>]+)>/, '$1').trim().toLowerCase();
     const fromName = data.from_name || data.from?.replace(/<[^>]+>/, '').trim() || '';
     const subjLower = (data.subject || '').toLowerCase();
@@ -11216,12 +11323,35 @@ async function routeFleetMessage(entry) {
     // Best-effort: if the trust_event insert fails, the chat reply
     // still succeeds.
     try {
-      await queryLocalPg(
-        `INSERT INTO public.trust_events (agent_did, event_type, delta, score_after, note, reference)
-         VALUES ($1, 'FLEET_REPLY', 0.5, NULL, $2, $3)`,
-        [agent, `Replied in #${channel} channel (msg ${reply.id ? reply.id.slice(0,12) : '?'})`, entry.id || null]
-      ).catch(err => console.log(`[trust-log] insert error for ${agent}:`, err.message));
-    } catch { /* non-fatal */ }
+      // `score_after` used to be hardcoded NULL here, so every FLEET_REPLY
+      // landed without a score and the 24h trajectory view had nothing to
+      // draw (29/29 events on Oct 19, 88/88 on Oct 18). Use the canonical
+      // engine: it inserts the event, replays the agent's history, and writes
+      // the resulting score back onto the row - the same path every other
+      // producer uses, rather than a second scoring rule invented here.
+      const { writeTrustEvent } = await import('./lib/trustgraph-engine.mjs');
+      const tierRow = await queryLocalPg(
+        `SELECT cac_tier FROM app.registry_agents
+          WHERE did = $1 OR lower(name) = lower($2)
+          LIMIT 1`,
+        [`did:xmrt:${agent}`, agent]
+      ).catch(() => ({ rows: [] }));
+      const tier = tierRow.rows?.[0]?.cac_tier || 'explorer';
+      const trust = await writeTrustEvent(
+        queryLocalPg,
+        agent,
+        'FLEET_REPLY',
+        0.5,
+        {
+          reference: entry.id || null,
+          note: `Replied in #${channel} channel (msg ${reply.id ? reply.id.slice(0,12) : '?'})`,
+        },
+        tier
+      );
+      console.log(`[trust-log] ${agent} FLEET_REPLY +0.5 -> score ${trust.score} (${trust.band})`);
+    } catch (err) {
+      console.log(`[trust-log] insert error for ${agent}:`, err.message);
+    }
     // Re-route this reply so other agents can respond to it (with hop+1)
     if (nextHop < MAX_HOP_DEPTH) {
       // Fire-and-forget recursive routing; do not block the current response
@@ -16314,33 +16444,19 @@ const relayHttpServer = app.listen(PORT, '0.0.0.0', async () => {
     '  State keys: ' + state.keys().length + '\n');
   logActivity('system', '-', 'STARTUP', 'Relay v2 listening on port ' + PORT);
 
-  // ── Start Local Cron Engine ──
-  // 2026-06-07: The old cron-engine.mjs used `psql -U postgres` and
-  // `cmd.exe` spawns that hung waiting for a password. The
-  // `pg/bin/` path it references doesn't exist on this machine
-  // (we use the embedded @embedded-postgres package in suite/).
-  // Disable the old engine; we'll add a working one in a
-  // follow-up that uses pg client + local runtime.
-  setTimeout(() => {
-    if (process.env.SKIP_CRON === '1') {
-      logActivity('system', '-', 'CRON', 'Local cron engine disabled (SKIP_CRON=1)');
-      return;
-    }
-    try {
-      import('./cron-engine-v2.mjs').then(mod => {
-        if (typeof mod.runDaemon === 'function') {
-          mod.runDaemon();
-          logActivity('system', '-', 'CRON', 'Local cron v2 engine started');
-        } else {
-          logActivity('system', '-', 'CRON_ERR', 'cron-engine-v2.mjs has no runDaemon()');
-        }
-      }).catch(err => {
-        logActivity('system', '-', 'CRON_ERR', 'Failed to start cron v2: ' + err.message);
-      });
-    } catch (err) {
-      console.log('[CRON] Engine v2 not available:', err.message);
-    }
-  }, 3000);
+  // ── Cron engine: owned by the supervisor, NOT started here ──
+  // 2026-06-07: this block used to start cron-engine-v2 in-process, because the
+  // old cron-engine.mjs hung on `psql -U postgres` spawns.
+  //
+  // 2026-10-19: the in-process daemon is removed. The supervisor already runs
+  // `node relay/cron-engine-v2.mjs --daemon` as its own service
+  // (supervisor.mjs:285, dependsOn: ['relay']), and both daemons share
+  // relay-data/cron-engine-v2-state.json. Each loaded the state before the
+  // other had saved it, so the per-minute guard (lastRun[job.id] === thisMin)
+  // never held and every scheduled job ran twice - every SQL maintenance job
+  // and every edge-function loop. One scheduler, one process: the supervised
+  // one. If it is ever down, run `node relay/cron-engine-v2.mjs --daemon` by
+  // hand; do not re-add a second scheduler here.
 
   // ── Start Mesh Gossipsub Node ──
   // Auto-init on startup so /mesh/publish has a real local node to forward

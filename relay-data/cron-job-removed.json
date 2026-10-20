@@ -1,0 +1,173 @@
+[
+  {
+    "id": 15,
+    "name": "batch-vectorize-memories",
+    "schedule": "*/30 * * * *",
+    "command": "SELECT public.batch_vectorize_memories();",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.168Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 16,
+    "name": "check-knowledge-drift",
+    "schedule": "*/15 * * * *",
+    "command": "SELECT public.check_knowledge_snippet_drift_and_alert();",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 17,
+    "name": "repair-knowledge-drift",
+    "schedule": "*/15 * * * *",
+    "command": "SELECT public.repair_then_alert_knowledge_snippet_drift();",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 18,
+    "name": "requeue-failed-vectorize",
+    "schedule": "*/5 * * * *",
+    "command": "SELECT * FROM public.requeue_safe_failed_vectorize_jobs(3, interval '7 days', 100);",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 19,
+    "name": "generate-conversation-insights",
+    "schedule": "0 2 * * *",
+    "command": "SELECT public.generate_conversation_insights();",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 20,
+    "name": "refresh-conversation-view",
+    "schedule": "9,24,39,54 * * * *",
+    "command": "SELECT count(*) FROM public.recent_conversation_messages;",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 23,
+    "name": "check-agent-heartbeats",
+    "schedule": "*/10 * * * *",
+    "command": "SELECT util.check_agent_heartbeats();",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 24,
+    "name": "capture-lock-blockers",
+    "schedule": "*/5 * * * *",
+    "command": "SELECT util.capture_lock_blockers();",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 25,
+    "name": "trigger-daily-discussion",
+    "schedule": "0 9 * * *",
+    "command": "SELECT public.trigger_daily_discussion_post();",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 26,
+    "name": "cleanup-webhook-logs",
+    "schedule": "2 * * * *",
+    "command": "DELETE FROM public.webhook_logs WHERE created_at < now() - interval '30 days'; DELETE FROM public.conversation_sessions WHERE created_at < now() - interval '30 days';",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 27,
+    "name": "prune-http-responses",
+    "schedule": "3,13,23,33,43,53 * * * *",
+    "command": "SELECT public.prune_net_http_response(3, 5000);",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 28,
+    "name": "prune-http-responses-force",
+    "schedule": "8 * * * *",
+    "command": "SELECT public.prune_net_http_response_until_clear(3);",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 29,
+    "name": "cleanup-stale-device-sessions",
+    "schedule": "*/15 * * * *",
+    "command": "SELECT cleanup_stale_device_sessions();",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 30,
+    "name": "purge-lock-diagnostics",
+    "schedule": "8 3 * * *",
+    "command": "SELECT util.purge_old_lock_diagnostics();",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 52,
+    "name": "purge-cron-execution-logs",
+    "schedule": "0 3 * * 0",
+    "command": "DELETE FROM cron_execution_log WHERE created_at < now() - interval '30 days';",
+    "enabled": true,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 32,
+    "name": "process-scheduled-actions",
+    "schedule": "4,9,14,19,24,29,34,39,44,49,54,59 * * * *",
+    "command": "UPDATE public.scheduled_actions SET next_execution = now() WHERE is_active = true AND next_execution <= now() AND (next_execution IS NULL OR next_execution <= now());",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 33,
+    "name": "timeout-stale-tasks",
+    "schedule": "3,18,33,48 * * * *",
+    "command": "UPDATE public.task_executions SET status = 'timeout', error_message = 'Task execution timeout', execution_end = now() WHERE status = 'running' AND execution_start < now() - interval '30 minutes';",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 34,
+    "name": "cuttlefish-trustgraph-decay",
+    "schedule": "0 3 * * 1",
+    "command": "UPDATE app.registry_agents SET trust_score = GREATEST(CASE cac_tier WHEN 'anchor' THEN 70 WHEN 'enterprise' THEN 55 WHEN 'studio' THEN 40 WHEN 'developer' THEN 30 ELSE 20 END, trust_score - 2.0), trust_score_updated_at = NOW() WHERE trust_score_updated_at < NOW() - INTERVAL '7 days' AND trust_score > CASE cac_tier WHEN 'anchor' THEN 70 WHEN 'enterprise' THEN 55 WHEN 'studio' THEN 40 WHEN 'developer' THEN 30 ELSE 20 END;",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  },
+  {
+    "id": 35,
+    "name": "cuttlefish-lifecycle-automation",
+    "schedule": "15 * * * *",
+    "command": "UPDATE app.registry_agents SET lifecycle_status = 'revoked' WHERE trust_score < 10 AND lifecycle_status != 'revoked'; UPDATE app.registry_agents SET lifecycle_status = 'suspended' WHERE trust_score >= 10 AND trust_score < 20 AND lifecycle_status NOT IN ('suspended', 'revoked'); UPDATE app.registry_agents SET lifecycle_status = 'active' WHERE trust_score >= 25 AND lifecycle_status = 'suspended';",
+    "enabled": false,
+    "removed_at": "2026-10-19T18:08:26.169Z",
+    "reason": "duplicate cron source row"
+  }
+]
