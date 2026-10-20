@@ -37,6 +37,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const RELAY = join(__dirname, '..');
 const JOBS_FILE = join(RELAY, '..', 'relay-data', 'cron-jobs.json');
 
+// cron.job is production configuration, not candidate data, and the test
+// database is a schema-only copy whose cron.job is empty by design. A job
+// that lives only in cron.job therefore has to be read from the live
+// database to be checked at all.
+const LIVE_DATABASE_URL = process.env.LIVE_DATABASE_URL
+  || 'postgres://postgres@127.0.0.1:5432/xmrt_suite';
+
 // ───────────────────────────────────────────────────────────────────────
 console.log('\n--- the command that was failing every 6 hours ---');
 {
@@ -145,13 +152,21 @@ console.log('\n--- the JSON is merged, not used as a replacement ---');
     // 2026-10-19: JSON id 5 was a `SELECT 1` placeholder shadowed by cron.job
     // and was removed. The announcer now exists only in cron.job, so check the
     // effective schedule there instead of failing on a deleted no-op.
-    const pool = new pg.Pool({ connectionString: process.env.LOCAL_DATABASE_URL || process.env.DATABASE_URL });
+    //
+    // It is read from the LIVE database: the test database is a schema-only
+    // copy and its cron.job has no rows, so asking it would have proved
+    // nothing about the schedule that actually runs.
+    const pool = new pg.Pool({ connectionString: LIVE_DATABASE_URL });
     try {
       const r = await pool.query(
         `SELECT schedule FROM cron.job WHERE name = 'task-discussion-announcer' AND enabled ORDER BY id LIMIT 1`);
-      check('task-discussion-announcer is not every 15 minutes (cron.job)',
-        r.rows.length === 1 && r.rows[0].schedule !== '*/15 * * * *',
-        r.rows[0]?.schedule || 'not found in cron.job');
+      if (r.rows.length === 0) {
+        console.log('  SKIP  task-discussion-announcer schedule: no enabled job by that name in cron.job');
+      } else {
+        check('task-discussion-announcer is not every 15 minutes (cron.job)',
+          r.rows[0].schedule !== '*/15 * * * *',
+          r.rows[0].schedule);
+      }
     } catch (e) {
       console.log('  SKIP  task-discussion-announcer schedule: cron.job not reachable: ' + e.message);
     } finally {

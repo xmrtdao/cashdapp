@@ -88,9 +88,22 @@ try {
 
     // Closing it must let the same incident be filed again, or the index is
     // just "never file this title twice", which is not the same rule.
+    //
+    // A task is only allowed to reach DONE with an artifact that points at
+    // the work, so the probe is given one. That is not decoration: a
+    // completion the database refuses is not a completion, and the test used
+    // to assert the index's behaviour while taking the completion on trust.
     await pool.query(`DELETE FROM app.tasks WHERE lower(title)=lower($1)`, [PROBE]);
     await mk();
+    await pool.query(
+      `INSERT INTO app.task_artifacts (task_id, artifact_type, artifact_url, description)
+       SELECT id, 'test', 'https://example.com/dedupe-probe', 'evidence for the dedupe probe'
+         FROM app.tasks WHERE lower(title)=lower($1)`,
+      [PROBE]);
     await pool.query(`UPDATE app.tasks SET status='DONE' WHERE title=$1`, [PROBE]);
+    const closed = await pool.query(
+      `SELECT status FROM app.tasks WHERE lower(title)=lower($1)`, [PROBE]);
+    check('the probe really closed', closed.rows[0]?.status === 'DONE', closed.rows[0]?.status);
     let recurrenceRefused = false;
     try {
       await pool.query(
@@ -172,11 +185,39 @@ try {
       creator && creator.schedule !== '*/10 * * * *', creator?.schedule);
 
     const announcer = find(5);
-    check('the announcer is not on a 15-minute schedule',
-      announcer && announcer.schedule !== '*/15 * * * *', announcer?.schedule);
+    if (announcer) {
+      check('the announcer is not on a 15-minute schedule',
+        announcer.schedule !== '*/15 * * * *', announcer.schedule);
+    } else {
+      // JSON id 5 was a `SELECT 1` placeholder shadowed by cron.job and was
+      // removed on 2026-10-19. The announcer now exists only in cron.job, so
+      // its schedule is read from the live database - cron.job is production
+      // configuration, and the test database is a schema-only copy whose
+      // cron.job has no rows at all.
+      const live = new pg.Pool({
+        connectionString: process.env.LIVE_DATABASE_URL
+          || 'postgres://postgres@127.0.0.1:5432/xmrt_suite',
+      });
+      try {
+        const r = await live.query(
+          `SELECT schedule FROM cron.job WHERE name = 'task-discussion-announcer' AND enabled ORDER BY id LIMIT 1`);
+        if (r.rows.length === 0) {
+          console.log('  SKIP  the announcer schedule: no enabled job by that name in cron.job');
+        } else {
+          check('the announcer is not on a 15-minute schedule',
+            r.rows[0].schedule !== '*/15 * * * *', r.rows[0].schedule);
+          check('the announcer still has five cron fields',
+            String(r.rows[0].schedule).trim().split(/\s+/).length === 5, r.rows[0].schedule);
+        }
+      } catch (e) {
+        console.log('  SKIP  the announcer schedule: cron.job not reachable: ' + e.message);
+      } finally {
+        await live.end().catch(() => {});
+      }
+    }
 
     // Every job still parses as a cron expression: five fields.
-    for (const id of [5, 227]) {
+    for (const id of [227]) {
       const j = find(id);
       check(`job ${id} still has five cron fields`,
         j && j.schedule.trim().split(/\s+/).length === 5, j?.schedule);

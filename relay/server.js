@@ -1078,6 +1078,15 @@ const toolHandlers = {
     try {
       const { default: pg } = await import('pg');
       const pool = new pg.Pool({ connectionString: 'postgres://postgres@127.0.0.1:5432/xmrt_suite', max: 2 });
+      // An artifact belongs to a task (app.task_artifacts carries a foreign
+      // key to app.tasks), and evidence for a task that does not exist is
+      // evidence of nothing. Say so plainly rather than letting the caller
+      // meet a constraint violation.
+      const exists = await pool.query(`SELECT 1 FROM app.tasks WHERE id = $1 LIMIT 1`, [taskId]);
+      if (!exists.rowCount) {
+        await pool.end();
+        return { error: `no task with id ${taskId}`, task_id: taskId };
+      }
       await pool.query(
         `INSERT INTO app.task_artifacts (task_id, artifact_type, artifact_url, description) VALUES ($1, $2, $3, $4)`,
         [taskId, type, url, description]

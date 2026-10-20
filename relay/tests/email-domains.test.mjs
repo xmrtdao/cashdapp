@@ -233,14 +233,21 @@ section('every registered domain gets a dashboard tile and a client loader');
     const fs = require('fs');
     process.stdout.write(fs.readFileSync('public/dashboard.js', 'utf8'));
   `], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  // The page template was extracted out of server.js into campus-page.mjs on
+  // 2026-10-10, and the tile calls went with it. The generator itself stayed
+  // in server.js and is handed to the page as a parameter.
+  const template = execFileSync('node', ['-e', `
+    const fs = require('fs');
+    process.stdout.write(fs.readFileSync('campus-page.mjs', 'utf8'));
+  `], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
 
   // The tiles are generated, not written out three times.
-  check('the tile generator exists', src.includes('function resendTileHtml()'));
+  check('the tile generator exists', src.includes('function resendTileHtml('));
   check('the template calls it rather than hardcoding tiles',
-    src.includes('${resendTileHtml()}'), 'the three copied blocks should be gone');
+    template.includes('${resendTileHtml('), 'the three copied blocks should be gone');
   check('no tile id is written out in the template',
-    !/id="(?:pfp|mm|hb|jobby)-inbox"/.test(src),
-    (src.match(/id="(?:pfp|mm|hb|jobby)-inbox"/g) || []).slice(0, 3));
+    !/id="(?:pfp|mm|hb|jobby)-inbox"/.test(template),
+    (template.match(/id="(?:pfp|mm|hb|jobby)-inbox"/g) || []).slice(0, 3));
 
   // The client is driven by the endpoint, so the two lists cannot drift.
   check('the /resend/domains endpoint exists', src.includes("app.get('/resend/domains'"));
