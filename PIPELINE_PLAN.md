@@ -668,3 +668,110 @@ The worker is asked to commit and to reply with the commit URL. Until it does,
 the task parks in `REVIEW` with `no_deliverable_evidence` - which is the
 honest outcome: the work is recorded, and completion still needs an address
 that can be checked.
+
+## 16. Two faults the audits had stopped looking at (2026-10-20)
+
+Both of these were found by walking the product rather than by reading it.
+Neither was visible in a log, and one of them was hidden by the very rule
+that was supposed to catch it.
+
+### 16.1 The evidence gate was asking about the wrong task
+
+`app.task_has_real_evidence(task_id)` was written as:
+
+```sql
+SELECT EXISTS (
+  SELECT 1 FROM app.task_artifacts a
+   WHERE a.task_id = task_id
+     AND a.artifact_url IS NOT NULL
+     AND btrim(a.artifact_url) <> ''
+     AND NOT app.artifact_is_self_referential(a.artifact_url, task_id))
+```
+
+In PostgreSQL, when a SQL function's parameter has the same name as a column
+of a table in its FROM clause, **the column wins** for an unqualified
+reference. So `a.task_id = task_id` was really `a.task_id = a.task_id` - true
+of every row in the table - and the function answered *does ANY artifact
+anywhere carry a real URL?* instead of *does THIS task?*
+
+It did not show, and that is the dangerous part of it. Every artifact the
+fleet had produced was either an empty screenshot or a pointer to its own
+task, so the global answer and the per-task answer happened to be the same
+answer. The first real deliverable - a pull request URL - would have opened
+the gate for every task on the board at once, silently, and the board would
+have said the work was done.
+
+The **triggers** that enforce the rule were already correct
+(`a.task_id = NEW.id`), so the guard itself held. The published oracle did
+not, and the oracle is what the executor, the board and the next reader
+trust.
+
+The parameters are now renamed rather than qualified - a name a column can
+shadow is a trap - which means dropping and recreating both functions.
+PostgreSQL will not rename a parameter through `CREATE OR REPLACE`, and
+nothing depends on them: the triggers call them from inside a plpgsql body,
+which is resolved at run time.
+
+`app.task_artifacts` also had **no foreign key to `app.tasks`**, so an
+artifact could outlive the task it described and sit in the table pointing
+at nothing. It carries one now, `ON DELETE CASCADE`: an artifact whose task
+is gone cannot be opened or checked by anyone.
+
+**Verified**: `app.task_has_real_evidence('no-such-task-id-xyz')` returns
+false in both databases; another task's evidence is not this task's
+evidence; an artifact for a task that does not exist is refused (23503);
+deleting a task takes its evidence with it.
+
+### 16.2 Fifty-seven pairs of functions shared a port
+
+The local runtime served each edge function on a port derived from its name:
+`37000 + (md5(name) % 1000)`. A thousand ports, about three hundred and
+fifty functions. Fifty-seven pairs of functions were allocated the same port,
+and the first one to bind it answered for the other.
+
+The catalogue endpoint was one of them. `list-available-functions` was being
+answered by the **task orchestrator**, which is why the dashboard's function
+list had lost every description and fallen back to a flat array of names. The
+relay's own comment said the function "is not responding" and could not be
+fixed from there. It was answering perfectly well - for a different function.
+
+The hash now spreads over eight hex digits across the window Deno will
+accept (37,000-64,999; it refuses a port of 65536 or above), and the caller
+checks the port is not already held and steps past it if it is, which is
+what actually makes a collision harmless.
+
+**Verified on the running runtime**: fifteen function processes, none sharing
+a port; every function probed answers with its own shape; the catalogue comes
+back from the edge function with 250 entries and no missing descriptions.
+
+### 16.3 Five audits that had stopped auditing
+
+The suite was 44 of 51, and most of the failures were audits whose premise
+had rotted - which is how an audit stops being an audit without anyone
+noticing.
+
+- The dashboard template was extracted out of `server.js` into
+  `campus-page.mjs` on 2026-10-10. Three tests still read `server.js` for
+  it. They now read the page for the template and `server.js` for the
+  generator and the registry, which is where the two halves now live.
+- The supervisor audit **could not evaluate the services array at all**: its
+  sandbox wrapped everything in a proxy that claimed every name, so
+  `process.env` resolved to the proxy's empty string and the array threw
+  before a single assertion ran. It is the check that would have caught the
+  supervisor ignoring the environment a service declares, and the one that
+  would have caught a service that was listed but never started.
+- `fleet-chat-dedupe` completed its probe task by updating the status
+  directly. That is no longer allowed - a task reaches DONE only with an
+  artifact that points at the work - so the probe is given one, and the test
+  now checks the task really closed rather than taking the completion on
+  trust.
+- The announcer exists only in `cron.job` since the JSON placeholder was
+  removed on 2026-10-19. `cron.job` is production configuration and the test
+  database is a schema-only copy whose `cron.job` has no rows, so asking it
+  proved nothing. Both audits read the live schedule now, and skip loudly if
+  it cannot be reached.
+
+### 16.4 The suite is green
+
+**51 of 51 pass.** That is the whole relay suite, against the throwaway test
+database, with the exit code checked.
