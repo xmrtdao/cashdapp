@@ -4257,6 +4257,20 @@ app.use(compression({
 // verification can never succeed, which is presumably why the Resend handler
 // used to log a mismatch and carry on regardless. Signing the captured bytes is
 // what makes the check meaningful.
+// The studio's uploads, before the general body limit.
+//
+// A client sends their invitation or a photograph of the design they like, as
+// a base64 data URL - a third larger than the file. A phone photo is five
+// megabytes, so the body is seven, and the general five-megabyte limit
+// refused it with a 413 that the studio could not explain: the file the
+// client had chosen simply never arrived.
+//
+// Only these two paths get the bigger limit. Everything else on the relay
+// keeps the five megabytes, because the limit is there to stop a body large
+// enough to hurt anyone.
+app.use('/studio/upload', express.json({ limit: '24mb' }));
+app.use('/api/visual/pfp/upload', express.json({ limit: '24mb' }));
+
 app.use(express.json({
   limit: '5mb',
   verify: (req, res, buf) => { req.rawBody = buf; },

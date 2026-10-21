@@ -35,6 +35,10 @@ export class MuAPI {
       const err = new Error(`HTTP ${res.status} ${url}`);
       err.status = res.status;
       err.detail = data;
+      // The body travels with the error. A failed generation is usually
+      // explained by the provider's own message, and losing it turns a
+      // diagnosis into a guess.
+      err.body = JSON.stringify(data).slice(0, 400);
       throw err;
     }
     return data;
@@ -104,7 +108,17 @@ export class MuAPI {
         throw new Error(`timeout after ${timeoutMs}ms; request_id=${rid} (poll it later)`);
       }
       await new Promise(r => setTimeout(r, 3000));
-      const res = await this.#json(`${HOST}/api/v1/predictions/${rid}/result`);
+      // The poll is where a rejected generation shows up. The body is kept,
+      // because "HTTP 400" on its own does not say whether the prompt was
+      // refused, the model was busy, or the request was malformed.
+      let res;
+      try {
+        res = await this.#json(`${HOST}/api/v1/predictions/${rid}/result`);
+      } catch (e) {
+        const detail = String(e.body || e.message || '').slice(0, 300);
+        throw Object.assign(new Error(`poll failed: ${detail}`),
+                            { failed: true, requestId: rid });
+      }
       if (res.status === 'completed') {
         const outputs = res.outputs ?? res.images ?? [];
         return { model: name, requestId: rid, cost, outputs,
