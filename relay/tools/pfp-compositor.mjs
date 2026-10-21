@@ -388,7 +388,11 @@ async function compositeIn(browser, job, css, scale, shell, logoSrc, backdropSrc
       return { lines, px: minPx };
     };
 
-    const t1 = fitHeadline(headlineParts, SCRIPT, 400, TEXT_MAX_W, 150, 52);
+    // The headline is a script: it has presence, but the DATE is the smaller
+    // line under it, and a script at three times the date's size is a shout
+    // rather than a headline. The two are set to a proportion, not to the
+    // largest size that happens to fit.
+    const t1 = fitHeadline(headlineParts, SCRIPT, 400, TEXT_MAX_W, 92, 46);
     const t2 = fitWrapped(line2, SERIF, 500, TEXT_MAX_W * 0.92, 64, 22, 1);
 
     // Line heights, measured for the faces in use. A script at 150px needs the
