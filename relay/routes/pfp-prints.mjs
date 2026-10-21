@@ -41,6 +41,13 @@ for (const d of [WORK, UPLOADS, RENDERS]) await fs.mkdir(d, { recursive: true })
 // anyone can hit should not be able to spend a meaningful amount.
 const BUDGET = Number(process.env.PFP_PRINTS_BUDGET ?? 3.00);
 
+// The DESIGN PHASE is a picture on a screen. The print is 4x6 at 300dpi; a
+// design review does not need that, and a 4.4MB PNG per draft is a 4.4MB
+// download per draft. So the studio composes at 72dpi - a quarter of each
+// dimension, a sixteenth of the pixels - and the APPROVED file is written at
+// 300dpi, once, when the client says yes.
+const DESIGN_SCALE = Number(process.env.PFP_DESIGN_SCALE ?? 0.24);
+
 /** Server-side whitelist of engaged clients' IPs per booking. */
 const WHITELIST = path.join(WORK, 'whitelist.json');
 let whitelist = {};
@@ -67,9 +74,50 @@ const getDesigner = () => {
   return designer;
 };
 
-/** Per-booking state. In-memory on purpose — a redesign that deserves durable
- *  storage deserves a table, not a Map that silently loses work on restart. */
+/** Per-booking state.
+ *
+ * It was in a Map on purpose - "a redesign that deserves durable storage
+ * deserves a table" - and then a RELAY RESTART took the client's design with
+ * it. A paying client who refreshes, or whose server restarts mid-session,
+ * came back to a blank studio and a message saying the first draft was
+ * being prepared, which it never would be.
+ *
+ * So the session is written to disk as well. A table is the better answer
+ * and still worth doing; until then, this is the difference between a
+ * client's work existing and not.
+ */
 const sessions = new Map();
+const SESSION_STORE = path.join(RELAY, 'relay-data', 'pfp-studio-sessions.json');
+let storedSessions = {};
+try {
+  storedSessions = JSON.parse(await fs.readFile(SESSION_STORE, 'utf8'));
+} catch { storedSessions = {}; }
+
+let persistTimer = null;
+function persistSessions() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(async () => {
+    persistTimer = null;
+    try {
+      const out = {};
+      for (const [k, v] of sessions) out[k] = v;
+      await fs.writeFile(SESSION_STORE, JSON.stringify(out));
+    } catch (e) {
+      console.warn('[pfp-prints] could not write the session store:', e.message);
+    }
+  }, 800);
+  persistTimer.unref?.();
+}
+
+/** The session for a booking, from memory or from disk. */
+function getSession(booking) {
+  let s = sessions.get(booking);
+  if (!s && storedSessions[booking]) {
+    s = storedSessions[booking];
+    sessions.set(booking, s);
+  }
+  return s;
+}
 
 const uuid = () => crypto.randomUUID();
 
@@ -121,11 +169,24 @@ const backdropFile = (slug) =>
 
 // Serve the backdrop images. They are static assets, so they are served
 // directly from disk with a long cache header.
+//
+// The THUMBNAIL matters as much as the picture: the full curtain is a
+// 1,200-pixel PNG - a megabyte and a half each - and a picker row of eleven
+// of them would pull down fifteen megabytes to show eleven swatches. The
+// small "-backdrop.jpg" versions are twenty to two hundred kilobytes.
 router.get('/backdrops/:slug.png', (req, res) => {
   const slug = String(req.params.slug).replace(/[^a-z0-9-]/gi, '');
   const file = path.join(BACKDROP_DIR, `${slug}.png`);
   if (!existsSync(file)) return res.status(404).json({ error: 'no such backdrop' });
   res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.sendFile(file);
+});
+
+router.get('/backdrops/thumb/:slug.jpg', (req, res) => {
+  const slug = String(req.params.slug).replace(/[^a-z0-9-]/gi, '');
+  const file = path.join(BACKDROP_DIR, `${slug}-backdrop.jpg`);
+  if (!existsSync(file)) return res.status(404).json({ error: 'no such backdrop thumbnail' });
+  res.setHeader('Cache-Control', 'public, max-age=604800');
   res.sendFile(file);
 });
 
@@ -147,6 +208,16 @@ router.get('/context', async (req, res) => {
   //
   // This is what lets the confirmation step show the client their own words
   // instead of asking them to type what they already told us.
+  //
+  // There are TWO ways a booking arrives, so there are two ways to find it:
+  //
+  //   1. the web funnel, which mints a booking_token in app.pfp_bookings;
+  //   2. a booking that came in by REPLY EMAIL, which lands in
+  //      public.pfp_bookings against a lead and has no token at all - the
+  //      studio link for those clients carries the lead id instead.
+  //
+  // A studio that only knew about the first door would greet a real,
+  // paying, email-booked client as a stranger.
   let booked = null;
   if (/^[A-Za-z0-9_-]{8,64}$/.test(bookingId)) {
     try {
@@ -162,15 +233,28 @@ router.get('/context', async (req, res) => {
       booked = null;
     }
   }
+  if (!booked && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bookingId)) {
+    try {
+      const rows = await localQuery(
+        `SELECT client_name, event_name, event_date, event_type, venue, package_type, hours
+           FROM public.pfp_bookings WHERE lead_id = $1 LIMIT 1`,
+        [bookingId]);
+      booked = rows[0] || null;
+      if (booked && booked.event_type) booked.event_type = booked.event_type;
+    } catch (e) {
+      booked = null;
+    }
+  }
 
   const b = {
     booking_id: bookingId,
     client_name: req.query.name || (booked && booked.client_name) || 'there',
     event_name: req.query.event || (booked && booked.event_name) || 'your celebration',
-    event_type: req.query.type || 'celebration',
+    event_type: req.query.type || (booked && booked.event_type) || 'celebration',
     event_date: req.query.date || (booked && booked.event_date) || null,
-    hours: req.query.hours ? Number(req.query.hours) : null,
-    package_type: req.query.package || null,
+    venue: (booked && booked.venue) || null,
+    hours: req.query.hours ? Number(req.query.hours) : (booked && booked.hours) || null,
+    package_type: req.query.package || (booked && booked.package_type) || null,
   };
 
   const styleFor = {
@@ -188,7 +272,7 @@ router.get('/context', async (req, res) => {
   // lost the draft they had already paid for, the documents they had
   // uploaded, and the conversation they had with Eliza. The session is the
   // work; opening the studio is not a request to throw it away.
-  const existing = sessions.get(bookingId);
+  const existing = getSession(bookingId);
   if (existing) {
     // The booking is still the authority, but only where it says something
     // real: the placeholder must not overwrite what the client has already
@@ -196,6 +280,7 @@ router.get('/context', async (req, res) => {
     if (booked && booked.client_name) existing.client_name = booked.client_name;
     if (booked && booked.event_name) existing.event_name = booked.event_name;
     if (booked && booked.event_date) existing.event_date = booked.event_date;
+    persistSessions();
     return res.json({ ...existing, styles, resuming: true });
   }
 
@@ -221,6 +306,7 @@ router.get('/context', async (req, res) => {
   };
   sessions.set(bookingId, session);
   whitelistIp(bookingId, req);
+  persistSessions();
   res.json({ ...session, styles, resuming: false });
 });
 
@@ -256,7 +342,7 @@ function themeText(typed, mood) {
 // client's invitation colours end up nowhere.
 router.post('/upload', async (req, res) => {
   const { booking, kind = 'logo', dataUrl, fileName } = req.body || {};
-  const s = sessions.get(booking);
+  const s = getSession(booking);
   if (!s) return res.status(404).json({ error: 'unknown booking' });
   if (!dataUrl || !/^data:image\/(png|jpeg|jpg|webp);base64,/.test(dataUrl)) {
     return res.status(400).json({ error: 'expected a base64 image data URL' });
@@ -345,6 +431,8 @@ router.post('/upload', async (req, res) => {
         ? 'Design reference received — the background will be built around it.'
         : 'Inspiration received — the next draft will be built around it.',
   });
+  // The client's work outlives the process: a restart must not take it away.
+  persistSessions();
 });
 
 /** Read an image's dimensions without trusting the client or the filename. */
@@ -399,7 +487,7 @@ async function paletteFromFile(file) {
 // defect found in the first live use, and the reason the chat looked broken.
 router.post('/draft', async (req, res) => {
   const { booking, style_id, line1, line2, theme, palette, backdrop } = req.body || {};
-  const s = sessions.get(booking);
+  const s = getSession(booking);
   if (!s) return res.status(404).json({ error: 'unknown booking' });
 
   const styleId = STYLE_BANK[style_id] ? style_id : s.style_id;
@@ -434,6 +522,7 @@ router.post('/draft', async (req, res) => {
       line1: line1 ?? s.line1,
       line2: line2 ?? s.line2,
       outPath: path.join(RENDERS, `${booking}-r${s.revision + 1}.png`),
+      scale: DESIGN_SCALE,
     });
 
     s.style_id = styleId;
@@ -442,6 +531,13 @@ router.post('/draft', async (req, res) => {
     s.theme = (theme ?? s.theme ?? '').toString().slice(0, 400);
     s.palette = (palette ?? s.palette ?? '').toString().slice(0, 120);
     s.shellUrl = shell.shellUrl;
+    // The shell on disk as well as in the cloud: changing the curtain
+    // re-composites the design they already have, and that needs the file.
+    s.shellPath = shell.shellPath;
+    // The finished print, so that a client who comes back - or whose page is
+    // reloaded - sees their design rather than a message saying the first
+    // draft is being prepared.
+    s.printUrl = `/api/visual/pfp/file/${path.basename(out.out)}`;
     s.revision += 1;
 
     res.json({
@@ -462,15 +558,224 @@ router.post('/draft', async (req, res) => {
       action: 'I have logged this for our team so you do not have to chase it.',
     });
   }
+  // The client's work outlives the process: a restart must not take it away.
+  persistSessions();
 });
 
-// ── 4. Revision ────────────────────────────────────────────────────────────
+// ── 5. Options: several designs for the client to choose between ───────────
+//
+// A client does not know what they want. They know they want it to look
+// like the invitation, and like the picture they showed you, and they would
+// rather not have to describe it in words. So the studio offers three
+// DESIGNS, and each one is a direction that came from their own documents:
+//
+//   1. the colours on their invitation
+//   2. the colours in the design reference they showed us
+//   3. the style's own palette - the classic version of what they chose
+//
+// The shell is what costs money, so the options are rendered as shells and
+// composited locally; picking one afterwards re-composites and costs nothing
+// further. A failure opens a task and never auto-retries, like every other
+// generation here.
+router.post('/options', async (req, res) => {
+  const { booking } = req.body || {};
+  const s = getSession(booking);
+  if (!s) return res.status(404).json({ error: 'unknown booking' });
+  if (!s.shellUrl) {
+    return res.status(409).json({ error: 'no design yet — draw one first' });
+  }
+
+  const style = STYLE_BANK[s.style_id] || STYLE_BANK[Object.keys(STYLE_BANK)[0]];
+  const candidates = [];
+  const push = (label, hexes, source) => {
+    const list = (hexes || []).filter(Boolean);
+    if (!list.length) return;
+    const palette = list.join(', ');
+    if (candidates.some((c) => c.palette === palette)) return;
+    candidates.push({ label, palette, source });
+  };
+  push('The colours on your invitation', s.brandHexes, 'brand');
+  push('The design you showed us', s.themePalette, 'reference');
+  push('The classic version', style.accentHexes, 'style');
+  if (!candidates.length) push('The classic version', style.accentHexes, 'style');
+
+  const logoRec = s.uploaded.find((u) => u.kind === 'logo');
+  const theme = themeText(s.theme, s.themeMood);
+  const started = Date.now();
+  const options = [];
+  let spent = 0;
+
+  try {
+    const d = getDesigner();
+    for (const c of candidates) {
+      const shell = await d.render({
+        kind: 'draft',
+        styleId: s.style_id,
+        brandHexes: s.brandHexes || [],
+        hasLogo: !!logoRec,
+        theme,
+        palette: c.palette,
+        moodHexes: s.themePalette || [],
+        backdropPath: s.backdrop ? backdropFile(s.backdrop) : null,
+        workDir: RENDERS,
+      });
+      spent += shell.cost || 0;
+      const out = await d.finish({
+        shellPath: shell.shellPath,
+        logoPath: logoRec ? path.join(UPLOADS, path.basename(logoRec.file)) : null,
+        backdropPath: shell.backdropPath || null,
+        line1: s.line1,
+        line2: s.line2,
+        outPath: path.join(RENDERS, `${booking}-opt${options.length + 1}.png`),
+        scale: DESIGN_SCALE,
+      });
+      options.push({
+        label: c.label,
+        source: c.source,
+        palette: c.palette,
+        image: `/api/visual/pfp/file/${path.basename(out.out)}`,
+        shellUrl: shell.shellUrl,
+        shellPath: shell.shellPath,
+      });
+    }
+
+    // Kept on the session so that choosing one is free: the shell is already
+    // rendered, it only has to be composited onto the print.
+    s.options = options.map((o) => ({
+      label: o.label, source: o.source, palette: o.palette,
+      image: o.image, shellUrl: o.shellUrl, shellPath: o.shellPath,
+    }));
+
+    res.json({
+      ok: true, options,
+      cost: Number(spent.toFixed(3)),
+      seconds: Math.round((Date.now() - started) / 1000),
+    });
+  } catch (e) {
+    openCorrectionTask(s, e, 'options');
+    res.status(502).json({
+      error: 'The designer could not finish those options.',
+      detail: e.message,
+      action: 'I have logged this for our team so you do not have to chase it.',
+    });
+  }
+  // The client's work outlives the process: a restart must not take it away.
+  persistSessions();
+});
+
+/** Adopt one of the options: the shell is already rendered, so this is free. */
+router.post('/options/choose', async (req, res) => {
+  const { booking, index } = req.body || {};
+  const s = getSession(booking);
+  if (!s) return res.status(404).json({ error: 'unknown booking' });
+  const opt = (s.options || [])[Number(index)];
+  if (!opt) return res.status(404).json({ error: 'no such option' });
+
+  try {
+    const d = getDesigner();
+    const logoRec = s.uploaded.find((u) => u.kind === 'logo');
+    s.palette = opt.palette;
+    const out = await d.finish({
+      shellPath: opt.shellPath,
+      logoPath: logoRec ? path.join(UPLOADS, path.basename(logoRec.file)) : null,
+      backdropPath: s.backdrop ? backdropFile(s.backdrop) : null,
+      line1: s.line1,
+      line2: s.line2,
+      outPath: path.join(RENDERS, `${booking}-r${s.revision + 1}.png`),
+      scale: DESIGN_SCALE,
+    });
+    s.shellUrl = opt.shellUrl;
+    s.printUrl = `/api/visual/pfp/file/${path.basename(out.out)}`;
+    s.revision += 1;
+    res.json({
+      ok: true, revision: s.revision,
+      image: `/api/visual/pfp/file/${path.basename(out.out)}`,
+      shell: opt.shellUrl,
+      geometry: out.geometry, cost: 0, spent: d.spent,
+      label: opt.label, palette: opt.palette,
+    });
+  } catch (e) {
+    openCorrectionTask(s, e, 'options/choose');
+    res.status(502).json({
+      error: 'The designer could not apply that option.',
+      detail: e.message,
+      action: 'I have logged this for our team so you do not have to chase it.',
+    });
+  }
+});
+
+// ── 5b. Change the curtain, keep the design ────────────────────────────────
+//
+// The backdrop is a LAYER of the print, not a part of the artwork: the
+// artwork is the shell, and the curtain is composited behind it. So changing
+// the curtain re-composites the design they already have and costs nothing
+// - no model, no money, and the design they chose is not thrown away and
+// redrawn into something else.
+router.post('/backdrop', async (req, res) => {
+  const { booking, backdrop } = req.body || {};
+  const s = getSession(booking);
+  if (!s) return res.status(404).json({ error: 'unknown booking' });
+
+  // The shell on disk. A session that was drawn before the path was kept has
+  // only the cloud copy, so fetch it once - it is the design the client
+  // chose, and re-drawing it would be a different design.
+  let shellPath = s.shellPath;
+  if (!shellPath && s.shellUrl) {
+    try {
+      const buf = Buffer.from(await (await fetch(s.shellUrl)).arrayBuffer());
+      shellPath = path.join(RENDERS, `${s.booking_id}-shell.jpg`);
+      await fs.writeFile(shellPath, buf);
+      s.shellPath = shellPath;
+    } catch (e) {
+      return res.status(409).json({ error: 'the design could not be fetched — draw it again' });
+    }
+  }
+  if (!shellPath) return res.status(409).json({ error: 'no design yet' });
+
+  // "none" is a real choice: some clients want the transparent cut-out.
+  const slug = String(backdrop || '').trim();
+  const file = slug && slug !== 'none' ? backdropFile(slug) : null;
+  if (slug && slug !== 'none' && !file) {
+    return res.status(400).json({ error: 'unknown backdrop' });
+  }
+
+  try {
+    const d = getDesigner();
+    const logoRec = s.uploaded.find((u) => u.kind === 'logo');
+    s.backdrop = file ? slug : null;
+    const out = await d.finish({
+      shellPath,
+      logoPath: logoRec ? path.join(UPLOADS, path.basename(logoRec.file)) : null,
+      backdropPath: file,
+      line1: s.line1,
+      line2: s.line2,
+      outPath: path.join(RENDERS, `${booking}-r${s.revision + 1}.png`),
+      scale: DESIGN_SCALE,
+    });
+    s.revision += 1;
+    s.printUrl = `/api/visual/pfp/file/${path.basename(out.out)}`;
+    persistSessions();
+    res.json({
+      ok: true, image: s.printUrl, revision: s.revision,
+      backdrop: s.backdrop, cost: 0, spent: d.spent,
+    });
+  } catch (e) {
+    openCorrectionTask(s, e, 'backdrop');
+    res.status(502).json({
+      error: 'The designer could not change the curtain.',
+      detail: e.message,
+      action: 'I have logged this for our team so you do not have to chase it.',
+    });
+  }
+});
+
+// ── 6. Revision ────────────────────────────────────────────────────────────
 // A revision keeps the client's artwork and adjusts it, instead of handing back
 // an entirely different design. Different model on purpose: the edit model
 // re-decides composition less destructively than a text-to-image pass.
 router.post('/revise', async (req, res) => {
   const { booking, direction, theme, palette } = req.body || {};
-  const s = sessions.get(booking);
+  const s = getSession(booking);
   if (!s) return res.status(404).json({ error: 'unknown booking' });
   if (!s.shellUrl) return res.status(409).json({ error: 'no draft to revise yet' });
 
@@ -501,6 +806,7 @@ router.post('/revise', async (req, res) => {
       backdropPath: out.backdropPath || null,
       line1: s.line1, line2: s.line2,
       outPath: path.join(RENDERS, `${booking}-r${s.revision + 1}.png`),
+      scale: DESIGN_SCALE,
     });
 
     s.shellUrl = out.shellUrl || s.shellUrl;
@@ -518,19 +824,55 @@ router.post('/revise', async (req, res) => {
       action: 'I have logged this for our team so you do not have to chase it.',
     });
   }
+  // The client's work outlives the process: a restart must not take it away.
+  persistSessions();
 });
 
 // ── 5. Approval ────────────────────────────────────────────────────────────
-router.post('/approve', (req, res) => {
-  const s = sessions.get(req.body?.booking);
+// Approving writes the PRINT: the same design, composited at 300dpi, which is
+// the file the print team cuts. The studio was working at 72dpi because the
+// client was reviewing a picture on a screen; this is the moment that stops
+// being true. It is a local composite of the shell they already chose - no
+// model, no money, and not a redraw that might not be the design they liked.
+router.post('/approve', async (req, res) => {
+  const s = getSession(req.body?.booking);
   if (!s) return res.status(404).json({ error: 'unknown booking' });
+
+  let print = null;
+  if (s.shellPath) {
+    try {
+      const d = getDesigner();
+      const logoRec = s.uploaded.find((u) => u.kind === 'logo');
+      const out = await d.finish({
+        shellPath: s.shellPath,
+        logoPath: logoRec ? path.join(UPLOADS, path.basename(logoRec.file)) : null,
+        backdropPath: s.backdrop ? backdropFile(s.backdrop) : null,
+        line1: s.line1,
+        line2: s.line2,
+        outPath: path.join(RENDERS, `${s.booking_id}-print.png`),
+        scale: 1,
+      });
+      print = {
+        file: `/api/visual/pfp/file/${path.basename(out.out)}`,
+        dpi: out.dpi, size: out.file, bytes: out.bytes,
+      };
+      s.printFile = print.file;
+    } catch (e) {
+      // The approval is still recorded - the client said yes - and the
+      // failure is logged for a human, exactly like every other generation
+      // failure here. Never auto-retried.
+      openCorrectionTask(s, e, 'print');
+    }
+  }
+
   s.approved = true;
   s.approvedAt = new Date().toISOString();
   s.messages.push({
     role: 'eliza',
     text: "That's locked in and with our print team. Thank you — enjoy every strobe flash!",
   });
-  res.json({ ok: true, approvedAt: s.approvedAt });
+  persistSessions();
+  res.json({ ok: true, approvedAt: s.approvedAt, print });
 });
 
 // ── 6. Serve generated + uploaded files ────────────────────────────────────

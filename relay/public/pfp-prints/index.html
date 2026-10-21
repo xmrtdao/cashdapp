@@ -44,13 +44,31 @@
         color:var(--gold-deep);flex:none;background:rgba(184,134,11,.07)}
   .chip.live{color:var(--ok);border-color:rgba(47,125,87,.4);background:rgba(47,125,87,.08)}
 
-  main{flex:1;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);
-       gap:0;min-height:0}
+  /* ── Layout: mobile first ────────────────────────────────────────────────
+     The base rules are the SMALL screen, because that is the frame a client
+     opens a link in and the one that had been left to chance.
+
+     A 4x6 print and a column of words cannot both have a phone screen, so on
+     a phone the design fills the frame and the conversation is a sheet that
+     slides up over it. From 560px the two sit side by side: the chat in a
+     fixed column, the design taking the rest - and the divider between them
+     can be dragged, because a client who wants to read the conversation and a
+     client who wants to see the print want different things, and neither
+     should have to give up the other.
+
+     The two panes are NEVER stacked full-height: that is the layout that
+     showed a client a thumbnail of their own print. */
+  main{flex:1;display:grid;grid-template-columns:minmax(0,1fr);
+       grid-template-rows:minmax(0,1fr);min-height:0;position:relative}
 
   /* ── Chat ─────────────────────────────────────────────────────────────── */
-  #chat{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
+  #chat{grid-column:1;grid-row:1;z-index:30;display:none;flex-direction:column;
+        min-height:0;align-self:end;max-height:min(78%,640px);
+        background:var(--page);border-top:1px solid var(--line);
+        box-shadow:0 -20px 48px rgba(0,0,0,.22)}
+  #chat.open{display:flex}
   #log{flex:1;overflow-y:auto;padding:20px 18px;display:flex;flex-direction:column;gap:14px}
-  .msg{max-width:82%;padding:12px 14px;border-radius:14px;font-size:14px;
+  .msg{max-width:92%;padding:12px 14px;border-radius:14px;font-size:14px;
        line-height:1.6;white-space:pre-wrap;word-wrap:break-word}
   .msg.eliza{background:var(--ink-2);border:1px solid var(--line);
              border-bottom-left-radius:5px;align-self:flex-start;
@@ -88,10 +106,16 @@
   #tts{margin-left:auto}
 
   /* ── Studio ───────────────────────────────────────────────────────────── */
-  #studio{display:flex;flex-direction:column;min-height:0;background:
+  #studio{display:flex;flex-direction:column;min-height:0;grid-column:1;grid-row:1;
+          background:
           radial-gradient(700px 400px at 50% 0%, rgba(184,134,11,.07), transparent 70%)}
-  #stagewrap{flex:1;display:grid;place-items:center;padding:20px;min-height:0}
-  .frame{position:relative;max-height:100%;max-width:100%;
+  #stagewrap{flex:1;display:grid;place-items:center;padding:20px;min-height:0;overflow:hidden}
+  /* The frame is the print: 1200x1800, so 2:3. Its HEIGHT comes from the
+     stage and its width follows the ratio - a percentage against an auto
+     height collapses to nothing, which is how the print ended up 2x3 pixels
+     in the corner of an empty pane. */
+  .frame{position:relative;height:100%;width:auto;aspect-ratio:2/3;
+         max-width:100%;max-height:100%;
          /* checkerboard = transparency, so the client can SEE the cut-outs */
          background-image:
            linear-gradient(45deg,#D8D2C6 25%,transparent 25%),
@@ -101,12 +125,59 @@
          background-size:18px 18px;background-position:0 0,0 9px,9px -9px,-9px 0;
          border-radius:var(--r);overflow:hidden;box-shadow:0 12px 32px rgba(28,26,23,.14);
          border:1px solid var(--line);display:none}
-  .frame img{display:block;max-height:calc(100vh - 230px);max-width:100%;object-fit:contain}
+  .frame img{display:block;width:100%;height:100%;object-fit:contain}
   #empty{text-align:center;color:var(--muted);font-size:13px;max-width:280px;line-height:1.65}
   #empty svg{opacity:.35;margin-bottom:12px}
 
+  /* ── From 560px: side by side ────────────────────────────────────────────
+     The two panes sit next to each other from here up, and the divider
+     between them can be dragged. A client who wants to read the
+     conversation and a client who wants to see the print want different
+     things, and the print is PORTRAIT - it needs a tall column more than a
+     wide one, which is why the conversation gets a fixed width and the
+     design takes the rest.
+
+     This block comes AFTER the base rules on purpose: a media query does
+     not outrank a later rule of the same specificity, and when it came
+     first the studio stayed in the first column and sat on top of the
+     chat. */
+  @media(min-width:560px){
+    main{grid-template-columns:var(--chat-w, 320px) 7px minmax(0,1fr);
+         grid-template-rows:minmax(0,1fr)}
+    #chat{grid-column:1;grid-row:1;z-index:auto;display:flex;max-height:none;
+          height:100%;align-self:stretch;box-shadow:none;
+          border-top:none;border-right:1px solid var(--line)}
+    #chat:not(.open){display:flex}
+    #splitter{grid-column:2;grid-row:1;display:block;background:transparent;
+              border:none;padding:0;cursor:col-resize;position:relative;
+              touch-action:none}
+    #splitter::after{content:"";position:absolute;inset:0 3px;background:var(--line);
+                     transition:background .15s}
+    #splitter:hover::after,#splitter.dragging::after{background:var(--gold)}
+    #splitter:focus-visible{outline:2px solid var(--gold);outline-offset:-2px}
+    #studio{grid-column:3;grid-row:1}
+    main.chat-hidden{grid-template-columns:0 0 minmax(0,1fr)}
+    main.chat-hidden #chat,main.chat-hidden #splitter{display:none}
+  }
+
   #controls{flex:none;border-top:1px solid var(--line);padding:12px 16px;
             background:rgba(250,247,241,.92);display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+
+  /* The options strip: the designs to choose between, side by side. */
+  #options-strip{flex:none;display:none;gap:10px;padding:12px 16px;
+                 border-top:1px solid var(--line);background:rgba(250,247,241,.92);
+                 overflow-x:auto}
+  #options-strip.on{display:flex}
+  #options-strip .opt{flex:none;width:132px;border:2px solid var(--line);border-radius:10px;
+                      overflow:hidden;cursor:pointer;background:var(--paper);padding:0;
+                      font:inherit;color:inherit;text-align:left;transition:.15s}
+  #options-strip .opt:hover{border-color:var(--line-strong)}
+  #options-strip .opt.picked{border-color:var(--gold);box-shadow:0 0 0 3px rgba(184,134,11,.18)}
+  #options-strip .opt img{display:block;width:100%;aspect-ratio:2/3;object-fit:cover;background:var(--ink-2)}
+  #options-strip .opt b{display:block;font-size:11px;padding:6px 7px 2px;color:var(--gold-deep)}
+  #options-strip .opt em{font-style:normal;font-size:10px;color:var(--muted);padding:0 7px 7px;display:block}
+  #options-strip .opt .swatches{display:flex;gap:3px;padding:0 7px 7px}
+  #options-strip .opt .swatches i{width:12px;height:12px;border-radius:3px;border:1px solid rgba(0,0,0,.12)}
   select{flex:1;min-width:150px;padding:9px 11px;border-radius:9px;border:1px solid var(--line);
          background:var(--ink-2);color:var(--ink);font:inherit;font-size:13px}
   select:focus{outline:none;border-color:var(--gold)}
@@ -146,9 +217,9 @@
   .meta b{color:var(--gold-deep);font-weight:600}
 
   @media(max-width:900px){
-    main{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) minmax(0,1fr)}
-    #chat{border-right:none;border-bottom:1px solid var(--line)}
-    .frame img{max-height:46vh}
+    /* The print is bounded by the stage, not by the viewport, so there is no
+       separate rule for a short screen: the frame takes what fits. */
+    #chat{border-right:none}
   }
 
   /* ── Onboarding ────────────────────────────────────────────────────────── */
@@ -253,11 +324,27 @@
   /* ── Event type bar, above the chat ────────────────────────────────────── */
   #etype{flex:none;display:flex;align-items:center;gap:8px;padding:9px 12px;
          border-bottom:1px solid var(--line);background:rgba(250,247,241,.92);
-         font-size:11px;color:var(--muted)}
+         font-size:11px;color:var(--muted);flex-wrap:wrap}
   #etype label{font-size:11px;margin:0;flex:none;font-weight:600;color:var(--gold-deep)}
   #etype select{flex:1;min-width:0;padding:6px 9px;border-radius:8px;border:1px solid var(--line);
                 background:var(--ink-2);color:var(--ink);font:inherit;font-size:12px}
   @media(min-width:900px){ #etype{font-size:12px} #etype select{font-size:13px} }
+
+  /* The backdrop picker, right under the event selector.
+     The curtain is a LAYER of the print, not part of the artwork, so choosing
+     one here re-composites the design the client already has - no redraw, no
+     cost, and the design they liked is not thrown away. */
+  #bds{flex:none;display:flex;gap:6px;padding:8px 12px;overflow-x:auto;
+       border-bottom:1px solid var(--line);background:rgba(250,247,241,.92);
+       align-items:center;scrollbar-width:thin}
+  #bds .bd{width:44px;height:56px;flex:none;border:2px solid var(--line);
+           border-radius:7px;overflow:hidden;cursor:pointer;padding:0;background:var(--ink-2);
+           position:relative;transition:.15s}
+  #bds .bd img{width:100%;height:100%;object-fit:cover;display:block}
+  #bds .bd:hover{border-color:var(--line-strong)}
+  #bds .bd.sel{border-color:var(--gold);box-shadow:0 0 0 2px rgba(184,134,11,.2)}
+  #bds .bd.none{display:grid;place-items:center;font-size:10px;color:var(--muted)}
+  #bds .bd.none.sel{color:var(--gold-deep)}
 
 </style>
 </head>
@@ -363,7 +450,9 @@
       <div id="etype">
         <label for="etype-sel">Event</label>
         <select id="etype-sel"></select>
+        <button class="btn" id="chattoggle" style="flex:none;padding:6px 10px;font-size:11px">Chat</button>
       </div>
+      <div id="bds"></div>
       <div id="log"></div>
       <div id="bar">
         <div class="chips" id="quick"></div>
@@ -376,6 +465,9 @@
         <input type="file" id="file" accept="image/*" hidden />
       </div>
     </section>
+
+    <div id="splitter" role="separator" aria-orientation="vertical" tabindex="0"
+         aria-label="Resize the conversation and the design"></div>
 
     <section id="studio">
       <div id="stagewrap" style="position:relative">
@@ -397,6 +489,7 @@
         </div>
       </div>
       <div class="meta" id="meta"></div>
+      <div id="options-strip"></div>
       <div id="controls">
         <!-- The style <select> is hidden, not deleted. It is still the single
              source of truth for "which style is loaded" and roughly a dozen
@@ -407,6 +500,7 @@
         <select id="style" hidden aria-hidden="true"></select>
         <button class="btn" id="redraft">New draft</button>
         <button class="btn" id="revise">Refine</button>
+        <button class="btn" id="more">More options</button>
         <button class="btn ok" id="approve" disabled>Approve</button>
       </div>
     </section>
@@ -580,6 +674,18 @@
       B = j; styles = j.styles || []; rev = j.revision || 0;
       if (id) { try { localStorage.setItem('pfp_booking', id); } catch (_) {} }
       $('#app').style.display = 'flex';
+
+      // A client who already has a design does not get the questions again.
+      // Putting the backdrop picker in front of someone whose print is
+      // finished is how a finished design gets overwritten by accident - and
+      // it is the reason a returning client was met with "pick your backdrop"
+      // instead of their own template.
+      if (j.resuming && (j.printUrl || j.shellUrl)) {
+        $('#onboard').classList.add('done');
+        OB.step = 5;
+        OB.backdrop = j.backdrop || null;
+        backdrop = j.backdrop || null;
+      }
       boot();
     } catch (e2) {
       console.error(e2);
@@ -840,11 +946,15 @@
     const bookedTitle = /your celebration/i.test(rawTitle) ? '' : rawTitle;
     const bookedDate = obFormatDate(B && B.event_date);
 
-    // What the session already remembers wins: that is the words the client
-    // CONFIRMED, and asking them to type them again is asking them to do the
-    // work twice.
-    const title = (B && B.line1) || bookedTitle || OB.parsedTitle || '';
-    const date = (B && obFormatDate(B.line2)) || bookedDate || OB.parsedDate || '';
+    // The TITLE is what gets printed, and the invitation is the client's own
+    // wording for it - "Natalia Jaffee & Jonathan Knapp" - where the booking
+    // carries an internal label like "Jaffee-Knapp Wedding". So the document
+    // leads and the booking fills the gap.
+    //
+    // The DATE is the other way round: they booked a date, and the date on
+    // the invitation is a document they may have reused.
+    const title = OB.parsedTitle || bookedTitle || (B && B.line1) || '';
+    const date = bookedDate || OB.parsedDate || (B && obFormatDate(B.line2)) || '';
 
     const titleEl = $('#ob-title'), dateEl = $('#ob-date');
     if (!titleEl.value) titleEl.value = title;
@@ -919,6 +1029,18 @@
       `<option value="${s.id}">${s.name}</option>`).join('');
     $('#style').value = B.style_id;
 
+    // A client who comes back to a studio that already has their design must
+    // SEE it. Otherwise the page says the first draft is being prepared - a
+    // message about a draft that was made hours ago - and the dropzone sits
+    // on top of the empty frame.
+    if (B.printUrl) {
+      rev = B.revision || 1;
+      show(B.printUrl);
+    } else if (B.shellUrl) {
+      rev = B.revision || 1;
+      $('#hRev').textContent = 'Draft ' + rev;
+    }
+
     log.innerHTML = '';
     (B.messages || []).forEach(m => say_(m.role, m.text));
     quick();
@@ -934,7 +1056,7 @@
     // The backdrop catalogue is fetched lazily now, only if a client asks to
     // swap curtains in chat. Prefetching it on every open bought nothing: the
     // onboarding step already loaded it for anyone who got that far.
-    backdropCatalogue();
+    backdropCatalogue().then(renderBackdropPicker);
   }
 
   const QUICK = [
@@ -962,10 +1084,14 @@
     empty.style.display = 'none';
     $('#hRev').textContent = 'Draft ' + rev;
     $('#approve').disabled = approved;
-    // The dropzone is a first-run invitation, not a permanent overlay. Once a
-    // design exists it was covering the very thing the client came to see, so
-    // it retires after the first draft. The paperclip stays for later uploads.
-    if (!uploadedLogo && rev > 1) drop.classList.add('gone');
+    // The dropzone is a first-run invitation, not a permanent overlay, and it
+    // must never cover a design: the whole point of the studio is the design,
+    // and the client was met by "drop your logo here" instead of it.
+    //
+    // It comes back if a file is dragged over the page, so dropping a logo on
+    // a finished design still works - and the paperclip is there for the
+    // client who would rather click.
+    if (rev > 0) drop.classList.add('gone');
   }
 
   /** `got` carries the client's theme/palette request, if there was one. */
@@ -1038,6 +1164,75 @@
   $('#revise').onclick = refine;
   $('#style').onchange = () => newDraft();
 
+  // ── Options: several designs, side by side ──────────────────────────────
+  // A client who cannot describe what they want can still choose between
+  // things. Each option is a direction that came from their own documents -
+  // the colours on the invitation, the colours in the design they showed us,
+  // and the style's own palette - so choosing one is choosing between their
+  // own words rather than between our guesses.
+  $('#more').onclick = showOptions;
+
+  async function showOptions() {
+    if (!rev) { say_('sys', 'Let me draw you a first one, then I can offer you some alternatives.'); return; }
+    working(true);
+    $('#busytext').textContent = 'Eliza is drawing a few alternatives…';
+    try {
+      const r = await fetch(`${API}/options`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ booking: B.booking_id }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'The designer could not finish those options.');
+      renderOptions(j.options || []);
+      say_('eliza',
+        `Here are ${(j.options || []).length} versions to look at`
+        + (j.cost ? ` ($${j.cost.toFixed(2)} to draw)` : '')
+        + `. Tap the one you like and that becomes your design.`);
+    } catch (e) {
+      const d = e.detail ? e : {};
+      sys(d.error || 'The designer could not draw those alternatives. '
+        + (d.action || 'I have logged it for our team.'));
+    } finally { working(false); }
+  }
+
+  function renderOptions(options) {
+    const strip = $('#options-strip');
+    if (!options.length) { strip.classList.remove('on'); strip.innerHTML = ''; return; }
+    strip.innerHTML = options.map((o, i) => `
+      <button class="opt" type="button" data-i="${i}">
+        <img src="${o.image}" alt="${o.label}" />
+        <b>${o.label}</b>
+        <em>${(o.palette || '').split(', ').slice(0, 3).join(' ')}</em>
+        <div class="swatches">${(o.palette || '').split(', ').slice(0, 4)
+          .map((h) => `<i style="background:${h}"></i>`).join('')}</div>
+      </button>`).join('');
+    strip.classList.add('on');
+    strip.querySelectorAll('.opt').forEach(el => {
+      el.onclick = () => chooseOption(Number(el.dataset.i));
+    });
+  }
+
+  async function chooseOption(index) {
+    working(true);
+    $('#busytext').textContent = 'Eliza is putting that one on your print…';
+    try {
+      const r = await fetch(`${API}/options/choose`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ booking: B.booking_id, index }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'That option could not be applied.');
+      rev = j.revision; show(j.image);
+      $('#options-strip').querySelectorAll('.opt').forEach((el, i) =>
+        el.classList.toggle('picked', i === index));
+      say_('eliza', `Done — ${j.label} is your design now. Anything you'd like changed?`);
+    } catch (e) {
+      const d = e.detail ? e : {};
+      sys(d.error || 'The designer could not apply that option. '
+        + (d.action || 'I have logged it for our team.'));
+    } finally { working(false); }
+  }
+
   $('#approve').onclick = async () => {
     await fetch(`${API}/approve`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1048,6 +1243,125 @@
     $('#approve').disabled = true;
     $('#send').disabled = true;
   };
+
+  // ── The split: drag the divider, and the design gets the room ────────────
+  // The print is portrait 4x6 and the chat is a column of words. Giving them
+  // half the screen each showed the client a thumbnail of the thing they came
+  // to look at. The chat now has a fixed column and the design has the rest,
+  // and the divider can be dragged when someone wants to read the
+  // conversation instead.
+  {
+    const main = document.querySelector('main');
+    const split = $('#splitter');
+    const MIN = 240, MAX = 720;
+    let saved = 0;
+    try { saved = parseInt(localStorage.getItem('pfp_chat_w') || '', 10) || 0; } catch (_) {}
+    if (saved >= MIN && saved <= MAX) main.style.setProperty('--chat-w', saved + 'px');
+
+    let dragging = false;
+    const setWidth = (px) => {
+      const w = Math.max(MIN, Math.min(MAX, Math.round(px)));
+      main.style.setProperty('--chat-w', w + 'px');
+    };
+    split.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      split.setPointerCapture(e.pointerId);
+      split.classList.add('dragging');
+      e.preventDefault();
+    });
+    split.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      setWidth(e.clientX - main.getBoundingClientRect().left);
+    });
+    const end = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      try { split.releasePointerCapture(e.pointerId); } catch (_) {}
+      split.classList.remove('dragging');
+      const w = parseInt(getComputedStyle(main).getPropertyValue('--chat-w'), 10) || 320;
+      try { localStorage.setItem('pfp_chat_w', String(w)); } catch (_) {}
+    };
+    split.addEventListener('pointerup', end);
+    split.addEventListener('pointercancel', end);
+    // The keyboard can move it too, and a double click puts it back.
+    split.addEventListener('keydown', (e) => {
+      const cur = parseInt(getComputedStyle(main).getPropertyValue('--chat-w'), 10) || 320;
+      if (e.key === 'ArrowLeft') { setWidth(cur - 24); e.preventDefault(); }
+      if (e.key === 'ArrowRight') { setWidth(cur + 24); e.preventDefault(); }
+    });
+    split.addEventListener('dblclick', () => {
+      main.style.setProperty('--chat-w', '320px');
+      try { localStorage.setItem('pfp_chat_w', '320'); } catch (_) {}
+    });
+  }
+
+  // ── The chat, as a sheet on a phone and a column on a screen ─────────────
+  {
+    const main = document.querySelector('main');
+    const chat = $('#chat');
+    const wide = window.matchMedia('(min-width: 560px)');
+    const label = () => {
+      const hidden = wide.matches ? main.classList.contains('chat-hidden') : !chat.classList.contains('open');
+      $('#chattoggle').textContent = hidden ? 'Chat' : 'Hide chat';
+    };
+    $('#chattoggle').onclick = () => {
+      if (wide.matches) {
+        main.classList.toggle('chat-hidden');
+      } else {
+        chat.classList.toggle('open');
+      }
+      label();
+    };
+    wide.addEventListener('change', () => {
+      // Between the two layouts the chat must not be left in the state that
+      // belongs to the other one: hidden by the sheet rules on a screen, or
+      // stuck open as a sheet on a phone.
+      if (wide.matches) chat.classList.remove('open');
+      else main.classList.remove('chat-hidden');
+      label();
+    });
+    label();
+  }
+
+  // ── The backdrop picker, under the event selector ───────────────────────
+  // The curtain is a LAYER of the print, not part of the artwork, so choosing
+  // one here re-composites the design the client already has: no redraw, no
+  // cost, and the design they liked is not thrown away.
+  async function renderBackdropPicker() {
+    const list = await backdropCatalogue();
+    const box = $('#bds');
+    if (!box) return;
+    box.innerHTML =
+      `<button class="bd none${backdrop ? '' : ' sel'}" data-slug="" title="No curtain">None</button>` +
+      list.map(b => `<button class="bd${backdrop === b.slug ? ' sel' : ''}" data-slug="${b.slug}"
+        title="${prettyBackdrop(b.slug)}"><img src="${API}/backdrops/thumb/${b.slug}.jpg"
+        alt="${prettyBackdrop(b.slug)}" loading="lazy" /></button>`).join('');
+    box.querySelectorAll('.bd').forEach(el => {
+      el.onclick = () => chooseCurtain(el.dataset.slug);
+    });
+  }
+
+  async function chooseCurtain(slug) {
+    working(true);
+    $('#busytext').textContent = 'Swapping the curtain…';
+    try {
+      const r = await fetch(`${API}/backdrop`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ booking: B.booking_id, backdrop: slug || 'none' }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'That curtain did not work.');
+      backdrop = slug || null;
+      rev = j.revision; show(j.image);
+      $('#bds').querySelectorAll('.bd').forEach(el =>
+        el.classList.toggle('sel', el.dataset.slug === (slug || '')));
+      say_('eliza', slug
+        ? `That's the ${prettyBackdrop(slug)} curtain behind your print. The design itself is exactly as it was.`
+        : `Curtain taken away — your print is on the artwork alone now.`);
+    } catch (e) {
+      sys(e.message);
+    } finally { working(false); }
+  }
 
   // ── Chat ─────────────────────────────────────────────────────────────────
   // ── Eliza actually listens ──────────────────────────────────────────────
@@ -1170,6 +1484,34 @@
   });
   window.addEventListener('dragover', e => e.preventDefault());
   window.addEventListener('drop', e => e.preventDefault());
+
+  // A file dragged anywhere over the page brings the invitation back, so
+  // dropping a logo on an existing design still works - and the client sees
+  // that it will. Without this the overlay would have to stay on screen
+  // permanently, covering the design they came to look at.
+  let dragDepth = 0;
+  window.addEventListener('dragenter', e => {
+    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+    dragDepth++;
+    if (rev > 0) { drop.classList.remove('gone'); drop.classList.add('hot'); }
+  });
+  window.addEventListener('dragover', e => {
+    if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) {
+      drop.classList.add('hot');
+    }
+  });
+  window.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) {
+      drop.classList.remove('hot');
+      if (rev > 0 && !uploadedLogo) drop.classList.add('gone');
+    }
+  });
+  window.addEventListener('drop', () => {
+    dragDepth = 0;
+    drop.classList.remove('hot');
+    if (rev > 0 && !uploadedLogo) drop.classList.add('gone');
+  });
 
   /**
    * Send one file to the studio.
