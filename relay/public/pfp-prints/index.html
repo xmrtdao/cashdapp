@@ -346,6 +346,28 @@
   #bds .bd.none{display:grid;place-items:center;font-size:10px;color:var(--muted)}
   #bds .bd.none.sel{color:var(--gold-deep)}
 
+  /* Their previous designs. An event planner has a dozen; a family has one
+     a year. And a design can be rated AFTER the event, when the client has
+     said what they thought of it - which is the only honest signal this
+     business has. */
+  #past{flex:none;display:none;border-bottom:1px solid var(--line);
+        background:rgba(250,247,241,.92);padding:10px 12px}
+  #past.on{display:block}
+  #past h3{margin:0 0 8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+           color:var(--gold-deep)}
+  #past .row{display:flex;gap:9px;overflow-x:auto;padding-bottom:4px}
+  #past .pd{flex:none;width:104px;border:1px solid var(--line);border-radius:9px;
+            overflow:hidden;background:var(--paper)}
+  #past .pd img{width:100%;display:block;aspect-ratio:2/3;object-fit:cover;background:var(--ink-2)}
+  #past .pd .meta{padding:5px 7px;border-top:1px solid var(--line);font-size:9.5px;line-height:1.35}
+  #past .pd .stars{display:flex;gap:2px;padding:4px 7px 6px}
+  #past .pd .stars button{flex:1;height:22px;border-radius:5px;border:1px solid var(--line);
+                           background:var(--ink-2);cursor:pointer;font-size:11px;line-height:1;
+                           color:var(--muted)}
+  #past .pd .stars button.on{background:linear-gradient(135deg,#D9AE3B,#C9992A);
+                             color:#241B08;border-color:transparent}
+  #past .pd .stars button:hover{border-color:var(--gold)}
+
 </style>
 </head>
 <body>
@@ -453,6 +475,10 @@
         <button class="btn" id="chattoggle" style="flex:none;padding:6px 10px;font-size:11px">Chat</button>
       </div>
       <div id="bds"></div>
+      <div id="past">
+        <h3>Your previous designs</h3>
+        <div class="row" id="past-row"></div>
+      </div>
       <div id="log"></div>
       <div id="bar">
         <div class="chips" id="quick"></div>
@@ -781,7 +807,7 @@
       $('#ob-bd').innerHTML = list.map(b => `
         <button class="ob-bd" type="button" data-slug="${b.slug}"
                 aria-label="Use the ${prettyBackdrop(b.slug)} backdrop">
-          <img src="${b.url}" alt="" loading="lazy" />
+          <img src="${API}/backdrops/thumb/${b.slug}.jpg" alt="" loading="lazy" />
           <span>${prettyBackdrop(b.slug)}</span>
         </button>`).join('');
       $('#ob-bd').querySelectorAll('.ob-bd').forEach(el => {
@@ -1057,6 +1083,7 @@
     // swap curtains in chat. Prefetching it on every open bought nothing: the
     // onboarding step already loaded it for anyone who got that far.
     backdropCatalogue().then(renderBackdropPicker);
+    loadHistory();
   }
 
   const QUICK = [
@@ -1243,6 +1270,56 @@
     $('#approve').disabled = true;
     $('#send').disabled = true;
   };
+
+  // ── Their previous designs, and a way to rate them ──────────────────────
+  // The gallery only appears when there is something in it. And a rating can
+  // be given long after the event - the planner who hears "the names were
+  // too small" the next morning is the one whose feedback is worth having.
+  async function loadHistory() {
+    const panel = $('#past');
+    if (!panel) return;
+    try {
+      const r = await fetch(`${API}/history?booking=${encodeURIComponent(B.booking_id)}`);
+      if (!r.ok) return;
+      const j = await r.json();
+      const designs = j.designs || [];
+      if (!designs.length) { panel.classList.remove('on'); return; }
+      $('#past-row').innerHTML = designs.map((d, i) => `
+        <div class="pd" data-i="${i}">
+          <img src="${d.image}" alt="" loading="lazy" />
+          <div class="meta">${d.event ? d.event.slice(0, 22) : 'design'}<br/>
+            ${d.rating ? `rated ${d.rating.score}/5` : 'not rated yet'}</div>
+          <div class="stars" data-i="${i}">
+            ${[1, 2, 3, 4, 5].map((n) =>
+              `<button type="button" data-n="${n}" class="${d.rating && d.rating.score >= n ? 'on' : ''}">★</button>`).join('')}
+          </div>
+        </div>`).join('');
+      $('#past-row').querySelectorAll('.stars button').forEach(btn => {
+        btn.onclick = () => rateDesign(Number(btn.parentElement.dataset.i), Number(btn.dataset.n));
+      });
+      panel.classList.add('on');
+    } catch (e) {
+      panel.classList.remove('on');
+    }
+  }
+
+  async function rateDesign(index, score) {
+    try {
+      const r = await fetch(`${API}/rate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ booking: B.booking_id, index, score }),
+      });
+      if (!r.ok) throw new Error('the rating did not save');
+      $('#past-row').querySelectorAll(`[data-i="${index}"] .stars button`).forEach((b, n) => {
+        b.classList.toggle('on', n < score);
+      });
+      const meta = $('#past-row').querySelector(`[data-i="${index}"] .meta`);
+      if (meta) meta.innerHTML = meta.innerHTML.replace(/not rated yet|rated \d\/5/, `rated ${score}/5`);
+      say_('eliza', 'Thank you — that is how the next one gets better.');
+    } catch (e) {
+      sys('That rating did not save. Try again in a moment.');
+    }
+  }
 
   // ── The split: drag the divider, and the design gets the room ────────────
   // The print is portrait 4x6 and the chat is a column of words. Giving them

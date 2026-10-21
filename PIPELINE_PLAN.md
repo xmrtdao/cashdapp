@@ -1100,3 +1100,78 @@ one re-composites the shell that was already rendered, so it costs nothing
 further.
 
 **53 of 53 pass.**
+
+## 21. What the client actually asked for (2026-10-20, night)
+
+The client was in the studio with their own invitation and their own design
+reference, and the work was to make the studio do what they were asking it
+to do.
+
+### 21.1 The menu shows the curtain; the print shows the people
+
+There were always two pictures for each backdrop: the plain curtain (a
+1,200-pixel PNG, more than a megabyte) and a shot of people standing in
+front of it. The PICKER was showing the shot, so choosing a backdrop looked
+like choosing a photograph of strangers. The menu now shows the plain curtain
+— the colour and the texture, which is the choice being made — and the print
+shows the people, because that is what the client will see on the night.
+
+The plain curtain needed a thumbnail: `partyfavorphoto/make-backdrop-thumbs.mjs`
+makes them, and the eleven of them come to 215KB instead of fifteen
+megabytes.
+
+### 21.2 Three options, each from the client's own documents
+
+"More options" draws three designs, and each is a direction that came from
+the client rather than from us: **the colours on their invitation**,
+**the design they showed us**, and **the classic version** of the style they
+chose. Choosing one re-composites the shell that was already rendered, so it
+costs nothing further.
+
+The colours are read from the client's own PIXELS, not from a model's guess
+— the invitation is blush and cream and gold because those are its colours.
+The detector's reading is a second opinion, and it is empty often enough
+that taking it would throw away a measurement we already had.
+
+Each option stands on its own: one direction being refused loses that one
+option, not the other two. A studio that shows nothing because one idea
+failed is worse than a studio that shows two.
+
+### 21.3 A five-megabyte photograph could never be uploaded
+
+The relay caps request bodies at 5MB. A client sends a picture as a base64
+data URL, a third larger than the file, so a five-megabyte phone photo
+arrived as seven megabytes and was refused with a 413 the studio could not
+explain. The file the client had chosen simply never arrived.
+
+Only the studio's upload path gets a bigger limit now. Everything else on
+the relay keeps the five megabytes, because the limit is there to stop a
+body large enough to hurt anyone.
+
+### 21.4 Their other events, and a way to rate them
+
+An event planner has a dozen of these; a family has one a year. Both want
+to see what came last, and a planner who rates a design AFTER the event —
+when the client has told them what they thought of it — is the only honest
+signal this business has.
+
+So the studio now keeps every design a client has made, with what it was
+made of, and offers them back as a gallery that can be rated. `GET
+/studio/history` finds that work by the client's own details — their booking,
+their lead, their email — and `GET /studio/insights` says what the ratings
+say.
+
+**The address is a HINT, never a key.** Phones change address, a venue's
+wifi is shared by everyone at the wedding, and two different clients on one
+connection must never be shown each other's work. So the address only
+*offers* what it finds, and the booking stays the key.
+
+### 21.5 The words, confirmed
+
+The print now carries what the client confirmed on the confirmation step —
+and the vision model does not reliably read the wording off a document, so
+the confirmation step matters more than ever: it is where a title that was
+read as "Jaffee-Knapp Wedding" became "Natalia Jaffee & Jonathan Knapp",
+because the client checked it against their own invitation.
+
+**53 of 53 pass.**

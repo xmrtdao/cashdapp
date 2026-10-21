@@ -56,8 +56,7 @@ function persistWhitelist() {
   fs.writeFile(WHITELIST, JSON.stringify(whitelist, null, 2)).catch(() => {});
 }
 function whitelistIp(bookingId, req) {
-  const ip = (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.ip || '')
-    .toString().split(',')[0].trim();
+  const ip = clientIp(req);
   if (!ip) return;
   if (!whitelist[bookingId]) whitelist[bookingId] = { ips: [], updated: null };
   const entry = whitelist[bookingId];
@@ -66,6 +65,15 @@ function whitelistIp(bookingId, req) {
     entry.updated = new Date().toISOString();
     persistWhitelist();
   }
+}
+
+/** The client's own address, as the edge sees it.
+ *
+ *  CF-Connecting-IP is set by Cloudflare to the real visitor; without the
+ *  tunnel every request would arrive from the same machine. */
+function clientIp(req) {
+  return (req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.ip || '')
+    .toString().split(',')[0].trim() || null;
 }
 
 let designer = null;
@@ -87,7 +95,9 @@ const getDesigner = () => {
  * client's work existing and not.
  */
 const sessions = new Map();
-const SESSION_STORE = path.join(RELAY, 'relay-data', 'pfp-studio-sessions.json');
+// With the renders and the uploads, in the studio's own folder: the session
+// belongs with the files it points at.
+const SESSION_STORE = path.join(WORK, 'sessions.json');
 let storedSessions = {};
 try {
   storedSessions = JSON.parse(await fs.readFile(SESSION_STORE, 'utf8'));
@@ -162,10 +172,16 @@ router.get('/backdrops', (_req, res) => {
 });
 
 /** Resolve a slug to a path on disk. Only known slugs resolve — a client cannot
- *  steer the compositor at an arbitrary file by putting a path in `backdrop`. */
+ *  steer the compositor at an arbitrary file by putting a path in `backdrop`.
+ *
+ *  It resolves to the image the PRINT shows: the shot with people in front of
+ *  the curtain. The client is choosing the backdrop their guests will stand
+ *  in front of, and the print shows what that looks like with a person in it.
+ *  The PLAIN curtain - the colour and the texture on its own - is what the
+ *  PICKER shows, because that is the choice being made. */
 const BACKDROP_SLUGS = new Set(BACKDROPS.map(b => b.slug));
 const backdropFile = (slug) =>
-  BACKDROP_SLUGS.has(slug) ? path.join(BACKDROP_DIR, `${slug}.png`) : null;
+  BACKDROP_SLUGS.has(slug) ? path.join(BACKDROP_DIR, `${slug}-backdrop.jpg`) : null;
 
 // Serve the backdrop images. They are static assets, so they are served
 // directly from disk with a long cache header.
@@ -184,7 +200,10 @@ router.get('/backdrops/:slug.png', (req, res) => {
 
 router.get('/backdrops/thumb/:slug.jpg', (req, res) => {
   const slug = String(req.params.slug).replace(/[^a-z0-9-]/gi, '');
-  const file = path.join(BACKDROP_DIR, `${slug}-backdrop.jpg`);
+  // The small PLAIN curtain: the colour and the texture, with nobody
+  // standing in it. That is the choice the picker is offering, and a row of
+  // eleven of them is two hundred kilobytes rather than fifteen megabytes.
+  const file = path.join(BACKDROP_DIR, 'thumbs', `${slug}.jpg`);
   if (!existsSync(file)) return res.status(404).json({ error: 'no such backdrop thumbnail' });
   res.setHeader('Cache-Control', 'public, max-age=604800');
   res.sendFile(file);
@@ -236,7 +255,8 @@ router.get('/context', async (req, res) => {
   if (!booked && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(bookingId)) {
     try {
       const rows = await localQuery(
-        `SELECT client_name, event_name, event_date, event_type, venue, package_type, hours
+        `SELECT client_name, client_email, lead_id, event_name, event_date, event_type,
+                venue, package_type, hours
            FROM public.pfp_bookings WHERE lead_id = $1 LIMIT 1`,
         [bookingId]);
       booked = rows[0] || null;
@@ -280,6 +300,12 @@ router.get('/context', async (req, res) => {
     if (booked && booked.client_name) existing.client_name = booked.client_name;
     if (booked && booked.event_name) existing.event_name = booked.event_name;
     if (booked && booked.event_date) existing.event_date = booked.event_date;
+    // The details that find this client's other events are refreshed too, so a
+    // studio opened from a new address still knows who it is talking to.
+    if (booked && booked.client_email) existing.clientEmail = booked.client_email;
+    if (booked && booked.lead_id) existing.leadId = booked.lead_id;
+    const ip = clientIp(req);
+    if (ip) existing.ip = ip;
     persistSessions();
     return res.json({ ...existing, styles, resuming: true });
   }
@@ -293,6 +319,16 @@ router.get('/context', async (req, res) => {
     revision: 0,
     shellUrl: null,
     logoUrl: null,
+    // Who this is, so their other events can be found later. An event
+    // planner has a dozen; a family has one a year. The IP is a HINT - it
+    // finds past work to OFFER - and never a key: phones change address and
+    // a venue's wifi is shared by everyone at the wedding.
+    clientEmail: (booked && booked.client_email) || req.query.email || null,
+    leadId: (booked && booked.lead_id) || null,
+    ip: clientIp(req),
+    createdAt: new Date().toISOString(),
+    // Every design this client has made, with what they thought of it.
+    designs: [],
     messages: [{
       role: 'eliza',
       text:
@@ -375,6 +411,18 @@ router.post('/upload', async (req, res) => {
     try {
       s.brandHexes = await paletteFromFile(file);
     } catch { s.brandHexes = []; }
+  } else {
+    // The palette of EVERY document the client gives us, read from their own
+    // pixels rather than from a model's guess: "the colours on your
+    // invitation" and "the design you showed us" are the two directions the
+    // studio offers, and both are measured from the file itself.
+    try {
+      const hexes = await paletteFromFile(file);
+      if (hexes.length) {
+        if (kind === 'theme') s.themePalette = hexes;
+        else s.brandHexes = hexes;
+      }
+    } catch { /* a file with no readable pixels simply has no palette */ }
   }
 
   // Read the upload and let it pick the style. A wedding invitation should land
@@ -395,7 +443,14 @@ router.post('/upload', async (req, res) => {
       // picture of a floral arrangement is not a reason to call it a wedding.
       // What it does carry is the mood and the colours of the background.
       s.themeMood = String(detected.mood || '').slice(0, 120);
-      s.themePalette = Array.isArray(detected.palette) ? detected.palette.slice(0, 3) : [];
+      // The colours read from the client's own pixels win. The model's reading
+      // of them is a second opinion, and it is empty often enough that
+      // taking it would throw away a measurement we already have.
+      if (Array.isArray(detected.palette) && detected.palette.length) {
+        s.themePalette = detected.palette.slice(0, 3);
+      } else if (!s.themePalette || !s.themePalette.length) {
+        s.themePalette = await paletteFromFile(file).catch(() => []);
+      }
     } else {
       chosenStyle = styleForEvent(detected.event, detected.kind);
       // A logo is a logo wherever it came from; anything else only moves the
@@ -539,6 +594,18 @@ router.post('/draft', async (req, res) => {
     // draft is being prepared.
     s.printUrl = `/api/visual/pfp/file/${path.basename(out.out)}`;
     s.revision += 1;
+    // The design is kept, with what it was made of, so the client can look
+    // back at it - and so it can be rated later, when the event is over and
+    // the client has said what they thought.
+    (s.designs = s.designs || []).push({
+      revision: s.revision,
+      image: s.printUrl,
+      styleId: s.style_id,
+      palette: s.palette || '',
+      theme: s.theme || '',
+      backdrop: s.backdrop || null,
+      at: new Date().toISOString(),
+    });
 
     res.json({
       ok: true, revision: s.revision,
@@ -603,40 +670,55 @@ router.post('/options', async (req, res) => {
   const theme = themeText(s.theme, s.themeMood);
   const started = Date.now();
   const options = [];
+  const failed = [];
   let spent = 0;
 
   try {
     const d = getDesigner();
     for (const c of candidates) {
-      const shell = await d.render({
-        kind: 'draft',
-        styleId: s.style_id,
-        brandHexes: s.brandHexes || [],
-        hasLogo: !!logoRec,
-        theme,
-        palette: c.palette,
-        moodHexes: s.themePalette || [],
-        backdropPath: s.backdrop ? backdropFile(s.backdrop) : null,
-        workDir: RENDERS,
-      });
-      spent += shell.cost || 0;
-      const out = await d.finish({
-        shellPath: shell.shellPath,
-        logoPath: logoRec ? path.join(UPLOADS, path.basename(logoRec.file)) : null,
-        backdropPath: shell.backdropPath || null,
-        line1: s.line1,
-        line2: s.line2,
-        outPath: path.join(RENDERS, `${booking}-opt${options.length + 1}.png`),
-        scale: DESIGN_SCALE,
-      });
-      options.push({
-        label: c.label,
-        source: c.source,
-        palette: c.palette,
-        image: `/api/visual/pfp/file/${path.basename(out.out)}`,
-        shellUrl: shell.shellUrl,
-        shellPath: shell.shellPath,
-      });
+      // Each direction stands on its own. If one of them is refused - a
+      // palette the model will not draw, a prompt it objects to - the other
+      // two are still worth having, so a failure here is recorded and the
+      // rest are drawn. A studio that shows nothing because one idea failed
+      // is worse than a studio that shows two.
+      try {
+        const shell = await d.render({
+          kind: 'draft',
+          styleId: s.style_id,
+          brandHexes: s.brandHexes || [],
+          hasLogo: !!logoRec,
+          theme,
+          palette: c.palette,
+          moodHexes: s.themePalette || [],
+          backdropPath: s.backdrop ? backdropFile(s.backdrop) : null,
+          workDir: RENDERS,
+        });
+        spent += shell.cost || 0;
+        const out = await d.finish({
+          shellPath: shell.shellPath,
+          logoPath: logoRec ? path.join(UPLOADS, path.basename(logoRec.file)) : null,
+          backdropPath: shell.backdropPath || null,
+          line1: s.line1,
+          line2: s.line2,
+          outPath: path.join(RENDERS, `${booking}-opt${options.length + 1}.png`),
+          scale: DESIGN_SCALE,
+        });
+        options.push({
+          label: c.label,
+          source: c.source,
+          palette: c.palette,
+          image: `/api/visual/pfp/file/${path.basename(out.out)}`,
+          shellUrl: shell.shellUrl,
+          shellPath: shell.shellPath,
+        });
+      } catch (e) {
+        failed.push({ label: c.label, error: String(e.message).slice(0, 200) });
+        console.warn(`[pfp-prints] the "${c.label}" option failed:`, e.message);
+      }
+    }
+
+    if (!options.length) {
+      throw new Error(failed.map((f) => `${f.label}: ${f.error}`).join(' | ') || 'nothing could be drawn');
     }
 
     // Kept on the session so that choosing one is free: the shell is already
@@ -648,6 +730,10 @@ router.post('/options', async (req, res) => {
 
     res.json({
       ok: true, options,
+      // What the studio considered, and why each one is on the list. A client
+      // offered "a design" is being offered a decision.
+      candidates: candidates.map((c) => ({ label: c.label, source: c.source, palette: c.palette })),
+      failed,
       cost: Number(spent.toFixed(3)),
       seconds: Math.round((Date.now() - started) / 1000),
     });
@@ -875,7 +961,116 @@ router.post('/approve', async (req, res) => {
   res.json({ ok: true, approvedAt: s.approvedAt, print });
 });
 
-// ── 6. Serve generated + uploaded files ────────────────────────────────────
+// ── 7. The client's other designs, and what they thought of them ───────────
+//
+// An event planner has a dozen of these; a family has one a year. Both want
+// to see what came last - and a planner who rates a design AFTER the event,
+// when the client has told them what they thought of it, is the only honest
+// signal this business has about what a good print looks like.
+//
+// The address is a HINT, never a key. Phones change address, a venue's wifi
+// is shared by everyone at the wedding, and two different clients on one
+// connection must not be shown each other's work. So past work is found by
+// the client's own details - their booking, their lead, their email - and the
+// address only offers what it finds.
+router.get('/history', (req, res) => {
+  const s = getSession(String(req.query.booking || req.query.b || ''));
+  if (!s) return res.status(404).json({ error: 'unknown booking' });
+
+  const ip = clientIp(req);
+  const all = Object.entries(storedSessions)
+    .map(([booking, v]) => ({ booking, v }))
+    .filter((e) => e.v && e.v !== s);
+
+  const sameClient = all.filter(({ v }) =>
+    (s.leadId && v.leadId === s.leadId)
+    || (s.clientEmail && v.clientEmail && v.clientEmail.toLowerCase() === s.clientEmail.toLowerCase())
+    // The address only COUNTS when the client is the same person as far as we
+    // can tell - a shared address alone is not evidence of anything.
+    || (ip && v.ip === ip && (s.clientEmail || v.clientEmail
+        ? s.clientEmail && v.clientEmail && s.clientEmail.toLowerCase() === v.clientEmail.toLowerCase()
+        : true)));
+
+  const designs = [];
+  for (const { booking, v } of sameClient) {
+    for (const d of (v.designs || [])) {
+      designs.push({
+        booking,
+        event: v.event_name || '',
+        date: v.event_date || '',
+        ...d,
+      });
+    }
+  }
+  designs.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+
+  res.json({
+    ok: true,
+    designs: designs.slice(0, 40),
+    // How we found them, so the client can be told the truth about it.
+    matchedBy: s.leadId ? 'your account'
+      : s.clientEmail ? 'your email'
+        : ip ? 'this device' : 'nothing yet',
+  });
+});
+
+/** Record what a client thought of a design. */
+router.post('/rate', (req, res) => {
+  const { booking, revision, score, note, index } = req.body || {};
+  const s = getSession(booking);
+  if (!s) return res.status(404).json({ error: 'unknown booking' });
+
+  const n = Number(score);
+  if (!Number.isFinite(n) || n < 1 || n > 5) {
+    return res.status(400).json({ error: 'score must be 1 to 5' });
+  }
+
+  // The design being rated: a specific revision, or the one on screen.
+  let design = null;
+  if (index !== undefined && index !== null) {
+    design = (s.designs || [])[Number(index)] || null;
+  } else if (revision !== undefined && revision !== null) {
+    design = (s.designs || []).find((d) => d.revision === Number(revision)) || null;
+  } else {
+    design = (s.designs || [])[(s.designs || []).length - 1] || null;
+  }
+  if (!design) return res.status(404).json({ error: 'no such design to rate' });
+
+  design.rating = { score: n, note: String(note || '').slice(0, 400), at: new Date().toISOString() };
+  persistSessions();
+  res.json({ ok: true, design });
+});
+
+/** What the ratings say, so the design engine can learn from them. */
+router.get('/insights', (_req, res) => {
+  const all = Object.values(storedSessions);
+  const rated = [];
+  for (const s of all) for (const d of (s.designs || [])) if (d.rating) rated.push(d);
+
+  const byStyle = new Map();
+  for (const d of rated) {
+    const k = d.styleId || 'unknown';
+    if (!byStyle.has(k)) byStyle.set(k, { style: k, total: 0, count: 0 });
+    const e = byStyle.get(k);
+    e.total += d.rating.score; e.count += 1;
+  }
+  const styles = [...byStyle.values()]
+    .map((e) => ({ style: e.style, average: Number((e.total / e.count).toFixed(2)), count: e.count }))
+    .sort((a, b) => b.average - a.average);
+
+  res.json({
+    ok: true,
+    rated: rated.length,
+    styles,
+    // The notes are the valuable part: "the names were too small" is a
+    // direction, and a number is not.
+    notes: rated
+      .filter((d) => d.rating.note)
+      .map((d) => ({ at: d.rating.at, score: d.rating.score, note: d.rating.note })),
+  });
+});
+
+// ── 8. Serve generated + uploaded files ────────────────────────────────────
 router.get('/file/:name', async (req, res) => {
   const name = path.basename(req.params.name);
   const target = [RENDERS, UPLOADS].map(d => path.join(d, name)).find(p => existsSync(p));
