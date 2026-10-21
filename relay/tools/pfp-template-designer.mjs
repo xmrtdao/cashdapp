@@ -195,7 +195,8 @@ export class PFPDesigner {
    * chat looked decorative rather than functional.
    */
   async render({ kind, styleId, brandHexes = [], theme = '', palette = '',
-                 moodHexes = [], shellUrl, workDir, hasLogo = true, backdropPath = null }) {
+                 moodHexes = [], shellUrl, workDir, hasLogo = true, backdropPath = null,
+                 resolution = '1k' }) {
     const model = kind === 'edit' ? this.editModel : this.shellModel;
 
     if (kind === 'edit') {
@@ -216,7 +217,7 @@ export class PFPDesigner {
 
     const payload = {
       prompt: artworkPrompt(styleId, { brandHexes, hasLogo, theme, palette, moodHexes }),
-      aspect_ratio: '2:3', resolution: '2k',
+      aspect_ratio: '2:3', resolution,
     };
     const { cost } = await this.price(model, payload);
     const r = await this.mu.run(model, payload,
@@ -227,8 +228,8 @@ export class PFPDesigner {
   }
 
   /** Rules 1,3,6,7,11,12 — the print file. */
-  async finish({ shellPath, logoPath, backdropPath, line1, line2, outPath }) {
-    const res = await composite({ shellPath, logoPath, backdropPath, line1, line2, outPath });
+  async finish({ shellPath, logoPath, backdropPath, line1, line2, outPath, scale = 1 }) {
+    const res = await composite({ shellPath, logoPath, backdropPath, line1, line2, outPath, scale });
     return { ...res, geometry: `${CARD_W}x${CARD_H}, ${FRAME_TOPS.length} windows/strip @ ${WIN_W}x${WIN_H}` };
   }
 

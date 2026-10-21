@@ -15,14 +15,15 @@ import { MuAPI } from './muapi.mjs';
 
 const DETECT_MODEL = 'openrouter-vision';
 
-const SYSTEM = `You classify images that a photo-booth client has uploaded.
+const SYSTEM = `You read images that a photo-booth client has uploaded.
 Reply with ONLY a compact JSON object, no prose, no markdown fence:
-{"kind":"invitation|logo|photo|misc","event":"wedding|graduation|homecoming|prom|corporate|holiday|birthday|quince|bar_mitzvah|unknown","palette":["#RRGGBB",...],"mood":"three words","title":"the main wording on the document, as printed","date":"the date on the document, exactly as printed","confidence":0.0-1.0}
-Rules: kind=invitation for stationery with event wording. kind=logo for a
-business mark or wordmark. event=unknown when the image genuinely does not say.
-title and date are what the document SAYS, read off the picture itself - the
-main line of wording for title, the date as printed for date. Leave both as
-empty strings when the picture does not show them, and never guess them.`;
+{"title":"the main wording on the document, exactly as printed","date":"the date on the document, exactly as printed","kind":"invitation|logo|photo|misc","event":"wedding|graduation|homecoming|prom|corporate|holiday|birthday|quince|bar_mitzvah|unknown","palette":["#RRGGBB",...],"mood":"three words","confidence":0.0-1.0}
+Read the title FIRST and read it properly: it is the wording printed on the
+document, and for a wedding or a party it is the couple's or the host's names.
+Read the date as it is printed. Rules: kind=invitation for stationery with
+event wording. kind=logo for a business mark or wordmark. event=unknown when
+the image genuinely does not say. Leave title and date as empty strings when
+the picture does not show them, and never guess them.`;
 
 export class UploadDetector {
   constructor(apiKey) { this.mu = new MuAPI(apiKey); }
