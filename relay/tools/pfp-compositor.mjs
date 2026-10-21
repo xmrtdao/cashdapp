@@ -24,13 +24,30 @@
  *   bottom of the card. Two of the six house styles have light grounds, so the
  *   scrim and both text colours are now measured from the artwork's own lower
  *   band and flipped to suit.
+ *
+ * THE TYPE FOLLOWS THE INVITATION
+ *   The first pass set the headline in Georgia at 38px on a 1200px card. That
+ *   is a caption: the client was shown a line of small type in a band of
+ *   empty cream, in a face that looked nothing like the invitation they had
+ *   sent. The invitation sets a flowing script for the names and an elegant
+ *   serif for the date, so the print does the same - and the headline wraps
+ *   and fills the band instead of hiding in it.
+ *
+ * THE FILE IS AS BIG AS IT NEEDS TO BE
+ *   4x6 at 300dpi is the PRINT. During the design phase the client is
+ *   reviewing a picture on a screen, and a 4.4MB PNG for that is a 4.4MB
+ *   download per draft. The composition is drawn at print size and scaled
+ *   down on the way out, so the geometry is identical either way; only the
+ *   file gets smaller. The approved proof is still written at 300dpi.
  */
 import puppeteer from 'puppeteer';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO = path.join(__dirname, '..', '..');
 
 // ── Print geometry. 4x6in @ 300dpi ─────────────────────────────────────────
 export const CARD_W = 1200;
@@ -43,6 +60,53 @@ const FRAME_TOP = 70;
 const FRAME_GAP = 70;
 export const FRAME_TOPS = [0, 1, 2].map(i => FRAME_TOP + i * (WIN_H + FRAME_GAP));
 export const BRAND_TOP = FRAME_TOPS[2] + WIN_H + 60;
+
+// ── The type, taken from the invitation ────────────────────────────────────
+// Great Vibes is the flowing script the client's invitation is set in;
+// Cormorant Garamond is the quiet serif under it. Both are fetched once and
+// cached on disk, then embedded in the page as base64: a page with no
+// filesystem access cannot load a font from a file:// URL, and the headless
+// browser has no origin to fetch one from either.
+const FONT_FAMILIES = [
+  { family: 'Great Vibes', query: 'Great+Vibes' },
+  { family: 'Cormorant Garamond', query: 'Cormorant+Garamond:wght@400;500;600' },
+];
+const FONT_CACHE = path.join(REPO, 'partyfavorphoto', 'assets', 'fonts');
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
+let fontCssPromise = null;
+/** The @font-face rules for the two families, with the woff2 files inlined. */
+function fontCss() {
+  if (fontCssPromise) return fontCssPromise;
+  fontCssPromise = (async () => {
+    const rules = [];
+    for (const { family, query } of FONT_FAMILIES) {
+      const url = `https://fonts.googleapis.com/css2?family=${query}&display=swap`;
+      const css = await fetch(url, { headers: { 'User-Agent': UA } }).then((r) => r.text());
+      // Every @font-face block in the response, with its file inlined. The
+      // response carries one block per unicode range; keeping them all is
+      // what makes the ligatures and the ampersand render right.
+      const blocks = css.match(/@font-face\s*\{[^}]*\}/g) || [];
+      for (const block of blocks) {
+        const src = block.match(/url\((https:[^)]+\.woff2)\)/);
+        if (!src) continue;
+        const file = path.join(FONT_CACHE, `${family}-${path.basename(src[1])}`);
+        let b64;
+        try {
+          b64 = (await fs.readFile(file)).toString('base64');
+        } catch {
+          const buf = Buffer.from(await fetch(src[1]).then((r) => r.arrayBuffer()));
+          await fs.mkdir(FONT_CACHE, { recursive: true });
+          await fs.writeFile(file, buf);
+          b64 = buf.toString('base64');
+        }
+        rules.push(block.replace(src[1], `data:font/woff2;base64,${b64}`));
+      }
+    }
+    return rules.join('\n');
+  })();
+  return fontCssPromise;
+}
 
 /** Perceived luminance of a hex colour, 0..1. */
 function luminance(hex) {
@@ -65,12 +129,49 @@ export async function composite(job) {
   const logoSrc = job.logoPath ? await toDataUri(job.logoPath) : null;
   const backdropSrc = job.backdropPath ? await toDataUri(job.backdropPath) : null;
 
+  // The type, as the invitation sets it. Embedded rather than linked: the
+  // page has no origin to fetch a font from, and a canvas silently falls back
+  // to a default face when the wanted one never arrives - which is how the
+  // print ended up in a plain sans while the invitation was in a script.
+  const css = await fontCss();
+
+  // The file is only as big as it needs to be. The composition is drawn at
+  // print size and scaled on the way out, so the geometry is identical; the
+  // design phase just does not carry a 300dpi file around.
+  const scale = Math.max(0.05, Math.min(1, Number(job.scale) || 1));
+
   const browser = await puppeteer.launch({
     headless: 'new',
     args: ['--allow-file-access-from-files', '--no-sandbox'],
   });
+  // The browser is closed however this ends. A composite that throws used to
+  // leave a headless Chrome running, and the NEXT composite then refused to
+  // start because that profile was still in use - so one failure broke every
+  // render after it.
+  try {
+    return await compositeIn(browser, job, css, scale, shell, logoSrc, backdropSrc);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
+
+async function compositeIn(browser, job, css, scale, shell, logoSrc, backdropSrc) {
   const page = await browser.newPage();
   await page.setViewport({ width: CARD_W, height: CARD_H, deviceScaleFactor: 1 });
+  await page.evaluate((fontCssText) => {
+    const s = document.createElement('style');
+    s.textContent = fontCssText;
+    document.head.appendChild(s);
+  }, css);
+  await page.evaluate(async () => {
+    if (document.fonts && document.fonts.ready) {
+      await Promise.all([
+        document.fonts.load('400 190px "Great Vibes"'),
+        document.fonts.load('500 74px "Cormorant Garamond"'),
+      ]).catch(() => {});
+      await document.fonts.ready;
+    }
+  });
 
   const result = await page.evaluate(async (shellSrc, logo, backdrop, line1, line2,
                                            cW, cH, sW, winW, winH, tops, brandTop) => {
@@ -187,24 +288,114 @@ export async function composite(job) {
     ctx.fillRect(0, scrimTop, cW, scrimH);
 
     // ── Type, fitted to the strip ──────────────────────────────────────────
-    // A 600px strip has no room for a 38px headline across it; measuring the
-    // run is what stops "Company Holiday Party" overflowing into the logo.
-    const TEXT_MAX_W = sW - 110;
-    const SERIF = 'Georgia, "Times New Roman", serif';
-    const SANS = '"Segoe UI", Arial, sans-serif';
-    const fit = (text, family, weight, maxW, startPx, minPx) => {
-      let px = startPx;
-      while (px > minPx) {
-        ctx.font = `${weight} ${px}px ${family}`;
-        if (ctx.measureText(text).width <= maxW) break;
-        px -= 1;
-      }
-      return px;
-    };
+    // The client's invitation sets the type: a flowing script for the names
+    // and a quiet serif under it. The print follows it, and the headline
+    // WRAPS - "Natalia Jaffee" over "Jonathan Knapp" - because a single line
+    // squeezed to fit a 490px strip is what made the old setting a caption.
+    const TEXT_MAX_W = sW - 90;
+
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const f1 = fit(line1, SERIF, 600, TEXT_MAX_W, 38, 18);
-    const f2 = fit(line2, SANS, 500, TEXT_MAX_W * 0.92, 30, 15);
+
+    // Greedy wrap, then the largest size at which the wrapped lines still
+    // fit the strip AND the band.
+    const wrap = (text, family, weight, maxW, px) => {
+      ctx.font = `${weight} ${px}px ${family}`;
+      const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+      if (!words.length) return { lines: [], px };
+      const lines = [];
+      let line = words[0];
+      for (let i = 1; i < words.length; i++) {
+        const next = line + ' ' + words[i];
+        if (ctx.measureText(next).width <= maxW) { line = next; continue; }
+        lines.push(line);
+        line = words[i];
+        if (lines.length >= 3) break;
+      }
+      lines.push(line);
+      return { lines, px };
+    };
+
+    // The biggest size at which the text fits, found by trying sizes down.
+    // The script is short and wide-spaced, so it is measured, not guessed.
+    const fitWrapped = (text, family, weight, maxW, startPx, minPx, maxLines) => {
+      for (let px = startPx; px >= minPx; px -= 2) {
+        const { lines } = wrap(text, family, weight, maxW, px);
+        if (lines.length > maxLines) continue;
+        ctx.font = `${weight} ${px}px ${family}`;
+        const widest = Math.max(...lines.map((l) => ctx.measureText(l).width), 0);
+        if (widest <= maxW) return { lines, px };
+      }
+      const { lines } = wrap(text, family, weight, maxW, minPx);
+      return { lines, px: minPx };
+    };
+
+    const SCRIPT = '"Great Vibes", "Snell Roundhand", cursive';
+    const SERIF = '"Cormorant Garamond", Georgia, "Times New Roman", serif';
+
+    // The headline breaks the way the invitation breaks it: the names on
+    // their own lines with the ampersand between them. Greedy wrapping alone
+    // produced "Natalia Jaffee / & Jonathan / Knapp" - which splits a name
+    // across two lines, the one thing a wedding invitation must not do.
+    // "Mr & Mrs Smith" is three words and is left alone; four or more with
+    // an ampersand in the middle is two couples.
+    const headlineParts = (() => {
+      const text = String(line1 || '').trim();
+      const words = text.split(/\s+/).filter(Boolean);
+      if (words.length > 3 && words.includes('&')) {
+        const at = words.indexOf('&');
+        const left = words.slice(0, at).join(' ');
+        const right = words.slice(at + 1).join(' ');
+        return [left, '&', right];
+      }
+      return [text];
+    })();
+
+    // Greedy wrap inside a part, then the largest size at which the whole
+    // headline still fits the strip AND the band.
+    const wrapPart = (text, family, weight, maxW, px) => {
+      ctx.font = `${weight} ${px}px ${family}`;
+      const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+      if (!words.length) return [];
+      const lines = [];
+      let line = words[0];
+      for (let i = 1; i < words.length; i++) {
+        const next = line + ' ' + words[i];
+        if (ctx.measureText(next).width <= maxW) { line = next; continue; }
+        lines.push(line);
+        line = words[i];
+        if (lines.length >= 2) break;
+      }
+      lines.push(line);
+      return lines;
+    };
+
+    const fitHeadline = (parts, family, weight, maxW, startPx, minPx) => {
+      for (let px = startPx; px >= minPx; px -= 2) {
+        const lines = [];
+        for (const p of parts) lines.push(...wrapPart(p, family, weight, maxW, px));
+        if (lines.length > 3) continue;
+        // Every line has to FIT, not just be the right number of them. A
+        // single word longer than the strip - "Jaffee-Knapp" - cannot be
+        // split, so it overflowed into the other strip and the two copies of
+        // the headline landed on top of each other.
+        ctx.font = `${weight} ${px}px ${family}`;
+        const widest = Math.max(...lines.map((l) => ctx.measureText(l).width), 0);
+        if (widest <= maxW) return { lines, px };
+      }
+      const lines = [];
+      for (const p of parts) lines.push(...wrapPart(p, family, weight, maxW, minPx));
+      return { lines, px: minPx };
+    };
+
+    const t1 = fitHeadline(headlineParts, SCRIPT, 400, TEXT_MAX_W, 150, 52);
+    const t2 = fitWrapped(line2, SERIF, 500, TEXT_MAX_W * 0.92, 64, 22, 1);
+
+    // Line heights, measured for the faces in use. A script at 150px needs the
+    // full 150px between its lines: its ascenders and descenders are the
+    // type, and setting them 60% apart draws one line through the other.
+    const H1 = t1.px * 1.02;
+    const H2 = t2.px * 0.92;
 
     const LOGO_MAX_W = sW - 190;
     const LOGO_MAX_H = 150;
@@ -213,28 +404,46 @@ export async function composite(job) {
     // different halves means the client receives two different products.
     for (const strip of [0, 1]) {
       const cx = strip * sW + sW / 2;
-      let cursor = brandTop + 6;
 
+      // The type sits in the band under the windows, and is CENTRED in what
+      // is left of it: the old setting started at the top of the band and ran
+      // off the bottom of the card.
+      const blockH = t1.lines.length * H1 + t2.lines.length * H2 + 16;
+      let logoBottom = brandTop + 8;
+      let logoH = 0;
       if (logoImage) {
         // Never past 1:1 — magnifying a small logo is what makes it blurry.
         const sc = Math.min(LOGO_MAX_W / logoImage.width,
                             LOGO_MAX_H / logoImage.height, 1);
-        const lw = logoImage.width * sc, lh = logoImage.height * sc;
-        ctx.drawImage(logoImage, cx - lw / 2, cursor, lw, lh);
-        cursor += lh;
+        logoH = logoImage.height * sc;
+        ctx.drawImage(logoImage, cx - (logoImage.width * sc) / 2, logoBottom,
+                      logoImage.width * sc, logoH);
+        logoBottom += logoH + 10;
       }
+
+      const room = cH - logoBottom;
+      let cursor = logoBottom + Math.max(0, (room - blockH) / 2) + H1 / 2;
 
       ctx.shadowColor = onLight ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.6)';
       ctx.shadowBlur = 7;
       ctx.shadowOffsetY = 2;
 
-      cursor += f1 * 0.62 + 10;
+      // The headline, wrapped and centred.
+      ctx.font = `400 ${t1.px}px ${SCRIPT}`;
       ctx.fillStyle = ink.primary;
-      ctx.fillText(line1, cx, cursor);
+      for (const l of t1.lines) {
+        ctx.fillText(l, cx, cursor);
+        cursor += H1;
+      }
 
-      cursor += f1 * 0.60 + 8;
+      // The date, with the air the invitation gives it.
+      cursor += 8;
+      ctx.font = `500 ${t2.px}px ${SERIF}`;
       ctx.fillStyle = ink.secondary;
-      ctx.fillText(line2, cx, cursor);
+      for (const l of t2.lines) {
+        ctx.fillText(l, cx, cursor);
+        cursor += H2;
+      }
       ctx.shadowColor = 'transparent';
     }
 
@@ -242,14 +451,35 @@ export async function composite(job) {
   }, shell, logoSrc, backdropSrc, job.line1, job.line2, CARD_W, CARD_H, STRIP_W,
      WIN_W, WIN_H, FRAME_TOPS, BRAND_TOP);
 
-  const buf = Buffer.from(result.png.split(',')[1], 'base64');
+  let buf = Buffer.from(result.png.split(',')[1], 'base64');
+
+  // Scale on the way out. The composition above is the print, exactly; this
+  // only decides how big the FILE is. 72dpi is a quarter of each dimension -
+  // a sixteenth of the pixels - which is all a design review on a screen
+  // needs, and it is the difference between a 4.4MB download per draft and
+  // a couple of hundred kilobytes.
+  if (scale < 0.999) {
+    const out = await page.evaluate(async (src, w, h) => {
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = src; });
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(w); cv.height = Math.round(h);
+      const ctx = cv.getContext('2d');
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, cv.width, cv.height);
+      return cv.toDataURL('image/png');
+    }, `data:image/png;base64,${buf.toString('base64')}`, CARD_W * scale, CARD_H * scale);
+    buf = Buffer.from(out.split(',')[1], 'base64');
+  }
+
   await fs.mkdir(path.dirname(job.outPath), { recursive: true });
   await fs.writeFile(job.outPath, buf);
-  await browser.close();
 
   return {
     out: job.outPath,
     card: `${CARD_W}x${CARD_H}`,
+    file: `${Math.round(CARD_W * scale)}x${Math.round(CARD_H * scale)}`,
+    dpi: Math.round(300 * scale),
     window: `${WIN_W}x${WIN_H} (${(WIN_W / WIN_H).toFixed(2)}:1)`,
     framesPerStrip: 3,
     strips: 2,
