@@ -236,7 +236,10 @@ section('the print is the size it needs to be, and the type follows the invitati
     src.includes('Great Vibes') && src.includes('Cormorant Garamond'));
   check('the fonts are embedded, not linked',
     src.includes('data:font/woff2;base64') && src.includes('document.fonts.load'));
-  check('the headline is not a caption any more', /fitHeadline\(headlineParts, SCRIPT, 400, TEXT_MAX_W, 1\d\d/.test(src));
+  check('the headline is not a caption any more',
+    /fitHeadline\(headlineParts, SCRIPT, 400, TEXT_MAX_W, (\d+)/.test(src)
+    && Number((src.match(/fitHeadline\(headlineParts, SCRIPT, 400, TEXT_MAX_W, (\d+)/) || [])[1]) >= 80,
+    'the script was set at up to 150px against a 64px date - a shout, not a headline');
   check('and every line has to FIT the strip, not merely be the right number',
     /widest <= maxW/.test(src),
     'a word longer than the strip overflowed into the other strip');
