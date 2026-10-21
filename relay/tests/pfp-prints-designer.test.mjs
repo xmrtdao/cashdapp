@@ -226,6 +226,35 @@ section('the API keeps the two questions apart');
   }
 }
 
+section('the print is the size it needs to be, and the type follows the invitation');
+{
+  const src = readFileSync(join(RELAY, 'tools', 'pfp-compositor.mjs'), 'utf8');
+  const routes = readFileSync(join(RELAY, 'routes', 'pfp-prints.mjs'), 'utf8');
+  const studio = readFileSync(STUDIO, 'utf8');
+
+  check('the type is the invitation\'s script, not a plain serif',
+    src.includes('Great Vibes') && src.includes('Cormorant Garamond'));
+  check('the fonts are embedded, not linked',
+    src.includes('data:font/woff2;base64') && src.includes('document.fonts.load'));
+  check('the headline is not a caption any more', /fitHeadline\(headlineParts, SCRIPT, 400, TEXT_MAX_W, 1\d\d/.test(src));
+  check('and every line has to FIT the strip, not merely be the right number',
+    /widest <= maxW/.test(src),
+    'a word longer than the strip overflowed into the other strip');
+  check('the names break apart the way the invitation breaks them',
+    src.includes("words.includes('&')"));
+  check('the design phase works at 72dpi',
+    routes.includes('DESIGN_SCALE') && /PFP_DESIGN_SCALE \?\? 0\.24/.test(routes));
+  check('and the approved print is written at 300dpi',
+    /scale: 1,/.test(routes) && routes.includes('-print.png'));
+  check('the file is scaled on the way out',
+    src.includes('imageSmoothingQuality') && src.includes('cv.width = Math.round(w)'));
+  check('the frame is bounded by the stage, not by the image',
+    /height:100%;width:auto;aspect-ratio:2\/3/.test(studio));
+  check('the browser is closed even when a composite throws',
+    src.includes('await browser.close().catch(() => {})'),
+    'a leaked headless Chrome stopped every render after it');
+}
+
 console.log(fails === 0
   ? '\nall checks passed'
   : `\n${fails} check(s) FAILED`);

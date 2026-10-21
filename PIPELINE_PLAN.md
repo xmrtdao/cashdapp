@@ -1007,3 +1007,96 @@ exists.
 
 **53 of 53 pass**, including `relay/tests/pfp-prints-designer.test.mjs`, which
 is new and audits the flow, the prompt and the API.
+
+## 20. The studio, in the client's hands (2026-10-20, evening)
+
+The first real client — the Jaffe–Knapp wedding, 8 November 2026 — walked
+through the studio with their own invitation and their own design reference.
+That is how the rest of this section was found: not by reading, by watching.
+
+### 20.1 A restart took the client's design with it
+
+The session lived in a Map, in memory, and the relay was restarted in the
+middle of the client's options render. Their design, their uploads and their
+conversation were gone, and they were met with "your first draft is being
+prepared" — about a draft made hours ago.
+
+The session is now written to disk as well as held in memory, and a studio
+that already has a design opens on it rather than on the questions again. A
+table is the better answer and still worth doing; until then this is the
+difference between a client's work existing and not.
+
+### 20.2 The dropzone was covering the design
+
+The overlay was meant to retire once a design existed. The condition said
+`rev > 1` — after the SECOND draft — and it was also gated on "no logo
+uploaded", which is true of every client who sends an invitation. So the
+first design, the one they came for, was hidden under "drop your logo or
+invitation here".
+
+It retires as soon as there is a design to look at, and comes back if a file
+is dragged over the page. The paperclip is still there for the client who
+would rather click.
+
+### 20.3 The print was a thumbnail, and then it was enormous
+
+Two fixes, in opposite directions, both from the same root cause: the image
+sized its own frame, and the frame sized the page.
+
+- The frame is now bounded by the stage and carries the print's own 2:3
+  ratio, with the image fitted inside it.
+- The panes are a SPLIT, never stacked: the conversation in a column, the
+  design taking the rest, with a divider that drags and a width that is
+  remembered. It works at 800px wide and at a phone, where the conversation
+  is a sheet over the design rather than half of it.
+
+### 20.4 The type was a caption in the wrong face
+
+The headline was set in Georgia at 38px on a 1200px card — a line of small
+type in a band of empty cream, in a face that looked nothing like the
+invitation they had sent. The print now follows the invitation: Great Vibes
+for the names, Cormorant Garamond for the date, the names broken apart the
+way the invitation breaks them, the type filling the band instead of hiding
+in it.
+
+The fonts are fetched once, cached on disk and embedded in the page as
+base64: a canvas with no origin to fetch a font from silently falls back to
+a default face, and that is how a script became a sans.
+
+And every line has to FIT the strip, not merely be the right number of them.
+"Jaffee-Knapp" cannot be split, so it overflowed into the other strip and
+the two copies of the headline landed on top of each other.
+
+### 20.5 The file was 4.4MB to look at on a screen
+
+The print is 4x6 at 300dpi. That is the PRINT. During the design phase the
+client is reviewing a picture on a screen, and a 4.4MB PNG per draft is a
+4.4MB download per draft.
+
+The composition is drawn at print size and scaled on the way out, so the
+geometry is identical either way and only the file gets smaller: **288x432 at
+72dpi, 117KB** — a thirty-seventh of the bytes. The APPROVED file is written
+at 300dpi, once, when the client says yes.
+
+The model renders at 1k during the studio rather than 2k, which is **$0.04
+instead of $0.06** — measured against the live price, not assumed.
+
+### 20.6 The curtain belongs in the studio, and it is not a redraw
+
+The backdrop picker now sits under the event selector. The curtain is a
+LAYER of the print, not part of the artwork, so choosing one re-composites the
+design the client already has: no model, no money, and the design they liked
+is not thrown away and redrawn into something else. The picker uses the
+small `-backdrop.jpg` thumbnails — the full curtains are 1.2MB each, and a
+row of eleven of them would pull down fifteen megabytes to show eleven
+swatches.
+
+### 20.7 Several designs to choose between
+
+"More options" draws three DESIGNS, and each is a direction that came from
+the client's own documents: the colours on their invitation, the colours in
+the design reference they showed us, and the style's own palette. Choosing
+one re-composites the shell that was already rendered, so it costs nothing
+further.
+
+**53 of 53 pass.**
