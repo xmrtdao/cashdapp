@@ -53,7 +53,7 @@ function stripEmojiSignOff(text) {
 }
 
 // ── Token usage tracking ────────────────────────────────────
-async function logTokenUsage(agent, source, provider, model, promptTokens, outputTokens, costUsd) {
+async function logTokenUsage(agent, source, provider, model, promptTokens, outputTokens, costUsd, extra = {}) {
   try {
     const port = process.env.RELAY_PORT || process.env.PORT || 8080;
     await fetch("http://127.0.0.1:" + port + "/api/token-usage/log", {
@@ -71,6 +71,19 @@ async function logTokenUsage(agent, source, provider, model, promptTokens, outpu
         input_tokens: promptTokens || 0,
         output_tokens: outputTokens || 0,
         estimated_cost_usd: costUsd || 0,
+        // The provider's own breakdown, which used to be thrown away.
+        //
+        // cache_read_tokens is a SUBSET of the input tokens (measured against
+        // OpenRouter: prompt 41,361 with 34,560 cached, and the provider's
+        // own total is prompt + completion), so the two add back to the
+        // prompt exactly and neither is counted twice.
+        //
+        // reasoning_tokens is NOT part of output_tokens: the provider's own
+        // total is prompt + completion, with reasoning counted alongside it.
+        // Leaving it out under-reported every call that thought.
+        cache_read_tokens: extra.cacheReadTokens || 0,
+        cache_write_tokens: extra.cacheWriteTokens || 0,
+        reasoning_tokens: extra.reasoningTokens || 0,
       }),
       signal: AbortSignal.timeout(3000),
     });
@@ -321,6 +334,9 @@ function normalizeResponse(data, model, provider) {
       evalCount: outputTokens,
       promptEvalCount: promptTokens,
       costUsd: parseFloat(costUsd.toFixed(8)),
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
     };
   }
   // Ollama /api/chat local format (message object)
@@ -337,6 +353,9 @@ function normalizeResponse(data, model, provider) {
       evalCount: outputTokens,
       promptEvalCount: promptTokens,
       costUsd: parseFloat(costUsd.toFixed(8)),
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
     };
   }
   // OpenAI-compatible format (Ollama Cloud, OpenRouter)
@@ -347,7 +366,12 @@ function normalizeResponse(data, model, provider) {
     const usage = data.usage || {};
     const promptTokens = usage.prompt_tokens || 0;
     const outputTokens = usage.completion_tokens || 0;
-    const costUsd = (promptTokens * 0.15 + outputTokens * 0.60) / 1_000_000;
+    // The provider's own cost, when it reports one. The flat rate below is a
+    // guess for providers that stay silent; this is what was actually charged.
+    const reportedCost = typeof usage.cost === 'number' ? usage.cost : null;
+    const costUsd = reportedCost !== null
+      ? reportedCost
+      : (promptTokens * 0.15 + outputTokens * 0.60) / 1_000_000;
     return {
       response: stripEmojiSignOff(content),
       model: data.model || model,
@@ -356,6 +380,14 @@ function normalizeResponse(data, model, provider) {
       evalCount: outputTokens,
       promptEvalCount: promptTokens,
       costUsd: parseFloat(costUsd.toFixed(8)),
+      // Measured against OpenRouter: cached_tokens is a subset of
+      // prompt_tokens (the provider's own total is prompt + completion), and
+      // reasoning_tokens is counted ALONGSIDE completion_tokens, not inside
+      // it. The database's total_tokens column adds all of them, so the parts
+      // have to be recorded in that shape or the burn number is wrong.
+      cacheReadTokens: usage.prompt_tokens_details?.cached_tokens || 0,
+      cacheWriteTokens: usage.prompt_tokens_details?.cache_write_tokens || 0,
+      reasoningTokens: usage.completion_tokens_details?.reasoning_tokens || 0,
     };
   }
   throw new Error('Unrecognized response format');
@@ -469,7 +501,11 @@ export async function ollamaChat(message, options = {}) {
   }
 
   // Log token usage with agent/source attribution
-  await logTokenUsage(agent, source, result.provider, result.model, result.promptEvalCount, result.evalCount, result.costUsd);
+  await logTokenUsage(agent, source, result.provider, result.model, result.promptEvalCount, result.evalCount, result.costUsd, {
+    cacheReadTokens: result.cacheReadTokens,
+    cacheWriteTokens: result.cacheWriteTokens,
+    reasoningTokens: result.reasoningTokens,
+  });
 
   return result;
 }

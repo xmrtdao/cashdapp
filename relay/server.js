@@ -82,6 +82,7 @@ import {
 import { TENANTS } from './lib/tenants.mjs';
 import { brandGuide, guideFor } from './lib/brand-guide.mjs';
 import { buildWeekly } from './lib/weekly.mjs';
+import { budgetSharedContext, budgetHistory } from './lib/grounding-budget.mjs';
 const OPENCODE_PROXY_URL = (process.env.OPENCODE_PROXY_URL || 'http://127.0.0.1:4130').replace(/\/$/, '');
 const OPENCODE_LOCK_PATH = process.env.OPENCODE_LOCK_PATH
   || join(__dirname, '..', 'relay-data', 'opencode.lock');
@@ -6627,7 +6628,16 @@ app.get('/api/fleet-chat/grounded', async (req, res) => {
   trackRequest('/api/fleet-chat/grounded');
   try {
     const ctx = await gatherFleetContext();
-    res.json({ ok: true, context: ctx });
+    res.json({
+      ok: true,
+      context: ctx,
+      // What the grounding budget took off this prompt, and how much of the
+      // block is shared-memory notes. The chars figure is the honest one:
+      // this block is embedded in every fleet-chat prompt, so every character
+      // here is paid for on every turn.
+      budget: groundingBudgetReport,
+      chars: JSON.stringify(ctx, null, 0).length,
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -11331,6 +11341,11 @@ loadFleetChatHistory();
 // Anti-hallucination contract: any claim an agent makes in fleet chat
 // must trace back to a field in this block. If something isn't here,
 // the agent should say "I don't have that data" rather than invent.
+//
+// The last build's budget report, kept so the fleet-chat grounding route can
+// show what the trim actually saved. See lib/grounding-budget.mjs.
+let groundingBudgetReport = null;
+
 async function gatherFleetContext() {
   const local = 'http://localhost:' + PORT;
   const fetchJson = async (path, ms = 4000) => {
@@ -11440,6 +11455,26 @@ async function gatherFleetContext() {
         description: r.description,
         lastUpdatedBy: r.last_updated_by,
       }));
+
+      // ── The grounding block is the prompt ──────────────────────────────
+      //
+      // This whole block is embedded in every fleet-chat prompt, and it was
+      // 298,221 characters of which 253,692 (85%) was the *full value* of
+      // every shared-memory note — a 12.9KB service-topology plan, a 10.2KB
+      // gate writeup, a 6KB strategy document, all of them, every turn, for
+      // every agent. Measured at the provider that served it, one turn cost
+      // 82,973 prompt tokens to produce about 500 output tokens.
+      //
+      // The notes stay in the block; their bodies are cut. Every note keeps
+      // its key, type, description and author, so the model can still see
+      // that a note exists and what it is about, and a cut note is marked
+      // value_truncated so a fragment is never read as a whole. The full
+      // text of any note is one `shared-context` tool call away, by key.
+      //
+      // See relay/lib/grounding-budget.mjs for the budget and the reasoning.
+      const budgeted = budgetSharedContext(sharedContext);
+      sharedContext = budgeted.rows;
+      groundingBudgetReport = budgeted.report;
     }
   } catch (e) {
     // Query failed (e.g. DB reconnecting after restart) — surface the failure
@@ -12016,7 +12051,12 @@ async function routeFleetMessage(entry) {
         });
         const convData = await convRes.json();
         if (convData.success && convData.messages && convData.messages.length > 0) {
-          contextHistory = '\n\nRecent conversation context:\n' + convData.messages.map(function(m) {
+          // Bound the history. It rides along with EVERY turn, so it is paid
+          // for on every turn — and a single message is unbounded: the table
+          // holds messages up to 92KB, and one of those in the recent window
+          // would be pasted into the prompt whole. Recent is kept longest.
+          const bounded = budgetHistory(convData.messages);
+          contextHistory = '\n\nRecent conversation context:\n' + bounded.messages.map(function(m) {
             return '[' + (m.message_type || 'unknown') + '] ' + (m.content || '');
           }).join('\n');
         }
@@ -12046,6 +12086,7 @@ ${ctxJson}
 GROUNDING RULES:
 - If a fact is in the JSON block, reference it directly.
 - If something is NOT in the JSON but a tool in the \`tools\` array can help (web-search, db-query, db-rest, resend-inbox, shared-context, etc.), output a single line \`TOOL_CALL: {"tool":"<name>","args":{...}}\` on its own line. I will execute it, then come back for your final answer.
+- A \`sharedContext\` entry with \`value_truncated: true\` is the HEAD of a longer note, not the whole of it. Do not quote a truncated value as the full value. To read one in full, call \`shared-context\` with \`action: "read"\` and that entry's \`key\`.
 - For resend-send-email: ALWAYS include the "agent" field (use "eliza" if you are Eliza). The email body is RENDERED, not printed: write markdown and it becomes a styled email with headings, tables, code blocks and motion. There is no length limit — a full report belongs in the email, and nothing gets truncated. Include a \`\`\`chart block (JSON) for a real chart or a \`\`\`stats block for figures when the numbers matter.
 - Read the \`infrastructure\` field first. It explains the architecture: the database is local Postgres, NOT cloud Supabase. Cloud Supabase is DEPRECATED. A \`supabase.status\` of "error" or "unreachable" means the local-sb REST layer is down, NOT the cloud database.
 - Never claim "all systems nominal" or "no anomalies" without a matching field in the JSON.
@@ -12091,19 +12132,36 @@ Your response (no emoji sign-offs, no "—${agentLabel}", no "o7"):`;
           const inputTokens = d.prompt_eval_count || 0;
           const outputTokens = d.eval_count || 0;
           const totalTokens = inputTokens + outputTokens;
-          const costPer1KTokens = 0.00015; // Ollama local is free, but track for consistency
-          const estimatedCost = (totalTokens / 1000) * costPer1KTokens;
+          // The cost is the provider's own, when it reported one. The flat
+          // rate below is only a guess for providers that stay silent, and
+          // on the free tiers the real figure is $0 — so the burn board was
+          // charging for tokens that cost nothing.
+          const estimatedCost = generateResult.costUsd != null
+            ? generateResult.costUsd
+            : (totalTokens / 1000) * 0.00015;
           await fetch('http://localhost:' + PORT + '/api/token-usage/log', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               project: 'xmrt-dao',
               agent: agentName,
-              model: model,
-              provider: 'ollama',
+              // The model that ACTUALLY answered, and the upstream that
+              // served it. These were hardcoded to the requested model and
+              // to "ollama", so 835 calls and 61M tokens were attributed to
+              // a provider that never saw them — the burn board could not
+              // tell which tier was paying.
+              model: d.model,
+              provider: d.provider,
               input_tokens: inputTokens,
               output_tokens: outputTokens,
               estimated_cost_usd: estimatedCost,
+              // The provider's own breakdown, which used to be dropped. The
+              // database's total_tokens column adds these to input+output,
+              // so without them the burn number under-counted every call
+              // that thought or hit a warm cache.
+              cache_read_tokens: generateResult.cacheReadTokens || 0,
+              cache_write_tokens: generateResult.cacheWriteTokens || 0,
+              reasoning_tokens: generateResult.reasoningTokens || 0,
               source: 'fleet-chat',
               endpoint: 'routeToLocalOllamaAgent',
               status: 'success',
@@ -12244,7 +12302,10 @@ Your response (no emoji sign-offs, no "—${agentLabel}", no "o7"):`;
         });
         const convData = await convRes.json();
         if (convData.messages && convData.messages.length > 0) {
-          contextHistory = '\n\nRecent conversation context:\n' + convData.messages.map(function(m) {
+          // Bounded for the same reason as the fleet-agent path: the history
+          // is paid for on every turn, and one message can be 92KB.
+          const bounded = budgetHistory(convData.messages);
+          contextHistory = '\n\nRecent conversation context:\n' + bounded.messages.map(function(m) {
             return '[' + m.agent + '] ' + m.content;
           }).join('\n');
         }
@@ -12384,6 +12445,8 @@ The \`tools\` array in the JSON block above lists ALL available tools with descr
 |- \`python-exec\` — **Python executor.** Run Python 3.11 code on the relay machine. Pass code via "code" string. Use for data analysis, text processing, DB queries. Fast and cheap — runs locally, no LLM tokens used.
 |- \`service_control\` — **Service control.** Restart, start, stop, or check status of supervised services (relay, pg, local-sb, alice, cron-engine-v2, etc.). RESTARTING THE RELAY: expect ~15s downtime. Do not poll until 20s have passed.
 For ALL tools and their descriptions, check the \`tools\` array in the JSON grounding block.
+
+A \`sharedContext\` entry with \`value_truncated: true\` is the HEAD of a longer note, not the whole of it. Do not quote a truncated value as the full value. To read one in full, call \`shared-context\` with \`action: "read"\` and that entry's \`key\`.
 
 If you need information NOT in the grounding block, output a single line in EXACTLY this JSON format (no other format works):
 \`TOOL_CALL: {"tool":"search_knowledge","args":{"search_term":"term"}}\`
