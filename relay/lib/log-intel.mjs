@@ -29,7 +29,7 @@
 import { existsSync, readdirSync, openSync, fstatSync, readSync, closeSync, statSync } from 'fs';
 import { join } from 'path';
 import { query } from './db.mjs';
-import { scanInfraFiles, recordVersions, routeOwnerMap, findRouteOwner, versionAt, versionHistories, versionAtFromHistory } from './infra-files.mjs';
+import { scanInfraFiles, recordVersions, routeOwnerMap, findRouteOwner, findFunctionOwner, versionAt, versionHistories, versionAtFromHistory } from './infra-files.mjs';
 
 // ── Client classification ──────────────────────────────────────────────────
 //
@@ -226,7 +226,23 @@ export async function fetchActivity({
  */
 export function fingerprint(message) {
   if (!message) return '(empty)';
-  return String(message)
+  // The HTTP status code is not a variable number.
+  //
+  // "POST /x → 400 (1ms)" and "POST /x → 404 (1ms)" are different faults and
+  // the reader needs to see them apart. Normalising every digit merged them
+  // into one group, so a row that had been failing with 400 for hours and
+  // had just started failing with 404 looked like one continuing problem —
+  // and the fix, when it came, looked like the fault getting worse.
+  //
+  // So the status code is set aside before the numbers are normalised and
+  // put back afterwards.
+  let status = null;
+  let text = String(message).replace(/→\s*(\d{3})\b/, (m, code) => {
+    status = code;
+    return '→ <status>';
+  });
+
+  text = text
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
     .replace(/\b[0-9a-f]{16,}\b/gi, '<hex>')
     .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?Z?/g, '<ts>')
@@ -242,6 +258,8 @@ export function fingerprint(message) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 220);
+
+  return status ? text.replace('<status>', status) : text;
 }
 
 /**
@@ -764,7 +782,9 @@ export async function buildIntel({ windowMinutes = 60, root, refresh = false } =
   const activityErrors = await safe('activity-errors', async () => {
     const r = await query(`
       SELECT created_at, activity_type, title, description, status, agent_id,
+        function_name,
         metadata->>'path' AS path, metadata->>'function_name' AS fn,
+        metadata->>'edge_function' AS edge_function,
         (metadata->>'status_code')::int AS status_code
       FROM public.eliza_activity_log
       WHERE created_at > $1
@@ -790,6 +810,20 @@ export async function buildIntel({ windowMinutes = 60, root, refresh = false } =
     // badge that says which file owns the route would be missing exactly
     // when it is most wanted.
     const owner = path ? findRouteOwner(path) : null;
+    // A fault with no route still has an owner: the function that raised it.
+    //
+    // Before this, every error raised inside an edge function came out of
+    // the panel with no file and no version — "search_knowledge failed", and
+    // nothing about which file failed or what was live in it. 235 error rows
+    // in a day, none of them attributable, because the route map only knows
+    // the relay's HTTP routes and the faults were happening under
+    // `suite/supabase/functions/`.
+    //
+    // The writer records the function that ran the work, and this turns that
+    // name into a file. The route still wins when there is one: it is the
+    // more precise answer.
+    const fnName = row.edge_function || (row.activity_type === 'edge_function' ? row.function_name : null);
+    const fnOwner = owner ? null : findFunctionOwner(fnName);
     const message = canonicalErrorMessage(row);
     // A tool failure is written twice — once by the runner, once by the
     // caller. The runner's row is the primary one; the caller's row is the
@@ -797,7 +831,7 @@ export async function buildIntel({ windowMinutes = 60, root, refresh = false } =
     // one broken tool as two broken tools.
     if (row.activity_type === 'tool_execution' && primaryToolFailures.has(message)) continue;
     if (row.activity_type === 'tool_failed') primaryToolFailures.add(message);
-    addError(message, message, row.created_at, row.activity_type, { file: owner?.file || null });
+    addError(message, message, row.created_at, row.activity_type, { file: owner?.file || fnOwner?.file || null });
   }
 
   // Errors from the cron log — these never reach the activity feed.
@@ -960,6 +994,86 @@ export async function buildIntel({ windowMinutes = 60, root, refresh = false } =
     .sort((a, b) => b.bars.length - a.bars.length)
     .slice(0, 14);
 
+  // ── Did any of it turn into work? ───────────────────────────────────────
+  //
+  // Everything above this line counts ACTIVITY. Activity is not work.
+  //
+  // On 2026-10-23 the agent-work executor ran 283 times a day, its own log
+  // showed 15,710 "Processing task" events, and the board moved by 8 tasks
+  // in 14 days. Every number the panel could show said the fleet was busy.
+  // Not one of them could show that it was busy and going nowhere.
+  //
+  // So the panel has to be able to answer the question that matters: what
+  // did the fleet actually FINISH? A task board has four end states and they
+  // are not the same thing — a completed task is a thing that got done, and
+  // a cancelled one is a thing that was given up on.
+  //
+  // The token number is here for the same reason. Input tokens with output
+  // tokens next to them say what the fleet said; input tokens over completed
+  // tasks say what the fleet got done, which is the only ratio that has ever
+  // mattered.
+  const productivity = await safe('productivity', async () => {
+    const taskRows = await query(`
+      SELECT
+        count(*) FILTER (WHERE created_at > now() - interval '1 day')::int created_24h,
+        count(*) FILTER (WHERE created_at > now() - interval '7 days')::int created_7d,
+        count(*) FILTER (WHERE stage IN ('COMPLETED','COMPLETION')
+                         AND updated_at > now() - interval '1 day')::int completed_24h,
+        count(*) FILTER (WHERE stage IN ('COMPLETED','COMPLETION')
+                         AND updated_at > now() - interval '7 days')::int completed_7d,
+        count(*) FILTER (WHERE status = 'BLOCKED'
+                         AND updated_at > now() - interval '7 days')::int blocked_7d,
+        count(*) FILTER (WHERE status IN ('CANCELLED','CLOSED')
+                         AND updated_at > now() - interval '7 days')::int cancelled_7d,
+        count(*) FILTER (WHERE assignee_agent_id IS NOT NULL
+                         AND status NOT IN ('DONE','CANCELLED','CLOSED')
+                         AND blocking_reason IS NULL
+                         AND updated_at > now() - interval '7 days')::int stuck_7d
+      FROM app.tasks`, []);
+    const t = (taskRows.rows || [])[0] || {};
+
+    const tokenRows = await query(`
+      SELECT count(*)::int calls,
+             coalesce(sum(input_tokens), 0)::bigint input_tokens,
+             coalesce(sum(output_tokens), 0)::bigint output_tokens,
+             coalesce(sum(total_tokens), 0)::bigint total_tokens
+      FROM app.token_usage WHERE logged_at > now() - interval '1 day'`, []);
+    const k = (tokenRows.rows || [])[0] || {};
+
+    const cronRows = await query(`
+      SELECT count(*)::int runs,
+             count(*) FILTER (WHERE status = 'failed')::int failed,
+             coalesce(sum(duration_ms), 0)::bigint total_ms
+      FROM public.cron_execution_log WHERE created_at > now() - interval '1 day'`, []);
+    const c = (cronRows.rows || [])[0] || {};
+
+    const completed7d = Number(t.completed_7d || 0);
+    const inputTokens = Number(k.input_tokens || 0);
+
+    return {
+      tasks_created_24h: t.created_24h || 0,
+      tasks_created_7d: t.created_7d || 0,
+      tasks_completed_24h: t.completed_24h || 0,
+      tasks_completed_7d: completed7d,
+      tasks_blocked_7d: t.blocked_7d || 0,
+      tasks_cancelled_7d: t.cancelled_7d || 0,
+      tasks_stuck_7d: t.stuck_7d || 0,
+      // The ratio that has never been available: what the fleet burned, per
+      // thing it finished. A fleet that talks a great deal and finishes
+      // nothing shows up here as a very large number, which is the point.
+      tokens_per_completed_task_7d: completed7d > 0
+        ? Math.round(inputTokens / completed7d)
+        : (inputTokens > 0 ? null : 0),
+      tokens_24h: k.total_tokens || 0,
+      input_tokens_24h: inputTokens,
+      output_tokens_24h: k.output_tokens || 0,
+      model_calls_24h: k.calls || 0,
+      cron_runs_24h: c.runs || 0,
+      cron_failures_24h: c.failed || 0,
+      cron_minutes_24h: Math.round(Number(c.total_ms || 0) / 60000),
+    };
+  }, null);
+
   // ── Assemble ─────────────────────────────────────────────────────────────
   const data = {
     generated_at: new Date().toISOString(),
@@ -975,6 +1089,7 @@ export async function buildIntel({ windowMinutes = 60, root, refresh = false } =
       actors: totals.actor_count || 0,
       unknown_actor_rows: (unknownSources || []).reduce((n, u) => n + u.calls, 0),
     },
+    productivity,
     types,
     unknown_sources: unknownSources,
     timeline,

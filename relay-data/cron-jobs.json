@@ -116,7 +116,9 @@
     "type": "ef",
     "name": "task-auto-advance-fast",
     "fn": "task-auto-advance",
-    "body": { "action": "run_all" },
+    "body": {
+      "action": "run_all"
+    },
     "desc": "Task auto-advance (10min) — KEEPER of task-auto-advance family",
     "note": "[2026-10-20] run_all, not the default. The default action advances only, and the advance pass advances only a task whose checklist progress has reached 100% - so with the advance pass alone, nothing ever counted the checklist, no task ever reached 100%, and no task ever advanced. The progress pass is what turns a checklist into a number. Nothing in the tree called update_progress, so this body is the only thing keeping it alive.]"
   },
@@ -672,7 +674,8 @@
     "args": "--location",
     "location": "Washington DC",
     "desc": "Nightly contact scrape for PFP campaign",
-    "disabled": false
+    "disabled": true,
+    "note": "DISABLED 2026-10-23. Never ran, for two independent reasons: (1) id 14 is owned by cron.job's 'memory-watchdog', and the loader resolves ids across the two registries, so this entry was dropped from the schedule entirely; (2) the engine has no 'script' type, so even unshadowed it would fail with 'unknown type: script'. CRON-JOBS-REVIEW.md also records this job as absent from the old workspace ('nothing to recover'), and its 31harbor-* siblings are disabled for the same reason. The script (lead-scraper/scraper_wedding.py) IS present, so this can be restored deliberately: give it a free id, add a 'script' type to the engine (or stage it as a shell command), and confirm with the operator that a nightly Washington DC contact scrape should run."
   },
   {
     "id": 15,
@@ -681,7 +684,8 @@
     "type": "ef",
     "fn": "paragraph-publisher",
     "desc": "Daily news research + publish to Paragraph",
-    "disabled": false
+    "disabled": true,
+    "note": "DISABLED 2026-10-23. It called paragraph-publisher with no body at all, so it could only ever return HTTP 400 'Title and content (markdown or body) are required.' It also duplicated the purpose of id 195 'daily-news-finder', which does the research AND the publish (it calls paragraph-publisher itself and writes the daily_news_published activity row). Restoring it would need a content body; until then id 195 is the real daily-news job."
   },
   {
     "id": 303,
@@ -709,5 +713,15 @@
     "name": "Jobby Evening Summary Email",
     "desc": "Sends an evening summary email to registered users with what was accomplished. Runs at 6:00 PM.",
     "disabled": false
+  },
+  {
+    "id": 66,
+    "schedule": "17 3 * * *",
+    "type": "sql",
+    "name": "purge-activity-feed",
+    "sql": "SELECT public.purge_activity_feed(14);",
+    "desc": "Bound oversized activity rows and purge the activity feed beyond 14 days",
+    "disabled": true,
+    "note": "[duplicate of cron.job 66; disabled so it runs once]"
   }
 ]

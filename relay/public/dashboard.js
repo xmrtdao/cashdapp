@@ -322,14 +322,20 @@
     };
   })();
 
-  // ── Security Tile — TrustGraph · CAC Tiers · Access Control ──
+  // ── Security Tile — band, CAC tier, access ──
+  //
+  // The three CAC counters are NOT written here. This endpoint reports
+  // `registry_agents.cac_tier`, which disagrees with `cac_credentials` for
+  // several agents (builder, sovereign, trib, global-communicator). The
+  // credential is the record with a status and an expiry, so it wins, and the
+  // trust-history fetch owns these three rows. Writing the registry numbers
+  // here would overwrite the correct ones twice a minute.
   function updateQDSSecurity() {
     apiFetch('/api/cuttlefishclaws/trust-network', { signal: AbortSignal.timeout(25000) }).then(r=>r.json()).then(d => {
       var agents = d.agents || d.nodes || [];
       var total = agents.length;
       var trusted = 0, cautious = 0, banned = 0;
       var topScore = 0, topName = '—', lowScore = 100, lowName = '—';
-      var anchor = 0, builder = 0, explorer = 0;
       var ialCount = {};
       agents.forEach(function(a) {
         var s = a.trustScore !== undefined ? a.trustScore : 50;
@@ -338,10 +344,6 @@
         else banned++;
         if (s > topScore) { topScore = s; topName = a.name || '?'; }
         if (s < lowScore) { lowScore = s; lowName = a.name || '?'; }
-        var tier = (a.cacTier || '').toLowerCase();
-        if (tier === 'anchor') anchor++;
-        else if (tier === 'builder') builder++;
-        else if (tier === 'explorer') explorer++;
         if (a.ial) ialCount[a.ial] = (ialCount[a.ial] || 0) + 1;
       });
       var el = function(id) { return document.getElementById(id); };
@@ -358,9 +360,6 @@
         el('sec-ial').style.color = bestIal ? '#fbbf24' : '#9AA091';
       }
       if (el('sec-agent-count')) el('sec-agent-count').textContent = total;
-      if (el('sec-cac-anchor')) el('sec-cac-anchor').textContent = anchor;
-      if (el('sec-cac-builder')) el('sec-cac-builder').textContent = builder;
-      if (el('sec-cac-explorer')) el('sec-cac-explorer').textContent = explorer;
       if (el('sec-trusted')) el('sec-trusted').textContent = trusted;
       if (el('sec-cautious')) el('sec-cautious').textContent = cautious;
       if (el('sec-banned')) el('sec-banned').textContent = banned;
@@ -384,324 +383,6 @@
     });
   }
   setTimeout(function() { updateQDSSecurity(); setInterval(updateQDSSecurity, 30000); }, 500);
-
-  // ── TrustGraph Trajectory Line Chart ──
-  var trajectoryZoom = null; // null = full, {minTime, maxTime} = zoomed
-  var trajectoryFullBounds = null; // cached full bounds for un-zoom
-
-  function updateTrustTrajectory() {
-    var canvas = document.getElementById('trust-trajectory-canvas');
-    if (!canvas) return;
-    var ctx = canvas.getContext('2d');
-    var rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = (rect.width || 800) * 0.98;
-    canvas.height = 200;
-
-    // Store data points for hover detection
-    var hitPoints = [];
-
-    apiFetch('/api/trustgraph/trajectory', { signal: AbortSignal.timeout(15000) }).then(function(r){return r.json();}).then(function(d){
-      var series = d.series || {};
-      var totalEvents = d.totalEvents || 0;
-
-      // Update stats
-      var actEl = document.getElementById('trajectory-event-count');
-      if (actEl) actEl.textContent = totalEvents;
-      var agentEl = document.getElementById('trajectory-agent-count');
-      if (agentEl) agentEl.textContent = Object.keys(series).length;
-
-      var agents = Object.keys(series).filter(function(k){ return series[k].length >= 1; });
-      if (agents.length === 0) {
-        ctx.fillStyle = '#3A3F31';
-        ctx.font = '12px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText('Not enough trajectory data yet', canvas.width/2, canvas.height/2);
-        return;
-      }
-
-      // Collect all points to find full bounds
-      var allScores = [];
-      var allTimes = [];
-      agents.forEach(function(a) {
-        series[a].forEach(function(p) {
-          allScores.push(p.score);
-          allTimes.push(new Date(p.t).getTime());
-        });
-      });
-      var fullMinScore = Math.max(0, Math.min.apply(null, allScores) - 5);
-      var fullMaxScore = Math.min(100, Math.max.apply(null, allScores) + 5);
-      var fullMinTime = Math.min.apply(null, allTimes);
-      var fullMaxTime = Math.max.apply(null, allTimes);
-
-      trajectoryFullBounds = { minScore: fullMinScore, maxScore: fullMaxScore, minTime: fullMinTime, maxTime: fullMaxTime };
-
-      // Determine view bounds: default to last 24h, toggle to full
-      var now = Date.now();
-      var twentyFourHours = 24 * 60 * 60 * 1000;
-      var viewMinTime, viewMaxTime, viewMinScore, viewMaxScore;
-
-      if (trajectoryZoom) {
-              // User has zoomed — use their bounds
-              viewMinTime = trajectoryZoom.minTime;
-              viewMaxTime = trajectoryZoom.maxTime;
-              viewMinScore = fullMinScore;
-              viewMaxScore = fullMaxScore;
-            } else {
-              // Default: last 24h — but if no data in 24h, fall back to full range
-              var hasRecent = false;
-              agents.forEach(function(a) {
-                series[a].forEach(function(p) {
-                  var t = new Date(p.t).getTime();
-                  if (t >= (now - twentyFourHours) && t <= now) hasRecent = true;
-                });
-              });
-              if (hasRecent) {
-                viewMinTime = now - twentyFourHours;
-                viewMaxTime = now;
-              } else {
-                // No recent data — show full range
-                viewMinTime = fullMinTime;
-                viewMaxTime = fullMaxTime;
-              }
-              viewMinScore = fullMinScore;
-              viewMaxScore = fullMaxScore;
-            }
-      var timeRange = viewMaxTime - viewMinTime || 1;
-      var scoreRange = viewMaxScore - viewMinScore || 1;
-
-      // Update date range display
-      var rangeEl = document.getElementById('trajectory-range');
-      if (rangeEl) {
-        var from = new Date(viewMinTime).toLocaleDateString() + ' ' + new Date(viewMinTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-        var to = new Date(viewMaxTime).toLocaleDateString() + ' ' + new Date(viewMaxTime).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-        rangeEl.textContent = from + ' — ' + to;
-      }
-
-      var pad = { top: 12, bottom: 20, left: 30, right: 10 };
-      var w = canvas.width - pad.left - pad.right;
-      var h = canvas.height - pad.top - pad.bottom;
-
-      function x(t) { return pad.left + ((new Date(t).getTime() - viewMinTime) / timeRange) * w; }
-      function y(s) { return pad.top + h - ((s - viewMinScore) / scoreRange) * h; }
-
-      // Grid lines
-      ctx.strokeStyle = '#111310';
-      ctx.lineWidth = 0.5;
-      for (var g = 0; g <= 4; g++) {
-        var gy = pad.top + (g/4) * h;
-        ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(pad.left + w, gy); ctx.stroke();
-        ctx.fillStyle = '#3A3F31';
-        ctx.font = '9px monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText(Math.round(viewMaxScore - (g/4)*scoreRange), pad.left - 4, gy + 3);
-      }
-
-      // Agent colors
-      var colors = ['#8FC97A','#63C7D4','#A98AD6','#DC8A1E','#E4695A','#8FC97A','#A98AD6','#E4695A','#63C7D4','#DC8A1E','#A98AD6','#9AA091','#DC8A1E','#63C7D4','#E4695A','#8FC97A'];
-      var legend = [];
-      hitPoints = [];
-
-      agents.slice(0, 16).forEach(function(agent, i) {
-        var pts = series[agent];
-        var color = colors[i % colors.length];
-        var shortName = agent.replace(/^did:[^:]+:/,'').replace(/-[^-]+$/,'').slice(0, 14);
-        var agentIdx = i;
-
-        // Filter points to visible range
-        var visiblePts = pts.filter(function(p) {
-          var t = new Date(p.t).getTime();
-          return t >= viewMinTime && t <= viewMaxTime;
-        });
-        // Need at least 1 point in the visible range to show anything.
-        // (A single point draws as a dot only — a line needs ≥2.)
-        if (visiblePts.length < 1) return;
-
-        // Draw line (only if we have ≥2 points)
-        if (visiblePts.length >= 2) {
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 1.5;
-          ctx.beginPath();
-          visiblePts.forEach(function(p, j) {
-            var px = x(p.t), py = y(p.score);
-            if (j === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-          });
-          ctx.stroke();
-        }
-
-        // Draw dots
-        visiblePts.forEach(function(p) {
-          var px = x(p.t), py = y(p.score);
-          var isFab = p.event === 'FABRICATION_DETECTED';
-          var isIncorrect = p.event === 'INCORRECT_REFERENCE';
-          if (isFab) {
-            ctx.strokeStyle = '#E4695A';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.moveTo(px - 3, py - 3);
-            ctx.lineTo(px + 3, py + 3);
-            ctx.moveTo(px + 3, py - 3);
-            ctx.lineTo(px - 3, py + 3);
-            ctx.stroke();
-          } else if (isIncorrect) {
-            ctx.fillStyle = '#DC8A1E';
-            ctx.beginPath();
-            ctx.arc(px, py, 2, 0, Math.PI*2);
-            ctx.fill();
-          } else {
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            ctx.arc(px, py, 3, 0, Math.PI*2);
-            ctx.fill();
-          }
-          hitPoints.push({
-            px: px, py: py,
-            agent: shortName,
-            agentFull: agent,
-            agentIdx: agentIdx,
-            score: p.score,
-            delta: p.delta,
-            event: p.event,
-            note: p.note,
-            ref: p.ref,
-            domain: p.domain,
-            time: p.t,
-          });
-        });
-
-        // Use the most recent VISIBLE point's score for the legend, not
-        // the last point of the entire series. This way the legend
-        // reflects what the chart is actually showing in the 24h window.
-        var lastVisible = visiblePts[visiblePts.length - 1] || pts[pts.length - 1];
-        legend.push({ name: shortName, color: color, score: lastVisible.score, agent: agent });
-      });
-
-      // Draw current scores in center of chart area
-      if (trajectoryZoom === null) {
-        // 24h zoomed view — show current scores in center
-        ctx.globalAlpha = 0.85;
-        var cx = pad.left + w / 2;
-        var cy = pad.top + h / 2;
-        ctx.font = 'bold 11px monospace';
-        ctx.textAlign = 'center';
-        ctx.fillStyle = '#A98AD6';
-        ctx.fillText('Current Scores', cx, cy - 30);
-
-        // Use the same legend data (already filtered to visible agents with correct colors)
-        var sortedLegend = legend.slice().sort(function(a, b) { return b.score - a.score; });
-        ctx.font = '9px monospace';
-        sortedLegend.slice(0, 8).forEach(function(sl, j) {
-          var sy = cy - 15 + j * 13;
-          ctx.fillStyle = sl.color;
-          ctx.textAlign = 'right';
-          ctx.fillText(sl.name, cx - 5, sy);
-          ctx.textAlign = 'left';
-          ctx.fillText(sl.score.toFixed(1), cx + 5, sy);
-        });
-        ctx.globalAlpha = 1.0;
-              }
-
-              // Refresh timestamp (top-right corner) — confirms the chart is actually polling
-              ctx.globalAlpha = 0.6;
-              ctx.font = '8px monospace';
-              ctx.textAlign = 'right';
-              ctx.fillStyle = '#9AA091';
-              ctx.fillText('↻ ' + new Date().toLocaleTimeString(), canvas.width - 4, 10);
-              ctx.globalAlpha = 1.0;
-
-              // Legend at bottom
-      var lx = pad.left;
-      var ly = canvas.height - 3;
-      ctx.font = '9px monospace';
-      legend.forEach(function(l) {
-        var label = l.name + ' ' + l.score.toFixed(0);
-        ctx.fillStyle = l.color;
-        ctx.textAlign = 'left';
-        ctx.fillText('●', lx, ly);
-        ctx.fillText(label, lx + 10, ly);
-        lx += ctx.measureText(label).width + 18;
-        if (lx > canvas.width - 20) { lx = pad.left; ly -= 11; }
-      });
-
-      // Hover handler
-      canvas.onmousemove = function(e) {
-        var cr = canvas.getBoundingClientRect();
-        var mx = e.clientX - cr.left;
-        var my = e.clientY - cr.top;
-        var tooltip = document.getElementById('trust-trajectory-tooltip');
-        if (!tooltip) return;
-
-        var nearest = null;
-        var minDist = 10;
-        hitPoints.forEach(function(hp) {
-          var dx = mx - hp.px;
-          var dy = my - hp.py;
-          var dist = Math.sqrt(dx*dx + dy*dy);
-          if (dist < minDist) { minDist = dist; nearest = hp; }
-        });
-
-        if (nearest) {
-          var dt = new Date(nearest.time);
-          var dateStr = dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-          var deltaStr = nearest.delta !== null && nearest.delta !== undefined
-            ? (nearest.delta >= 0 ? '+' + nearest.delta : nearest.delta)
-            : '';
-          var html = '<b style="color:' + colors[nearest.agentIdx % colors.length] + ';">' + nearest.agent + '</b>';
-          html += ' · ' + dateStr;
-          html += ' · <b>' + nearest.score + '</b>';
-          if (deltaStr) html += ' (' + deltaStr + ')';
-          if (nearest.event) html += '<br>⚡ ' + nearest.event;
-          if (nearest.note) html += '<br><span style="color:#6C7263;font-size:10px;">' + nearest.note + '</span>';
-          if (nearest.ref) html += '<br><span style="color:#9AA091;font-size:9px;">' + nearest.ref + '</span>';
-          tooltip.innerHTML = html;
-          tooltip.style.display = 'block';
-          tooltip.style.left = Math.min(nearest.px + 12, canvas.width - 250) + 'px';
-          tooltip.style.top = Math.max(nearest.py - 40, 0) + 'px';
-          canvas.style.cursor = 'pointer';
-        } else {
-          tooltip.style.display = 'none';
-          canvas.style.cursor = 'default';
-        }
-      };
-      canvas.onmouseleave = function() {
-        var tooltip = document.getElementById('trust-trajectory-tooltip');
-        if (tooltip) tooltip.style.display = 'none';
-        canvas.style.cursor = 'default';
-      };
-      canvas.onmousedown = function() {
-        canvas.style.cursor = 'grabbing';
-      };
-      canvas.onmouseup = function() {
-        canvas.style.cursor = 'default';
-      };
-    }).catch(function() {
-      ctx.fillStyle = '#3A3F31';
-      ctx.font = '12px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('Trajectory data unavailable', canvas.width/2, canvas.height/2);
-    });
-  }
-
-  // Toggle between 24h zoom and full view
-  window.toggleTrajectoryView = function() {
-    if (trajectoryZoom === null) {
-      // Switch to full view
-      if (trajectoryFullBounds) {
-        trajectoryZoom = { minTime: trajectoryFullBounds.minTime, maxTime: trajectoryFullBounds.maxTime };
-      }
-    } else {
-      // Switch back to 24h zoom
-      trajectoryZoom = null;
-    }
-    // Update button text
-    var btn = document.getElementById('trajectory-toggle-btn');
-    if (btn) {
-      btn.textContent = trajectoryZoom === null ? '🔍 Full View' : '🔍 24h View';
-    }
-    updateTrustTrajectory();
-  };
-
-  setTimeout(function() { updateTrustTrajectory(); setInterval(updateTrustTrajectory, 30000); }, 200);
 
   // ── Activity Log (centralized log viewer) ───────────────────────────────
   //
@@ -831,6 +512,45 @@
   }
   function refreshLogViewer() { updateShipsLog(); }
   setTimeout(function() { updateShipsLog(); setInterval(updateShipsLog, 5000); }, 1000);
+
+  // ── Did it turn into work? ───────────────────────────────────────────────
+  //
+  // The tile above counts ACTIVITY. Activity is not work, and on 2026-10-23
+  // the fleet could show a impressive number of every activity and had
+  // finished five tasks in a week.
+  //
+  // So the same tile carries the outcome: what was created, what was
+  // finished, what was given up on, and what the fleet burned per thing it
+  // finished. That last number is the one that had never been available,
+  // and it was 1,133,480 input tokens per completed task.
+  function updateProductivity() {
+    var el = document.getElementById('qds-productivity');
+    if (!el) return;
+    apiFetch('/api/log-intel?window=60', { signal: AbortSignal.timeout(25000) }).then(function(r) { return r.json(); }).then(function(d) {
+      var p = (d && d.productivity) || null;
+      if (!p) { el.innerHTML = '<span class="label" style="color:#9AA091;">outcome unavailable</span>'; return; }
+      var cell = function(label, value, colour) {
+        return '<span class="stat"><span class="label">' + label + '</span>'
+          + '<span class="value" style="color:' + (colour || 'var(--text-secondary)') + ';">' + value + '</span></span>';
+      };
+      var done7 = p.tasks_completed_7d || 0;
+      var burn = p.tokens_per_completed_task_7d;
+      el.innerHTML =
+        cell('done 7d', done7, done7 ? '#8FC97A' : '#E4695A')
+        + cell('created 7d', p.tasks_created_7d || 0)
+        + cell('blocked 7d', p.tasks_blocked_7d || 0, (p.tasks_blocked_7d ? '#DC8A1E' : '#8FC97A'))
+        + cell('cancelled 7d', p.tasks_cancelled_7d || 0, (p.tasks_cancelled_7d ? '#DC8A1E' : '#8FC97A'))
+        + cell('stuck 7d', p.tasks_stuck_7d || 0, (p.tasks_stuck_7d ? '#DC8A1E' : '#8FC97A'))
+        + cell('tokens/task',
+            burn == null ? '—' : (burn >= 1000 ? (Math.round(burn / 1000) + 'k') : burn),
+            (burn && burn > 100000) ? '#E4695A' : 'var(--text-secondary);')
+        + cell('tokens 24h', (p.tokens_24h || 0).toLocaleString());
+    }).catch(function() {
+      var el2 = document.getElementById('qds-productivity');
+      if (el2) el2.innerHTML = '<span class="label" style="color:#9AA091;">outcome unavailable</span>';
+    });
+  }
+  setTimeout(function() { updateProductivity(); setInterval(updateProductivity, 30000); }, 2500);
 
   // ── Mesh Peers ──
   function updateMeshPeers() {
@@ -3956,11 +3676,18 @@ window.openBrowserPane = function(u, title) {
     Trusted: '#8FC97A', Standard: '#63C7D4', Monitored: '#DC8A1E',
     Cautious: '#E4695A', SUSPENDED: '#9AA091', REVOKED: '#E4695A',
   };
+  // Access is a different ladder from the band. The colours match the chips
+  // in the trust history below, so one gold ring means the same thing here.
+  var ACCESS_COLORS = { core: '#E4BB3A', trusted: '#63C7D4', public: '#9AA091' };
   var data = null;
   var nodes = [];
   var links = [];
   var hitPoints = [];
   var hovered = null;
+  // The agent selected in the trust history below. Clicking a node selects it
+  // there, clicking a lane selects it here; both listen to the same event, so
+  // neither has to know the other exists.
+  var selected = null;
   var anim = 0;
 
   function el(id) { return document.getElementById(id); }
@@ -4101,6 +3828,8 @@ window.openBrowserPane = function(u, title) {
       if (!a || !b) continue;
       var pulse = 0.25 + 0.2 * Math.sin(anim / 700 + i);
       var isHover = hovered && (hovered.agent === l.source || hovered.agent === l.target);
+      var linkTouchesSelection = !selected || selected === l.source || selected === l.target;
+      ctx.globalAlpha = linkTouchesSelection ? 1 : 0.2;
       ctx.beginPath();
       ctx.moveTo(px(dx(a)), py(dy(a)));
       ctx.lineTo(px(dx(b)), py(dy(b)));
@@ -4110,6 +3839,7 @@ window.openBrowserPane = function(u, title) {
       ctx.lineWidth = l.kind === 'shared-fault' ? (isHover ? 2 : 1.2) : (isHover ? 1.5 : 0.8);
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
 
     // Nodes.
     var drawnLabels = [];
@@ -4118,6 +3848,8 @@ window.openBrowserPane = function(u, title) {
       var cx = px(dx(node)), cy = py(dy(node));
       var color = BAND_COLORS[node.trust_band] || '#9AA091';
       var isHover = hovered && hovered.agent === node.agent;
+      var isSelected = selected === node.agent;
+      ctx.globalAlpha = !selected || isSelected || isHover ? 1 : 0.22;
       var r = node.r + (isHover ? 3 : 0);
 
       if (node.kind === 'client') {
@@ -4188,8 +3920,33 @@ window.openBrowserPane = function(u, title) {
         }
       }
 
+      // CORE is roster membership, and it is the access level the old chart
+      // never named. A gold ring sits inside the selection ring, so both
+      // facts can be read at once.
+      if (node.access_level === 'core') {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r + 2.5, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(201,162,39,0.85)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // A ring on the agent selected in the trust history: the two pictures
+      // are one instrument, and the selected agent should be findable in
+      // both without hunting.
+      if (isSelected) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = '#F2F3EC';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 2]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
       hitPoints.push({ node: node, x: cx, y: cy, r: r });
     }
+    ctx.globalAlpha = 1;
   }
 
   function nodeByName(name) {
@@ -4275,6 +4032,9 @@ window.openBrowserPane = function(u, title) {
         parts.push('<span style="color:' + (BAND_COLORS[b] || '#9AA091') + ';">● ' + esc(b) + '</span>');
       }
       parts.push('<span style="color:#9AA091;">○ client (no trust score)</span>');
+      if (nodes.some(function (n) { return n.access_level === 'core'; })) {
+        parts.push('<span style="color:#C9A227;">◉ CORE (roster)</span>');
+      }
       parts.push('<span style="color:#E4695A;">— shared fault</span>');
       legend.innerHTML = parts.join('');
     }
@@ -4297,7 +4057,7 @@ window.openBrowserPane = function(u, title) {
               : ' <span style="color:#6C7263;">▬</span>');
         return '<div style="display:grid;grid-template-columns:96px 1fr auto;gap:6px;align-items:center;padding:1px 0;border-bottom:1px solid rgba(255,255,255,0.03);">'
           + '<span style="color:' + color + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(n.agent) + '">'
-          + (n.kind === 'client' ? '○ ' : '● ') + esc(n.agent.slice(0, 13)) + '</span>'
+          + (n.access_level === 'core' ? '◉ ' : (n.kind === 'client' ? '○ ' : '● ')) + esc(n.agent.slice(0, 13)) + '</span>'
           + '<span style="color:#9AA091;">'
           + (n.trust_score != null ? 'trust ' + n.trust_score.toFixed(1) : 'trust —')
           + ' · ' + fmtNum(n.tokens) + ' tok · ' + fmtNum(n.events) + ' ev'
@@ -4366,6 +4126,12 @@ window.openBrowserPane = function(u, title) {
           html += '<br><span style="color:#6C7263;">no trust score on record</span>';
         }
         html += '<br>burn ' + fmtNum(n.tokens) + ' tok · ' + n.calls + ' calls · $' + (n.cost || 0).toFixed(4);
+        if (n.access_level) {
+          html += '<br>access <b style="color:' + (ACCESS_COLORS[n.access_level] || '#9AA091') + ';">'
+            + esc(String(n.access_level).toUpperCase()) + '</b>'
+            + (n.cac_tier ? ' · CAC ' + esc(n.cac_tier)
+              + (n.cac_status ? ' (' + esc(n.cac_status) + ')' : '') : '');
+        }
         html += '<br>activity ' + n.events + ' ev' + (n.errors ? ' · <span style="color:#E4695A;">' + n.errors + ' failed</span>' : '');
         if (n.connections) html += '<br>galaxy ' + n.connections + ' connections';
         if (n.last_activity) html += '<br><span style="color:#6C7263;">last seen ' + fmtAge(n.last_activity) + '</span>';
@@ -4386,6 +4152,31 @@ window.openBrowserPane = function(u, title) {
       draw();
     });
 
+    // Clicking a node selects the agent in the trust history as well, and
+    // clicking it again clears the selection. The event is the whole coupling:
+    // this code does not know the history exists.
+    canvas.addEventListener('click', function (e) {
+      var cr = canvas.getBoundingClientRect();
+      var mx = e.clientX - cr.left;
+      var my = e.clientY - cr.top;
+      var nearest = null, minDist = 14;
+      hitPoints.forEach(function (hp) {
+        var dx = mx - hp.x, dy = my - hp.y;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < hp.r + 6 && dist < minDist) { minDist = dist; nearest = hp; }
+      });
+      if (!nearest) return;
+      var agent = nearest.node.agent;
+      document.dispatchEvent(new CustomEvent('trust:select', {
+        detail: { agent: selected === agent ? null : agent },
+      }));
+    });
+
+    document.addEventListener('trust:select', function (e) {
+      selected = e.detail && e.detail.agent ? e.detail.agent : null;
+      draw();
+    });
+
     // A slow animation, so a node that is failing pulses and the links
     // breathe. This is the only motion in the tile: the picture is a
     // readout, not a screensaver.
@@ -4397,6 +4188,455 @@ window.openBrowserPane = function(u, title) {
 
     load();
     setInterval(load, 30000);
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TRUST HISTORY — the constellation's x axis, unrolled into band spells.
+//
+// The constellation above answers "where is each agent now": trust on the x
+// axis, burn on the y, radius from activity, colour from band. It cannot
+// answer "how long has it been there, and what moved it", because a single
+// position has no duration in it.
+//
+// So this draws the other half. One lane per agent, one bar per BAND SPELL —
+// the interval during which that agent held a band — and a tick only where an
+// event changed the band or took trust away. Bar length is time held. That is
+// the one thing a score cannot say, and it is why a timeline earns the space
+// next to the picture rather than repeating it.
+//
+// It replaces the full-width "Trust Trajectory" line chart that stood between
+// Campus Comms and Campus Command. That chart plotted a point per event:
+// 7,490 points in total, 3,759 of them for eliza, which is a smear at any
+// width, and its "Full View" button only changed the time window. The data
+// was right; the shape was not a question anyone asks.
+//
+// The two pictures are one instrument:
+//
+//   lanes are ordered by current score, so the top lane is the rightmost
+//   node in the constellation above;
+//
+//   bands use the constellation's palette;
+//
+//   clicking a lane dispatches trust:select, and the constellation rings and
+//   highlights that node; clicking a node dispatches the same event, and the
+//   lane is highlighted here. Neither half knows the other exists.
+// ═══════════════════════════════════════════════════════════════════════════
+(function () {
+  var BAND_COLORS = {
+    Trusted: '#8FC97A', Standard: '#63C7D4', Monitored: '#DC8A1E',
+    Cautious: '#E4695A', SUSPENDED: '#9AA091', REVOKED: '#E4695A',
+  };
+  var BAND_ORDER = ['Trusted', 'Standard', 'Monitored', 'Cautious', 'SUSPENDED', 'REVOKED'];
+  var ACCESS_COLORS = { core: '#E4BB3A', trusted: '#63C7D4', public: '#9AA091' };
+  var WINDOWS = [
+    { days: 7, label: '7d' },
+    { days: 30, label: '30d' },
+    { days: 90, label: '90d' },
+  ];
+
+  var state = { days: 30, data: null, selected: null, painted: false };
+  var seq = 0;
+
+  function el(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function num(n) {
+    if (n == null || !isFinite(n)) return '—';
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  function shortDate(ms) {
+    var d = new Date(ms);
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+  function tickLabel(ms, days) {
+    var d = new Date(ms);
+    if (days <= 7) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return (d.getMonth() + 1) + '/' + d.getDate();
+  }
+  function duration(ms) {
+    if (ms < 3600000) return Math.max(1, Math.round(ms / 60000)) + 'm';
+    if (ms < 86400000) return (ms / 3600000).toFixed(1) + 'h';
+    return (ms / 86400000).toFixed(1) + 'd';
+  }
+
+  // Daily event density, as one path of vertical ticks. This is how 6,637
+  // quiet FLEET_REPLY events appear without drawing 6,637 marks: the lane
+  // says WHEN the agent was busy, the bars say WHAT band it was in.
+  //
+  // Ticks, not a line: joining the daily counts with a stroke turns "nothing
+  // happened, then a lot happened" into a rising trend, which is a different
+  // claim. A tick per day is the count and nothing more.
+  function sparkSvg(values) {
+    if (!values || !values.length) return '';
+    var w = 100, h = 6, max = 1;
+    for (var i = 0; i < values.length; i++) if (values[i] > max) max = values[i];
+    var path = '';
+    for (var j = 0; j < values.length; j++) {
+      if (!values[j]) continue;
+      var x = values.length === 1 ? w / 2 : ((j + 0.5) / values.length) * w;
+      var y = h - (values[j] / max) * (h - 1);
+      path += 'M' + x.toFixed(2) + ',' + h + 'V' + y.toFixed(2);
+    }
+    return '<svg class="jtrust-spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">'
+      + '<path d="' + path + '" fill="none" stroke="#9AA091" stroke-width="1" '
+      + 'vector-effect="non-scaling-stroke"/></svg>';
+  }
+
+  function renderWindowButtons() {
+    var host = el('trust-jantt-window');
+    if (!host) return;
+    var html = '';
+    for (var i = 0; i < WINDOWS.length; i++) {
+      var w = WINDOWS[i];
+      var on = state.days === w.days;
+      html += '<span data-days="' + w.days + '" style="cursor:pointer;padding:1px 5px;border-radius:3px;'
+        + 'border:1px solid ' + (on ? 'var(--accent-yellow)' : 'var(--border)') + ';'
+        + 'color:' + (on ? 'var(--accent-yellow)' : 'var(--text-dim)') + ';font-size:0.55rem;">'
+        + w.label + '</span>';
+    }
+    host.innerHTML = html;
+  }
+
+  function renderMeta(d) {
+    var meta = el('trust-jantt-meta');
+    if (!meta) return;
+    if (!d || !d.totals) { meta.textContent = ''; return; }
+    var t = d.totals;
+    meta.textContent = t.agents + ' agents · ' + num(t.events) + ' events · '
+      + t.spells + ' band spells' + (t.changing ? ' · ' + t.changing + ' falling' : '');
+  }
+
+  // The three ladders, named. The tile used to show a band and leave the
+  // reader to infer an access level from the colour; this says which is which
+  // and counts the enforced levels across the lanes.
+  function renderAxes(d) {
+    var host = el('trust-jantt-axes');
+    if (!host) return;
+    var lanes = d.lanes || [];
+    var counts = { core: 0, trusted: 0, public: 0 };
+    lanes.forEach(function (l) {
+      var lv = l.access && l.access.level;
+      if (lv && counts[lv] != null) counts[lv]++;
+    });
+    var chips = [];
+    if (counts.core) chips.push('<span class="jaccess jaccess--core">CORE ' + counts.core + '</span>');
+    if (counts.trusted) chips.push('<span class="jaccess jaccess--trusted">TRUSTED ' + counts.trusted + '</span>');
+    if (counts.public) chips.push('<span class="jaccess jaccess--public">PUBLIC ' + counts.public + '</span>');
+
+    var a = d.access || {};
+    var identity = a.identity || [];
+    var idDiff = identity.filter(function (x) { return x.access_differs; });
+    var spellingOnly = identity.length - idDiff.length;
+    var disagree = a.disagreements || [];
+    var bits = [];
+    if (idDiff.length) bits.push(idDiff.length + ' identity mismatch' + (idDiff.length === 1 ? '' : 'es'));
+    if (disagree.length) bits.push(disagree.length + ' tier row' + (disagree.length === 1 ? '' : 's') + ' disagree');
+
+    var warn;
+    if (bits.length) {
+      var detail = [];
+      idDiff.slice(0, 6).forEach(function (x) {
+        detail.push(x.agent + ': lane ' + x.lane_access + ' (' + x.agent + ') vs ' +
+          x.did + ' -> ' + x.did_access + ' (' + x.cap_id + ')');
+      });
+      if (spellingOnly) detail.push(spellingOnly + ' spelling-only identity difference' + (spellingOnly === 1 ? '' : 's'));
+      disagree.slice(0, 8).forEach(function (x) {
+        detail.push(x.agent + ': registry ' + x.registry + ' vs credential ' + x.credential +
+          (x.status ? ' (' + x.status + ')' : ''));
+      });
+      if (disagree.length) {
+        detail.push('rewards: the standing-gate tools pass registry_agents.cac_tier, so they see '
+          + disagree.map(function (x) { return x.agent + '=' + x.registry; }).join(', ')
+          + ' — not the credential shown here');
+      }
+      warn = '<span class="warn" title="' + esc(detail.join(' · ')) + '">⚠ ' +
+        esc(bits.join(' · ')) + '</span>';
+    } else {
+      warn = '<span class="ok">records agree</span>';
+    }
+
+    host.innerHTML = '<span>band = reputation · CAC tier = rewards · '
+      + '<b style="color:#C9A227;">access = tools</b></span>'
+      + '<span style="display:flex;gap:4px;margin-left:auto;">' + chips.join('') + '</span>'
+      + warn;
+  }
+
+  // The CAC counters come from cac_credentials, not registry_agents.cac_tier.
+  // The registry column is stale for four agents; the credential has a status
+  // and an expiry, so it is the record that wins.
+  function renderCacCounts(d) {
+    var t = d && d.access && d.access.tiers;
+    if (!t) return;
+    var set = function (id, val, title) {
+      var e = el(id);
+      if (!e) return;
+      e.textContent = String(val);
+      if (title) e.setAttribute('title', title);
+    };
+    set('sec-cac-anchor', t.anchor || 0, 'anchor credentials');
+    set('sec-cac-credentialed',
+      (t.developer || 0) + (t.studio || 0) + (t.enterprise || 0),
+      'developer ' + (t.developer || 0) + ' · studio ' + (t.studio || 0)
+        + ' · enterprise ' + (t.enterprise || 0));
+    set('sec-cac-explorer', t.explorer || 0, 'explorer, or no credential on record');
+  }
+
+  function renderLegend(d) {
+    var host = el('trust-jantt-legend');
+    if (!host) return;
+    var present = {};
+    (d.lanes || []).forEach(function (lane) {
+      (lane.spells || []).forEach(function (s) { present[s.band] = true; });
+    });
+    var parts = [];
+    BAND_ORDER.forEach(function (b) {
+      if (!present[b]) return;
+      parts.push('<span style="color:' + (BAND_COLORS[b] || '#9AA091') + ';">● ' + esc(b) + '</span>');
+    });
+    parts.push('<span style="margin-left:auto;">│ band change</span>');
+    parts.push('<span>▏trust lost</span>');
+    parts.push('<span>〰 events/day</span>');
+    if ((d.lanes || []).some(function (l) { return l.access && l.access.level === 'core'; })) {
+      parts.push('<span style="color:#C9A227;">◉ CORE (roster)</span>');
+    }
+    host.innerHTML = parts.join('');
+  }
+
+  function accessColor(level) {
+    return ACCESS_COLORS[level] || '#9AA091';
+  }
+
+  function accessTitle(lane) {
+    var a = lane.access;
+    if (!a) return 'access not resolved';
+    var s = 'access ' + String(a.level).toUpperCase() + ' — ' + (a.reason || '');
+    if (lane.credential) {
+      s += ' · CAC ' + lane.credential.tier
+        + (lane.credential.status ? ' (' + lane.credential.status + ')' : '');
+    }
+    if (lane.tier_source === 'registry_agents') s += ' · no CAC credential; tier from registry';
+    return s;
+  }
+
+  function laneTip(lane) {
+    var color = BAND_COLORS[lane.band] || '#9AA091';
+    var up = lane.slope > 0 ? '▲ +' + lane.slope.toFixed(1) : (lane.slope < 0 ? '▼ ' + lane.slope.toFixed(1) : '· 0.0');
+    var lvl = lane.access && lane.access.level ? lane.access.level : null;
+    var cred = lane.credential
+      ? esc(lane.credential.tier) + (lane.credential.status ? ' · ' + esc(lane.credential.status) : '')
+      : 'none on record';
+    var reason = lane.access && lane.access.reason ? String(lane.access.reason) : '';
+    if (reason.length > 150) reason = reason.slice(0, 147) + '…';
+    return '<b>' + esc(lane.agent) + '</b> · <span style="color:' + color + ';">' + esc(lane.band) + '</span>'
+      + '<br>score <b>' + lane.score.toFixed(2) + '</b> · ' + up + ' / 7d'
+      + '<br>' + num(lane.events) + ' events in the last ' + (state.data.window_days || state.days) + ' days'
+      + '<br>' + lane.spells.length + ' band spell' + (lane.spells.length === 1 ? '' : 's')
+      + ' · ' + lane.marks.length + ' marked event' + (lane.marks.length === 1 ? '' : 's')
+      + '<br>access <b style="color:' + accessColor(lvl) + ';">' + (lvl ? lvl.toUpperCase() : '—') + '</b>'
+      + ' · CAC ' + cred
+      + '<br><span style="color:#6C7263;">tier ' + esc(lane.tier) + ' ('
+      + (lane.tier_source === 'cac_credentials' ? 'credential' : 'registry — no credential')
+      + ') · click to ' + (state.selected === lane.agent ? 'clear' : 'select') + '</span>'
+      + (reason ? '<br><span style="color:#6C7263;">' + esc(reason) + '</span>' : '');
+  }
+
+  function spellTip(lane, s) {
+    var color = BAND_COLORS[s.band] || '#9AA091';
+    var from = new Date(s.from_ms).getTime();
+    var to = new Date(s.to_ms).getTime();
+    var html = '<b>' + esc(lane.agent) + '</b> · <span style="color:' + color + ';">' + esc(s.band) + '</span>'
+      + '<br>' + shortDate(from) + ' → ' + shortDate(to) + ' · ' + duration(to - from)
+      + (s.starts_before_window ? ' <span style="color:#6C7263;">(began earlier)</span>' : '')
+      + '<br>score ' + Number(s.score_from).toFixed(2) + ' → ' + Number(s.score_to).toFixed(2)
+      + '<br>' + num(s.events) + ' event' + (s.events === 1 ? '' : 's')
+      + (s.events ? ' · ' + s.up + ' up · ' + s.down + ' down' : '');
+    if (s.caused_by_decay) {
+      html += '<br><span style="color:#6C7263;">crossed by decay — no event</span>';
+    } else if (s.started_by) {
+      var m = s.started_by;
+      html += '<br><span style="color:#6C7263;">started by</span> ' + esc(m.event || 'event')
+        + (m.delta ? ' (' + (m.delta > 0 ? '+' : '') + m.delta + ')' : '');
+      if (m.note) html += '<br><span style="color:#9AA091;">' + esc(m.note) + '</span>';
+    }
+    return html;
+  }
+
+  function hideTip() {
+    var tip = el('trust-jantt-tooltip');
+    if (tip) tip.style.display = 'none';
+  }
+
+  function showTip(e) {
+    var host = el('trust-jantt');
+    var tip = el('trust-jantt-tooltip');
+    if (!host || !tip || !state.data) return;
+    var laneEl = e.target && e.target.closest ? e.target.closest('.jantt-lane') : null;
+    if (!laneEl) { hideTip(); return; }
+    var lane = state.data.lanes[parseInt(laneEl.getAttribute('data-lane'), 10)];
+    if (!lane) { hideTip(); return; }
+
+    var barEl = e.target.closest('.jbar');
+    var spell = barEl ? lane.spells[parseInt(barEl.getAttribute('data-spell'), 10)] : null;
+    tip.innerHTML = spell ? spellTip(lane, spell) : laneTip(lane);
+    tip.style.display = 'block';
+
+    var wrap = host.parentElement.getBoundingClientRect();
+    var x = e.clientX - wrap.left + 14;
+    var y = e.clientY - wrap.top + 12;
+    if (x + 300 > wrap.width) x = Math.max(0, x - 320);
+    tip.style.left = x + 'px';
+    tip.style.top = y + 'px';
+  }
+
+  function render() {
+    var host = el('trust-jantt');
+    if (!host || !state.data) return;
+    var d = state.data;
+    var lanes = d.lanes || [];
+    if (!lanes.length) {
+      host.innerHTML = '<div class="intel-empty">No trust history in this window.</div>';
+      return;
+    }
+
+    var days = d.window_days || state.days;
+    var now = Date.now();
+    var start = now - days * 86400000;
+    var span = now - start;
+
+    var ticks = '';
+    var tickCount = 5;
+    for (var k = 0; k <= tickCount; k++) {
+      var at = start + (span * k / tickCount);
+      ticks += '<span class="jantt-tick" style="left:' + ((k / tickCount) * 100).toFixed(2) + '%;">'
+        + tickLabel(at, days) + '</span>';
+    }
+
+    var rows = '';
+    lanes.forEach(function (lane, li) {
+      var color = BAND_COLORS[lane.band] || '#9AA091';
+      var dim = state.selected && state.selected !== lane.agent;
+      var arrow = lane.slope > 0 ? '▲' : (lane.slope < 0 ? '▼' : '·');
+      var slope = (lane.slope > 0 ? '+' : '') + lane.slope.toFixed(1);
+      var lvl = lane.access && lane.access.level ? lane.access.level : null;
+      var lvlCls = lvl === 'core' ? 'core' : (lvl === 'trusted' ? 'trusted' : 'public');
+      var lvlTxt = lvl ? lvl.toUpperCase() : '—';
+
+      var bars = '';
+      lane.spells.forEach(function (s, si) {
+        var left = ((s.from_ms - start) / span) * 100;
+        var width = ((s.to_ms - s.from_ms) / span) * 100;
+        if (left > 100 || left + width <= 0) return;
+        if (left < 0) { width += left; left = 0; }
+        if (width <= 0) width = 0.15;
+        if (left + width > 100) width = 100 - left;
+        var isNow = si === lane.spells.length - 1 && s.to_ms >= now - 60000;
+        var swatch = BAND_COLORS[s.band] || '#9AA091';
+        var text = width > 7 ? esc(s.band) : '';
+        bars += '<div class="jbar' + (isNow ? ' is-now' : '') + (state.painted ? ' jbar--still' : '') + '"'
+          + ' data-spell="' + si + '"'
+          + ' style="--i:' + si + ';--w:' + width.toFixed(2) + '%;left:' + left.toFixed(2) + '%;background:' + swatch + ';">'
+          + text + '</div>';
+      });
+
+      var marks = '';
+      lane.marks.forEach(function (m) {
+        var p = ((m.at - start) / span) * 100;
+        if (p < 0 || p > 100) return;
+        var cls = m.caused_band_change ? 'band' : (m.delta < 0 ? 'down' : 'up');
+        marks += '<span class="jmark ' + cls + '" style="left:' + p.toFixed(2) + '%;"></span>';
+      });
+
+      rows += '<div class="jantt-lane' + (dim ? ' is-dim' : '') + '" data-lane="' + li + '">'
+        + '<div class="jantt-lane-label">'
+        + '<span class="who"><span style="color:' + color + ';">●</span>'
+        + '<span class="name" title="' + esc(lane.agent) + '">' + esc(lane.agent) + '</span>'
+        + '<span class="jaccess jaccess--' + lvlCls + '" title="' + esc(accessTitle(lane)) + '">'
+        + esc(lvlTxt) + '</span></span>'
+        + '<span class="num">' + lane.score.toFixed(1) + ' ' + arrow + ' ' + slope
+        + (lane.credential ? ' · ' + esc(lane.credential.tier) : '') + '</span>'
+        + '</div>'
+        + '<div class="jantt-track">' + bars + marks + sparkSvg(lane.spark) + '</div>'
+        + '</div>';
+    });
+
+    host.innerHTML = '<div class="jantt-axis">' + ticks + '</div>' + rows;
+    state.painted = true;
+    renderLegend(d);
+  }
+
+  function load() {
+    var mine = ++seq;
+    var days = state.days;
+    window.apiFetch('/api/trustgraph/jantt?days=' + days, { signal: AbortSignal.timeout(25000) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (mine !== seq) return;       // a newer window was asked for
+        if (!d || d.error) throw new Error((d && d.error) || 'empty response');
+        state.data = d;
+        renderMeta(d);
+        renderAxes(d);
+        renderCacCounts(d);
+        render();
+      })
+      .catch(function (err) {
+        if (mine !== seq) return;
+        var host = el('trust-jantt');
+        if (host && !state.data) {
+          host.innerHTML = '<div class="intel-empty">Trust history unavailable: ' + esc(err.message) + '</div>';
+        }
+        console.warn('[trust-jantt] load failed:', err && err.message);
+      });
+  }
+
+  function init() {
+    var host = el('trust-jantt');
+    if (!host) return;
+
+    renderWindowButtons();
+
+    var win = el('trust-jantt-window');
+    if (win) {
+      win.addEventListener('click', function (e) {
+        var t = e.target;
+        var d = t && t.getAttribute ? t.getAttribute('data-days') : null;
+        if (!d) return;
+        var next = parseInt(d, 10);
+        if (next === state.days) return;
+        state.days = next;
+        renderWindowButtons();
+        load();
+      });
+    }
+
+    host.addEventListener('mousemove', showTip);
+    host.addEventListener('mouseleave', hideTip);
+
+    host.addEventListener('click', function (e) {
+      var laneEl = e.target && e.target.closest ? e.target.closest('.jantt-lane') : null;
+      if (!laneEl || !state.data) return;
+      var lane = state.data.lanes[parseInt(laneEl.getAttribute('data-lane'), 10)];
+      if (!lane) return;
+      document.dispatchEvent(new CustomEvent('trust:select', {
+        detail: { agent: state.selected === lane.agent ? null : lane.agent },
+      }));
+    });
+
+    document.addEventListener('trust:select', function (e) {
+      var next = e.detail && e.detail.agent ? e.detail.agent : null;
+      if (next === state.selected) return;
+      state.selected = next;
+      render();
+    });
+
+    load();
+    setInterval(load, 60000);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

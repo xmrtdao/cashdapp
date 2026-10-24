@@ -1069,6 +1069,63 @@ export function createCampusHandler(deps) {
     }
     @keyframes jantt-pulse { 0%,100% { opacity: .35; } 50% { opacity: .95; } }
 
+    /* ── Trust history: the same Jantt, one bar per band spell ──────────────
+       This one lives in the Training & Security tile, which is narrower than
+       the Activity Intelligence board, so the lane label is shorter. The lane
+       is a little taller than the board's: a bar here carries a band name and
+       a duration, and 13px cannot hold either legibly.
+
+       Ticks inside a bar are events that changed the band (tall, dark) or
+       took trust away (white-edged). The quiet majority — 6,637 FLEET_REPLY
+       events — is a density strip along the bottom, not a tick each. */
+    .jantt--trust .jantt-axis { margin-left: 118px; }
+    .jantt--trust .jantt-lane { height: 25px; margin-bottom: 3px; cursor: pointer; }
+    .jantt--trust .jantt-lane-label {
+      width: 118px; flex: 0 0 118px; font-size: 0.52rem; line-height: 1.15;
+      white-space: normal; padding-right: 5px;
+    }
+    .jantt--trust .jantt-lane-label .who { display: flex; align-items: baseline; gap: 4px; min-width: 0; }
+    .jantt--trust .jantt-lane-label .name {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto;
+    }
+    .jantt--trust .jantt-lane-label .num { color: var(--text-dim); font-size: 0.46rem; }
+    /* The access level is a different claim from the band, so it gets a chip
+       of its own rather than riding on the bar colour. CORE is the one the
+       old chart could not show at all: eleven of its lanes were CORE and none
+       of them said so. */
+    .jaccess {
+      flex: 0 0 auto; font-size: 0.4rem; line-height: 1.15; padding: 0 3px;
+      border-radius: 2px; border: 1px solid; letter-spacing: 0.03em;
+      font-family: 'Space Mono', monospace; white-space: nowrap;
+    }
+    .jaccess--core { color: #E4BB3A; border-color: rgba(201,162,39,0.6); background: rgba(201,162,39,0.1); }
+    .jaccess--trusted { color: #63C7D4; border-color: rgba(99,199,212,0.55); background: rgba(99,199,212,0.08); }
+    .jaccess--public { color: #9AA091; border-color: rgba(154,160,145,0.4); background: rgba(154,160,145,0.06); }
+    .jantt-axes {
+      display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+      font-size: 0.5rem; color: var(--text-dim); font-family: 'Space Mono', monospace;
+      padding: 2px 0 4px 0;
+    }
+    .jantt-axes .warn { color: #DC8A1E; cursor: help; }
+    .jantt-axes .ok { color: #6C7263; }
+    .jantt--trust .jantt-track { background: rgba(255,255,255,0.02); }
+    .jantt--trust .jantt-lane:hover .jantt-track { background: rgba(255,255,255,0.055); }
+    .jantt--trust .jbar {
+      top: 3px; height: 16px; line-height: 16px; font-size: 0.46rem;
+      font-weight: 600; padding: 0 4px; border-radius: 2px;
+    }
+    .jantt--trust .jbar.is-now { box-shadow: 0 0 0 1px rgba(255,255,255,0.3) inset; }
+    .jantt--trust .jantt-lane.is-dim { opacity: .3; }
+    .jmark {
+      position: absolute; top: 3px; height: 16px; width: 2px; margin-left: -1px;
+      border-radius: 1px; pointer-events: none;
+    }
+    .jmark.up { background: rgba(0,0,0,0.34); }
+    .jmark.down { background: #100d0d; box-shadow: 0 0 0 1px rgba(255,255,255,0.7); }
+    .jmark.band { top: 1px; height: 20px; background: rgba(0,0,0,0.55); width: 2px; }
+    .jtrust-spark { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 6px; pointer-events: none; opacity: .6; }
+    .jbar.jbar--still { animation: none; width: var(--w, 2px); opacity: 1; }
+
     /* ── Bars and rows ─────────────────────────────────────────────────── */
     .intel-bar-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center;
       font-size: 0.6rem; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.035); }
@@ -1223,25 +1280,6 @@ export function createCampusHandler(deps) {
       </div>
     </div>
 
-<!-- 📈 Trust Trajectory — Full-width chart -->
-<div class="card tile-wide tile-p2" id="trust">
-  <h3 style="color:#a78bfa;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    📈 Trust Trajectory
-    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Real-time TrustGraph scores over time · Hover any point for details</span>
-  </h3>
-  <div style="position:relative;">
-    <canvas id="trust-trajectory-canvas" style="width:100%;height:200px;border-radius:6px;background:#08080e;cursor:default;"></canvas>
-    <div id="trust-trajectory-tooltip" style="display:none;position:absolute;background:#1a1a2a;border:1px solid #3a3a5a;border-radius:6px;padding:8px 12px;font-size:11px;color:#e0e0f0;pointer-events:none;white-space:nowrap;z-index:100;max-width:400px;line-height:1.5;"></div>
-  </div>
-  <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center;font-size:0.6rem;color:#948d9e;">
-    <span>● <span id="trajectory-agent-count">-</span> agents tracked</span>
-    <span>● <span id="trajectory-event-count">-</span> total events</span>
-    <span>● <span id="trajectory-range"></span></span>
-    <span style="margin-left:auto;color:#4ade80;">● live</span>
-    <span id="trajectory-toggle-btn" style="cursor:pointer;color:#60a5fa;font-size:0.6rem;margin-left:6px;padding:1px 6px;border:1px solid #3a3a5a;border-radius:3px;" onclick="toggleTrajectoryView()">🔍 Full View</span>
-  </div>
-</div>
-
 <!-- ⚓ Quarterdeck — Consolidated Command Center -->
 <div class="card tile-full tile-p6" id="command" style="border-color:rgba(255,107,53,0.2);">
   <h3 style="color:var(--accent-orange);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -1259,60 +1297,26 @@ export function createCampusHandler(deps) {
     </div>
   </div>
 
-  <!-- Middle row: Activity Log (Campus Watch was promoted to its own
-       top-level tile (#watch, p6) on 2026-10-11, restart control included) -->
-  <div class="quarterdeck-mid">
-    <!-- Activity Log (centralized log viewer)
-         The expand button opens the Activity Intelligence board — the
-         fullscreen view with the Jantt timeline, the function leaderboard,
-         the recurring errors, the key-file versions, the commits, and the
-         ship logs. The tile below it stays a summary so the page does not
-         turn into a wall of numbers. -->
-    <div style="background:var(--bg-card);border-radius:6px;padding:8px;border:1px solid var(--border);">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:6px;flex-wrap:wrap;">
-        <h4 style="color:var(--accent-yellow);font-size:0.75rem;margin:0;text-transform:uppercase;letter-spacing:0.05em;">📡 Activity Log</h4>
-        <div style="display:flex;gap:4px;align-items:center;">
-          <select id="log-filter-type" style="background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.6rem;">
-            <option value="">All Types</option>
-            <option value="fleet_message">Fleet Msg</option>
-            <option value="ai_chat">AI Chat</option>
-            <option value="system_health_check">Health</option>
-            <option value="tool_execution">Tool</option>
-            <option value="tool_failed">Tool Fail</option>
-            <option value="edge_function">Edge Fn</option>
-            <option value="cron_execution">Cron</option>
-            <option value="email">Email</option>
-            <option value="http_error">HTTP Error</option>
-            <option value="slow_request">Slow</option>
-            <option value="api_call">API Call</option>
-            <option value="db_error">DB Error</option>
-            <option value="auth_failure">Auth</option>
-          </select>
-          <input id="log-search" type="text" placeholder="Search..." style="background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.6rem;width:100px;">
-          <button onclick="refreshLogViewer()" title="Refresh" style="background:var(--bg-card);color:var(--accent-blue);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.6rem;cursor:pointer;">↻</button>
-          <button onclick="openActivityIntel()" title="Open the Activity Intelligence board" style="background:var(--bg-card);color:var(--accent-orange);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.6rem;cursor:pointer;">⛶</button>
-        </div>
-      </div>
-      <div id="qds-activity-stats" style="display:flex;gap:10px;flex-wrap:wrap;font-size:0.55rem;color:var(--text-dim);margin-bottom:5px;font-family:'Space Mono',monospace;"></div>
-      <div id="qds-activity-log" style="font-size:0.6rem;max-height:400px;overflow-y:auto;">
-        <div class="stat"><span class="label">Loading activity...</span></div>
-      </div>
-    </div>
-  </div>
+  <!-- The Activity Log moved OUT of Campus Command on 2026-10-22, to the
+       tenant grid beside the Tools tile (which moved the other way, down
+       here beside the Agent Vault and the Campus Forum). It is a live
+       readout of the system's own traffic, and it reads better next to the
+       tools and the galaxy than it does buried between the Campus Rations
+       and the Training & Security row. -->
 
   <!-- Training & Security row (own row) -->
   <div class="quarterdeck-security">
     <!-- TRAINING & SECURITY — TrustGraph · CAC Tiers · XMRT-DAO-CERT · Access Control -->
     <div style="background:var(--bg-card);border-radius:6px;padding:8px;border:1px solid var(--border);">
-      <h4 style="color:var(--accent-red);font-size:0.75rem;margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.05em;">🛡️ Training & Security <span style="color:var(--text-dim);font-weight:400;font-size:0.6rem;">— TrustGraph · CAC Tiers · XMRT-DAO-CERT · Access Control</span></h4>
+      <h4 style="color:var(--accent-red);font-size:0.75rem;margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.05em;">🛡️ Training & Security <span style="color:var(--text-dim);font-weight:400;font-size:0.6rem;">— band = reputation · CAC tier = credential · access = tools</span></h4>
       <div id="qds-security" style="font-size:0.6rem;">
         <div class="sec-grid">
           <div>
             <div class="stat"><span class="label">TrustGraph</span><span class="value" id="sec-tg-status" style="color:#4ade80;font-size:0.65rem;">● online</span></div>
             <div class="stat"><span class="label">Agents</span><span class="value" id="sec-agent-count" style="font-size:0.65rem;">19</span></div>
-            <div class="stat"><span class="label">CAC Anchor</span><span class="value" id="sec-cac-anchor" style="color:#a78bfa;font-size:0.65rem;">2</span></div>
-            <div class="stat"><span class="label">CAC Builder</span><span class="value" id="sec-cac-builder" style="color:#60a5fa;font-size:0.65rem;">7</span></div>
-            <div class="stat"><span class="label">CAC Explorer</span><span class="value" id="sec-cac-explorer" style="color:#34d399;font-size:0.65rem;">7</span></div>
+            <div class="stat"><span class="label">CAC Anchor</span><span class="value" id="sec-cac-anchor" style="color:#a78bfa;font-size:0.65rem;" title="Credential tier anchor">—</span></div>
+            <div class="stat"><span class="label">CAC Credentialed</span><span class="value" id="sec-cac-credentialed" style="color:#60a5fa;font-size:0.65rem;" title="developer · studio · enterprise credentials">—</span></div>
+            <div class="stat"><span class="label">CAC Explorer</span><span class="value" id="sec-cac-explorer" style="color:#34d399;font-size:0.65rem;" title="explorer tier, or no credential on record">—</span></div>
           </div>
           <div>
             <div class="stat"><span class="label">IAL Level</span><span class="value" id="sec-ial" style="color:#fbbf24;font-size:0.65rem;">IAL2</span></div>
@@ -1355,6 +1359,47 @@ export function createCampusHandler(deps) {
           <div id="constellation-legend" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:0.52rem;color:var(--text-dim);font-family:'Space Mono',monospace;"></div>
           <div id="constellation-agents" style="margin-top:4px;font-size:0.55rem;"></div>
         </div>
+
+        <!-- ── Trust history — the same axis, over time ──────────────────
+             The constellation answers "where is each agent now" by placing
+             it on a trust axis. It cannot answer "how long has it been
+             there, and what moved it" — that is what this strip is for.
+
+             It is a Jantt, the house word for a Gantt: one lane per agent,
+             one bar per BAND SPELL (the interval during which the agent
+             held a band), and a tick only where an event changed the band
+             or took trust away. Bar length is time held, which is the one
+             thing a score cannot express.
+
+             It replaces the full-width "Trust Trajectory" line chart that
+             stood between Campus Comms and Campus Command. That chart drew
+             a point per event — 3,759 of them for eliza — and its "Full
+             View" button only changed the time window. Same data, honest
+             shape, in the tile the trust numbers belong to.
+
+             Lanes are ordered by current score, so the top lane is the
+             rightmost node in the constellation above. Clicking either one
+             selects the agent in both. -->
+        <div id="trust-jantt-block" style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">
+          <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+            <span style="color:var(--accent-yellow);font-size:0.7rem;text-transform:uppercase;letter-spacing:0.06em;font-weight:600;">▤ Trust History</span>
+            <span style="color:var(--text-dim);font-size:0.55rem;">how long each agent held a band, and what moved it</span>
+            <span id="trust-jantt-meta" style="color:var(--text-dim);font-size:0.55rem;margin-left:auto;font-family:'Space Mono',monospace;"></span>
+            <span id="trust-jantt-window" style="display:flex;gap:2px;"></span>
+          </div>
+          <!-- What each axis means, and where the records disagree. The tile
+               used to imply that a green "Trusted" band meant trusted tools;
+               it does not. CORE is roster membership, and the chip on each
+               lane is read from the same resolver the tool gate calls. -->
+          <div id="trust-jantt-axes" class="jantt-axes"></div>
+          <div style="position:relative;">
+            <div id="trust-jantt" class="jantt jantt--trust">
+              <div class="intel-empty">Loading trust history…</div>
+            </div>
+            <div id="trust-jantt-tooltip" style="display:none;position:absolute;background:#1a1a2a;border:1px solid #3a3a5a;border-radius:6px;padding:6px 10px;font-size:11px;color:#e0e0f0;pointer-events:none;white-space:normal;z-index:120;max-width:300px;line-height:1.45;"></div>
+          </div>
+          <div id="trust-jantt-legend" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;font-size:0.52rem;color:var(--text-dim);font-family:'Space Mono',monospace;"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -1362,6 +1407,31 @@ export function createCampusHandler(deps) {
     <!-- Task Pipeline was promoted to its own top-level tile (#tasks, p5)
          on 2026-10-11 — the owner wants the fleet task board read at the
          top level, not buried inside Campus Command. -->
+
+    <!-- 🔧 Tools — moved here on 2026-10-22, from the tenant grid above.
+         It is a reference, not a headline: what the relay exposes and where
+         its health lives. The Activity Log took its place in the grid,
+         because a live readout of the system's own traffic belongs next to
+         the galaxy and the comms, and a table of endpoints belongs down
+         here with the Agent Vault and the Campus Forum. -->
+    <div style="background:var(--bg-card);border-radius:6px;padding:8px;border:1px solid var(--border);">
+      <h4 style="color:var(--accent-teal);font-size:0.75rem;margin:0 0 6px 0;text-transform:uppercase;letter-spacing:0.05em;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        🔧 Tools
+        <span style="color:var(--text-dim);font-weight:400;font-size:0.6rem;">— Relay tool registry · Edge Functions</span>
+      </h4>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;">
+        <div style="flex:1 1 120px;min-width:0;">
+          <div class="stat"><span class="label">Relay Tools</span><span class="value" id="dao-tool-count">${toolCount}</span></div>
+          <div class="stat"><span class="label">Edge Functions</span><span class="value" id="dao-fn-count">-</span></div>
+        </div>
+        <div style="flex:1 1 160px;min-width:0;">
+          ${localFunctions.length > 0 ? '<div style="font-size:0.6rem;color:#4ade80;line-height:1.5;">Local: ' + localFunctions.map(f => f.name).join(', ') + '</div>' : ''}
+          <div style="font-size:0.6rem;color:var(--text-dim);line-height:1.5;margin-top:2px;">
+            <a href="/health" style="color:#4ade80;">Health</a> · <a href="/status" style="color:#60a5fa;">Status</a> · <a href="/tools" style="color:#60a5fa;">Tools</a> · <a href="/monitor" style="color:#60a5fa;">Monitor</a>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- Agent Vault — Agent Chests -->
     <!-- Collapsed by default. This rendered 1,810px — more than every other
@@ -1417,18 +1487,67 @@ export function createCampusHandler(deps) {
      duplicates Campus Watch, Membership was Whop pricing links, and the
      Ecosystem links live on the public site. What remains is the live tool
      registry, which is the part that is actually consulted. -->
-<div class="card tile tile-p5" id="dao">
-  <h3 style="color:var(--accent-teal);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    🔧 Tools
-    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— Relay tool registry · Edge Functions</span>
+<!-- 🔧 Tools moved into Campus Command on 2026-10-22, down beside the
+     Agent Vault and the Campus Forum. The Activity Log took this tile's
+     place, because a live readout of the system's own traffic belongs with
+     the comms and the galaxy, and a table of endpoints belongs down there
+     with the rest of the reference material. -->
+
+<!-- 📡 Activity Log (centralized log viewer) — this tile took the Tools
+     tile's place in the grid on 2026-10-22. The Tools tile went the other
+     way, down into Campus Command beside the Agent Vault and the Campus
+     Forum.
+
+     It sits here because it is a live readout of the system's own traffic,
+     and the comms and the galaxy are the other two things that are live.
+     The expand button opens the Activity Intelligence board: the Jantt
+     timeline, the function leaderboard, the recurring errors, the key-file
+     versions, the commits, and the ship logs. The tile itself stays a
+     summary so the page does not turn into a wall of numbers. -->
+<div class="card tile tile-p5" id="activity" style="display:flex;flex-direction:column;">
+  <h3 style="color:var(--accent-yellow);display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    📡 Activity Log
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— every request, attributed · ⛶ for the intelligence board</span>
   </h3>
-  <div style="background:#0d0d15;border-radius:6px;padding:8px;">
-    <div class="stat"><span class="label">Relay Tools</span><span class="value" id="dao-tool-count">${toolCount}</span></div>
-    <div class="stat"><span class="label">Edge Functions</span><span class="value" id="dao-fn-count">-</span></div>
-    ${localFunctions.length > 0 ? '<div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.6rem;color:#4ade80;">Local: ' + localFunctions.map(f => f.name).join(', ') + '</div>' : ''}
-    <div style="margin-top:4px;padding-top:4px;border-top:1px solid #1e1e2e;font-size:0.6rem;color:#948d9e;">
-      <a href="/health" style="color:#4ade80;">Health</a> · <a href="/status" style="color:#60a5fa;">Status</a> · <a href="/tools" style="color:#60a5fa;">Tools</a> · <a href="/monitor" style="color:#60a5fa;">Monitor</a>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:6px;flex-wrap:wrap;">
+    <div style="display:flex;gap:4px;align-items:center;">
+      <select id="log-filter-type" style="background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.6rem;">
+        <option value="">All Types</option>
+        <option value="fleet_message">Fleet Msg</option>
+        <option value="ai_chat">AI Chat</option>
+        <option value="system_health_check">Health</option>
+        <option value="tool_execution">Tool</option>
+        <option value="tool_failed">Tool Fail</option>
+        <option value="edge_function">Edge Fn</option>
+        <option value="cron_execution">Cron</option>
+        <option value="email">Email</option>
+        <option value="http_error">HTTP Error</option>
+        <option value="slow_request">Slow</option>
+        <option value="api_call">API Call</option>
+        <option value="db_error">DB Error</option>
+        <option value="auth_failure">Auth</option>
+      </select>
+      <input id="log-search" type="text" placeholder="Search..." style="background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.6rem;width:100px;">
+      <button onclick="refreshLogViewer()" title="Refresh" style="background:var(--bg-card);color:var(--accent-blue);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.6rem;cursor:pointer;">↻</button>
+      <button onclick="openActivityIntel()" title="Open the Activity Intelligence board" style="background:var(--bg-card);color:var(--accent-orange);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.6rem;cursor:pointer;">⛶</button>
     </div>
+  </div>
+  <div id="qds-activity-stats" style="display:flex;gap:10px;flex-wrap:wrap;font-size:0.55rem;color:var(--text-dim);margin-bottom:5px;font-family:'Space Mono',monospace;flex:0 0 auto;"></div>
+  <!-- The outcome, next to the activity. Activity is not work: on 2026-10-23
+       the fleet could show a large number of every activity and had finished
+       five tasks in a week. These are the numbers that say what was actually
+       DONE — created, completed, blocked, cancelled, stuck — and what the
+       fleet burned per thing it finished. -->
+  <div id="qds-productivity" style="display:flex;gap:14px;flex-wrap:wrap;font-size:0.55rem;color:var(--text-dim);margin-bottom:6px;font-family:'Space Mono',monospace;flex:0 0 auto;">
+    <div class="stat"><span class="label">outcome</span><span class="value">…</span></div>
+  </div>
+  <!-- The list fills the tile and scrolls inside it. The Activity Log sits
+       in the same grid row as the Campus Watch tile, so the row is as tall as
+       the taller of the two; without this the log stopped short of the
+       bottom and the two tiles ended at different lines. min-height:0 is
+       what lets a flex child scroll instead of pushing the row taller. -->
+  <div id="qds-activity-log" style="flex:1 1 auto;min-height:0;font-size:0.6rem;overflow-y:auto;">
+    <div class="stat"><span class="label">Loading activity...</span></div>
   </div>
 </div>
 

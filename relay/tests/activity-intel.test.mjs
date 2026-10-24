@@ -63,6 +63,15 @@ section('grouping: one fault reads as one fault');
   const slower = fingerprint('GET /rest/v1/knowledge_entities → 406 (391ms)');
   check('a duration does not split a group', slow === slower, { slow, slower });
 
+  // The status code is the fault, not a variable in it. Normalising it
+  // merged "→ 400" and "→ 404" into one group, so a fault that had just
+  // changed shape looked like one continuing problem.
+  const four = fingerprint('POST /resend/inbox/parsed → 400 (1ms)');
+  const notFound = fingerprint('POST /resend/inbox/parsed → 404 (1ms)');
+  check('a different status code is a different fault', four !== notFound, { four, notFound });
+  check('the same status code with a different duration is the same fault',
+    fingerprint('POST /x → 404 (1ms)') === fingerprint('POST /x → 404 (28ms)'));
+
   const uuidA = fingerprint('task 3f8ed0ed-2969-4d2d-a5fa-548af693e188 failed');
   const uuidB = fingerprint('task 9c2a0d11-1111-2222-3333-444455556666 failed');
   check('an id does not split a group', uuidA === uuidB, { uuidA, uuidB });
@@ -161,6 +170,97 @@ section('Alice watches the faults, not just the services');
     /state\.reportedErrors/.test(alice));
   check('the message names the file version that was live',
     /file_version/.test(alice));
+}
+
+section('the intelligence can name the FILE that threw, not just the route');
+{
+  // The blind spot this closes.
+  //
+  // The route map knows the relay's HTTP routes. It knows nothing about a
+  // fault raised inside an edge function, and on 2026-10-23 that was 235 of
+  // the 235 error rows in a day: the panel could say "search_knowledge
+  // failed" and not which file failed, what was live in it, or whether the
+  // code has changed since.
+  const { findFunctionOwner } = await import('../lib/infra-files.mjs');
+  const logIntelSrc = readFileSync(new URL('../lib/log-intel.mjs', import.meta.url), 'utf8');
+
+  const aiChat = findFunctionOwner('ai-chat');
+  check('an edge function names its file',
+    aiChat && aiChat.file === 'suite/supabase/functions/ai-chat/index.ts', aiChat);
+  check('the edge function is marked as edge', aiChat && aiChat.kind === 'edge', aiChat);
+
+  const relay = findFunctionOwner('relay');
+  check('the relay names its file',
+    relay && relay.file === 'relay/server.js', relay);
+
+  check('a function nobody watches has no owner',
+    findFunctionOwner('a-function-that-does-not-exist') === null,
+    findFunctionOwner('a-function-that-does-not-exist'));
+
+  // The relay reads the name the writer recorded.
+  check('the intelligence looks the owner up by function',
+    /findFunctionOwner/.test(logIntelSrc));
+  check('the error query carries the function name',
+    /metadata->>'edge_function' AS edge_function/.test(logIntelSrc));
+  check('the edge function record is selected',
+    /SELECT created_at, activity_type, title, description, status, agent_id,\s*\n\s*function_name,/.test(logIntelSrc));
+
+  // And the writer records it.
+  const aiChatSrc = readFileSync(
+    new URL('../../suite/supabase/functions/ai-chat/index.ts', import.meta.url), 'utf8');
+  check('the edge function records itself on a tool row',
+    /edge_function: FUNCTION_NAME/.test(aiChatSrc));
+
+  const serverSrc = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+  check('the relay records itself on a tool row',
+    /edge_function: 'relay'/.test(serverSrc));
+}
+
+section('the intelligence can say what was DONE, not just what happened');
+{
+  // The question the panel could not answer.
+  //
+  // Every number the Activity Intelligence board showed counted ACTIVITY.
+  // Activity is not work. On 2026-10-23 the agent-work executor ran 283
+  // times a day, its log showed 15,710 processing events, and the board
+  // moved by 8 tasks in 14 days. The fleet looked busy and finished
+  // nothing, and nothing on the board could tell the difference — which is
+  // why 9,120 wasted executions went unremarked while the agents themselves
+  // complained about it in fleet chat for days.
+  //
+  // So the bundle now carries the outcome: what was created, completed,
+  // blocked, cancelled, left stuck, and what the fleet burned per finished
+  // task.
+  check('the bundle carries a productivity section',
+    /productivity/.test(logIntelSrc), 'no productivity section');
+  check('it counts what was completed',
+    /tasks_completed_7d/.test(logIntelSrc));
+  check('it counts what was created',
+    /tasks_created_7d/.test(logIntelSrc));
+  check('it counts what was blocked and cancelled',
+    /tasks_blocked_7d/.test(logIntelSrc) && /tasks_cancelled_7d/.test(logIntelSrc));
+  check('it counts what is stuck',
+    /tasks_stuck_7d/.test(logIntelSrc));
+  check('it has the burn-per-finished-task ratio',
+    /tokens_per_completed_task_7d/.test(logIntelSrc));
+  check('the ratio is null rather than infinite when nothing finished',
+    /completed7d > 0/.test(logIntelSrc) && /: null/.test(logIntelSrc));
+
+  // It is asked for at read time, so it is never stale.
+  check('it is read from the board, not from the log',
+    /FROM app\.tasks/.test(logIntelSrc));
+  check('it reads the token burn',
+    /FROM app\.token_usage/.test(logIntelSrc));
+
+  // The dashboard shows it.
+  const dash = readFileSync(new URL('../public/dashboard.js', import.meta.url), 'utf8');
+  check('the dashboard renders the outcome',
+    /qds-productivity/.test(dash));
+  check('the dashboard shows tokens per finished task',
+    /tokens\/task/.test(dash));
+  const page = readFileSync(new URL('../campus-page.mjs', import.meta.url), 'utf8');
+  check('the page carries the outcome strip',
+    /id="qds-productivity"/.test(page));
 }
 
 section('the constellation correlates the four signals');

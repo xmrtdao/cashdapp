@@ -118,24 +118,84 @@ serve(async (req) => {
         // still needs to be picked up, because the only thing that moves a
         // finished task off the board is this executor's own completion branch,
         // and a task the executor cannot see is a task that never leaves.
-        let query = supabase
+        //
+        // ── THE SELECTION TAKES ONLY WORK THIS EXECUTOR WILL DO ──────────
+        //
+        // The status list used to include every REVIEW task. But this
+        // function's own rule — set out in processTaskWork — is that a REVIEW
+        // task is its business ONLY when the thing missing is evidence, and
+        // belongs to a human otherwise. So the query was selecting tasks that
+        // the next twenty lines of the same function skipped.
+        //
+        // The result was a treadmill. A task that parks in REVIEW for
+        // "no_deliverable_evidence" was selected again 96 times a day and
+        // skipped 96 times a day. The executor's own log showed 15,710
+        // "Processing task" events across 20 distinct tasks and ZERO
+        // completions — and five of those twenty were processed about two
+        // thousand times each. Five of the twenty had already been closed.
+        //
+        // The board looked busy and nothing moved. Worse, the cron job
+        // reported "completed" on every one of those runs, so the log said
+        // the fleet was working.
+        //
+        // So the selection is now two parts:
+        //
+        //   1. real work — a task that is CLAIMED or IN_PROGRESS;
+        //   2. evidence gaps — a task in REVIEW whose missing thing is
+        //      evidence, because that is the one gap this executor alone can
+        //      close.
+        //
+        // A task parked with any other reason is a human's, and is left
+        // alone. That is what "leaving it for a human" means.
+        const buildQuery = () => supabase
           .from('tasks')
           .select('*')
           .not('assignee_agent_id', 'is', null)
-          .in('status', ['CLAIMED', 'IN_PROGRESS', 'REVIEW'])
           // A task an operator has held is not this executor's to touch. The
           // query never looked at blocking_reason, so a task parked for a
           // decision - "awaiting operator decision" - was worked anyway, which
           // is the opposite of what a hold means.
-          .is('blocking_reason', null)
-          .order('priority', { ascending: false })
-          .limit(max_tasks);
+          .is('blocking_reason', null);
+
+        let tasks: any[] = [];
+        let tasksError: any = null;
 
         if (task_id) {
-          query = query.eq('id', task_id);
-        }
+          // An operator asked for this task by name. Take it as it is; the
+          // rules inside processTaskWork still apply to it.
+          const { data, error } = await buildQuery().eq('id', task_id);
+          if (error) tasksError = error;
+          tasks = data || [];
+        } else {
+          // Priority first, then the task that has been waiting longest. The
+          // old query ordered by priority alone, so with equal priorities the
+          // same task was always first and the rest never came up.
+          const [realWork, parked] = await Promise.all([
+            buildQuery()
+              .in('status', ['CLAIMED', 'IN_PROGRESS'])
+              .order('priority', { ascending: false })
+              .order('created_at', { ascending: true })
+              .limit(max_tasks),
+            // The parked tasks are filtered here rather than in the query.
+            //
+            // PostgREST cannot filter on a JSON path in this build — asking for
+            // `metadata->>terminal_reason` comes back "column does not exist"
+            // — and the reason lives in the task's metadata. There are only a
+            // handful of parked tasks, so they are fetched and read here.
+            buildQuery()
+              .eq('status', 'REVIEW')
+              .order('updated_at', { ascending: true })
+              .limit(Math.max(max_tasks * 4, max_tasks)),
+          ]);
+          if (realWork.error) tasksError = realWork.error;
+          if (parked.error && !tasksError) tasksError = parked.error;
 
-        const { data: tasks, error: tasksError } = await query;
+          const evidenceGaps = (parked.data || []).filter(
+            (t: any) => (t.metadata || {})?.terminal_reason === 'missing_artifact'
+          );
+
+          tasks = [...(realWork.data || []), ...evidenceGaps].slice(0, max_tasks);
+        }
 
         if (tasksError) throw tasksError;
 
@@ -306,6 +366,57 @@ async function processTaskWork(supabase: any, task: Task): Promise<any> {
     }
     console.log(`   🔧 Task is parked for missing evidence — this executor can supply it`);
   }
+
+  // ── A TASK GETS A FINITE NUMBER OF ATTEMPTS ────────────────────────────
+  //
+  // The exit conditions above are all terminal: a task that reaches DONE,
+  // CANCELLED, or a REVIEW with a reason this executor does not own, leaves
+  // the board. The one gap is the task that comes BACK — someone writes
+  // "missing_artifact" again, or the evidence does not resolve and the task
+  // is offered up once more.
+  //
+  // Without a ceiling, a task in that position is selected every cycle for
+  // ever, which is the treadmill this executor was running on: 15,710
+  // processing events, zero completions. The ceiling makes the failure
+  // visible instead of endless — after three attempts the task says why it
+  // stopped, and a human can decide.
+  const MAX_EXECUTOR_ATTEMPTS = 3;
+  const attemptsSoFar = Number((task.metadata || {})?.executor_attempts || 0);
+
+  if (attemptsSoFar >= MAX_EXECUTOR_ATTEMPTS) {
+    console.log(`   ⏹ Task has been attempted ${attemptsSoFar} times without finishing — parking it for a human`);
+    await supabase
+      .from('tasks')
+      .update({
+        status: 'REVIEW',
+        metadata: {
+          ...(task.metadata || {}),
+          terminal_reason: 'executor_attempts_exhausted',
+          executor_attempts: attemptsSoFar,
+          last_work_at: new Date().toISOString(),
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', task.id);
+    return {
+      task_id: task.id,
+      status: 'skipped',
+      reason: `executor_attempts_exhausted (${attemptsSoFar} attempts)`,
+    };
+  }
+
+  // Count the attempt BEFORE the work, so a crash mid-work still counts.
+  await supabase
+    .from('tasks')
+    .update({
+      metadata: {
+        ...(task.metadata || {}),
+        executor_attempts: attemptsSoFar + 1,
+        last_work_at: new Date().toISOString(),
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', task.id);
 
   // If no checklist, we can't do documented work
   // ── IS THIS STILL WORK? ──

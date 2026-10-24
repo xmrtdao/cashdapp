@@ -1,6 +1,119 @@
 #!/usr/bin/env node
-// Prevent background task crashes
-process.on('uncaughtException', (err) => {  console.error('[Relay] UNCAUGHT EXCEPTION:', err?.message || err);  console.error(err?.stack || '(no stack)');  /* Don't exit - let the process continue */ });
+// Prevent background task crashes.
+//
+// The spam this handler used to produce was one known-benign third-party
+// assertion: Node's internal undici HTTP parser asserts "!this.paused" when a
+// socket ends (Parser.finish <- Socket.onHttpSocketEnd) while a response was
+// still being read. The in-flight request is torn down either way; the only
+// observable damage was 3,342 five-line stack traces in relay.log in one
+// session, which buried the real errors underneath.
+//
+// This handler counts them and prints one trace per hour. It does NOT fix the
+// race - the emitter is identified by the request tracker below, which names
+// the in-flight URL when the assertion fires.
+const _benignUndiciRe = /assert\(!this\.paused\)/;
+let _undiciAssertCount = 0;
+let _undiciAssertDetailAt = 0;
+let _undiciPeers = new Map();
+try {
+  const { executionAsyncResource } = await import('async_hooks');
+  globalThis.__relayAsyncResource = () => executionAsyncResource();
+} catch { /* diagnostics only */ }
+process.on('uncaughtException', (err) => {
+  if (err && _benignUndiciRe.test(String(err.message || ''))) {
+    _undiciAssertCount++;
+    // The died socket IS the execution resource of the 'end' handler that
+    // threw, so its peer tells us who we were talking to.
+    let peer = 'unknown';
+    try {
+      const res = globalThis.__relayAsyncResource?.();
+      if (res) {
+        peer = `${res.remoteAddress || res.localAddress || '?'}:${res.remotePort || '?'} (${res.constructor?.name || 'resource'})`;
+      }
+    } catch { /* diagnostics only */ }
+    _undiciPeers.set(peer, (_undiciPeers.get(peer) || 0) + 1);
+    const now = Date.now();
+    if (now - _undiciAssertDetailAt > 60000) {
+      _undiciAssertDetailAt = now;
+      console.error(`[Relay] undici parser assertion #${_undiciAssertCount} this run. Peer: ${peer}`);
+      for (const line of describeInflightRequests()) console.error('  [inflight] ' + line);
+      console.error('  recently finished: ' + (recentFinishedRequests().join(', ') || '(none)'));
+      console.error('  peer tally: ' + [..._undiciPeers.entries()].map(([p, n]) => `${p} x${n}`).join(' | '));
+      console.error(err.stack || '(no stack)');
+    } else {
+      console.error(`[Relay] undici parser assertion #${_undiciAssertCount} this run (known-benign; peer ${peer}; details once/min)`);
+    }
+    return;
+  }
+  console.error('[Relay] UNCAUGHT EXCEPTION:', err?.message || err);
+  console.error(err?.stack || '(no stack)');
+  /* Don't exit - let the process continue */
+});
+
+// ── Outgoing request tracker ───────────────────────────────────────
+// The assertion's stack points into undici and names no URL, so this records
+// every outgoing fetch the relay makes. Query strings are stripped: they can
+// carry tokens, and a credential does not belong in a log line.
+const _inflight = new Map();
+const _recentlyFinished = [];
+let _fetchSeq = 0;
+try {
+  const _originFetch = globalThis.fetch;
+  globalThis.fetch = function (input, init) {
+    let label = '(unparsed)';
+    try {
+      const raw = typeof input === 'string' ? input : (input && input.url) || String(input);
+      const u = new URL(raw);
+      label = u.origin + u.pathname;
+    } catch { /* keep the placeholder */ }
+    const id = ++_fetchSeq;
+    const startedAt = Date.now();
+    _inflight.set(id, { label, startedAt, res: null, settled: false });
+    const settle = () => {
+      const entry = _inflight.get(id);
+      if (!entry || entry.settled) return;
+      entry.settled = true;
+      // Check bodyUsed a moment later, not at headers time: at headers time
+      // no body has been read yet, so the flag would always say "not
+      // consumed" and prove nothing.
+      setTimeout(() => {
+        _inflight.delete(id);
+        const consumed = entry.res ? entry.res.bodyUsed : null;
+        _recentlyFinished.push(`${label} (${Date.now() - entry.startedAt}ms${consumed === false ? ', body NEVER READ' : ''})`);
+        if (_recentlyFinished.length > 12) _recentlyFinished.shift();
+      }, 2500);
+    };
+    let p;
+    try {
+      p = _originFetch.call(globalThis, input, init);
+    } catch (e) {
+      settle();
+      throw e;
+    }
+    // Keep the response so bodyUsed can be checked later: a body nobody reads
+    // leaves undici's parser paused on it, which is the precondition the
+    // assertion trips on.
+    p.then((res) => { const entry = _inflight.get(id); if (entry) entry.res = res; }, () => {});
+    const wrapped = p.then((r) => { settle(); return r; }, (e) => { settle(); throw e; });
+    return wrapped;
+  };
+} catch { /* if fetch cannot be wrapped, the relay still runs */ }
+
+function describeInflightRequests() {
+  const now = Date.now();
+  // Drop anything older than two minutes: a fetch that never settles must not
+  // accumulate here for the lifetime of the process.
+  for (const [id, e] of [..._inflight.entries()]) {
+    if (now - e.startedAt > 120000) _inflight.delete(id);
+  }
+  return [..._inflight.entries()]
+    .sort((a, b) => a[1].startedAt - b[1].startedAt)
+    .map(([id, e]) => `${e.label} (${now - e.startedAt}ms in flight, body ${e.res ? (e.res.bodyUsed ? 'consumed' : 'NOT consumed') : 'no response yet'})`);
+}
+
+function recentFinishedRequests() {
+  return _recentlyFinished.slice(-8);
+}
 process.on('unhandledRejection', (err) => {
   console.error('[Relay] Unhandled rejection (non-fatal):', err?.message || err);
   if (err?.stack) console.error('[Relay] Stack:', err.stack.split('\n').slice(0,4).join('\n'));
@@ -83,6 +196,7 @@ import { TENANTS } from './lib/tenants.mjs';
 import { brandGuide, guideFor } from './lib/brand-guide.mjs';
 import { buildWeekly } from './lib/weekly.mjs';
 import { budgetSharedContext, budgetHistory } from './lib/grounding-budget.mjs';
+import { capSearchTerm, capText, capDeep } from './lib/text-caps.mjs';
 const OPENCODE_PROXY_URL = (process.env.OPENCODE_PROXY_URL || 'http://127.0.0.1:4130').replace(/\/$/, '');
 const OPENCODE_LOCK_PATH = process.env.OPENCODE_LOCK_PATH
   || join(__dirname, '..', 'relay-data', 'opencode.lock');
@@ -111,9 +225,11 @@ const AGENT_FROM = {
 // ── Module imports ──────────────────────────────────────────
 import { webSearch, formatResults } from './tools/web-search.mjs';
 import { webScrape } from './tools/web-scrape.mjs';
-import { randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { verifyResendSignature as verifyResendSignatureImpl }
+  from './lib/resend-signature.mjs';
 import { ollamaChat, ollamaGenerate, listModels, checkOllamaHealth } from './tools/ollama-chat.mjs';
-import { chat as jobbyChat, onboardFromDossier } from './jobby/chat.mjs';
+import { chat as jobbyChat, onboardFromDossier, CHAT_MAX_TOKENS as JOBBY_CHAT_MAX_TOKENS } from './jobby/chat.mjs';
 import { displayNameFor, formatFrom, isCandidateMailbox, domainOf, MAILBOX_DOMAIN }
   from './jobby/mailbox.mjs';
 import { createJobbyTools } from './jobby/tools.mjs';
@@ -210,7 +326,14 @@ import {
   scanInfraFiles, recordVersions, versionAt, versionHistory,
 } from './lib/infra-files.mjs';
 // The constellation: trust, burn, activity and the galaxy, in one picture.
-import { buildConstellation } from './lib/constellation.mjs';
+import { buildConstellation, canonicalName } from './lib/constellation.mjs';
+// The constellation's x axis, unrolled into band spells over time.
+import { buildTrustJantt } from './lib/trust-jantt.mjs';
+// The three ladders side by side: band (reputation), CAC tier (rewards),
+// access level (tools). Read from the gate's own resolver so the picture
+// cannot claim an access the gate would refuse.
+import { buildAccessView, accessSummary } from './lib/access-levels.mjs';
+import { refreshRoster } from './lib/cap.mjs';
 
 import pg from 'pg';
 const { Client: PgClient, Pool: PgPool } = pg;
@@ -446,6 +569,38 @@ async function logRelayRequest(method, path, statusCode, durationMs, agentId = '
   const isKeyEndpoint = ['/tools/run', '/api/fleet-chat', '/ai-chat', '/api/suite'].some(p => path.startsWith(p));
   // Skip dashboard polling (every 3s, drowns the Ships Log)
   if (path === '/api/fleet-chat/messages' && agentId === 'dashboard') return;
+  // ── THE DASHBOARD WATCHING ITSELF IS NOT AN EVENT ───────────────────────
+  //
+  // The Nexus dashboard refreshes a dozen tiles on timers between 3 and 30
+  // seconds. Two of those paths — /api/suite/tasks and /api/suite/agents —
+  // are "key endpoints", so every refresh wrote a row into the persistent
+  // activity feed.
+  //
+  // On 2026-10-23 that was 21,083 rows a day: 50% of the entire feed, 504 MB
+  // of table, describing nothing that had happened. The feed is the record
+  // of what the fleet did, and "the dashboard refreshed" is not that.
+  //
+  // The volume is not lost. Every request is counted in memory by
+  // recordTraffic(), from which the traffic timeline and the top-endpoints
+  // panel are drawn — no row, no write, no TOAST.
+  //
+  // A dashboard request that FAILED, or that was slow, is still recorded:
+  // those are real signals and they are the ones the panel needs.
+  const DASHBOARD_SOURCES = new Set(['suite-dashboard', 'nexus-dashboard']);
+  if (DASHBOARD_SOURCES.has(extra.source) && !isError && !isSlow) return;
+
+  // ── A READ IS NOT AN EVENT; AN ACTION IS ───────────────────────────────
+  //
+  // The same reasoning, one level up, and it catches the readers the
+  // source list cannot name — the suite front-end's fleet-chat panel reads
+  // /api/fleet-chat/messages every three seconds and identifies itself as
+  // "fleet-chat", which is also what a real client looks like.
+  //
+  // So the feed records what was DONE: a write, a fault, a slow call, a
+  // refusal, a self-test. A successful GET on a key endpoint is a read, and
+  // reads are counted by recordTraffic() rather than written down.
+  if (!isError && !isSlow && isKeyEndpoint && String(method).toUpperCase() === 'GET') return;
+
   if (!isError && !isSlow && !isKeyEndpoint) return;
 
   const isSelftest = !!extra.selftest;
@@ -862,61 +1017,13 @@ function webhookSecretFor(domainOrKey) {
 }
 
 /**
- * Verify a Resend/Svix webhook signature.
- *
- * Returns { ok, reason } and never throws, because a malformed header must not
- * become a 500 that Resend retries forever.
- *
- * Two things this gets right that the version it replaces did not:
- *
- *  - It signs the raw request bytes, not JSON.stringify(req.body). Resend signs
- *    the body as sent; re-serialising changes key order and number formatting
- *    often enough that verification failed against real traffic, which is
- *    presumably why the caller used to log the mismatch and process the mail
- *    anyway.
- *  - It bounds the timestamp. Svix puts the send time in the header, so a
- *    captured request is otherwise replayable forever.
+ * The implementation lives in lib/resend-signature.mjs so the tests import the
+ * exact code that runs. This wrapper keeps the module-scope declaration that
+ * syntax.test.mjs checks for (an import binding is hoisted, but the placement
+ * check predates it and is still a useful guard).
  */
-function verifyResendSignature({ rawBody, headers, secret, toleranceSeconds = 300, now }) {
-  if (!secret) return { ok: false, reason: 'no-secret-configured' };
-  const h = headers || {};
-  const id = h['svix-id'];
-  const timestamp = h['svix-timestamp'];
-  const signature = h['svix-signature'];
-  if (!id || !timestamp || !signature) return { ok: false, reason: 'missing-signature-headers' };
-
-  const seconds = Number(timestamp);
-  if (!Number.isFinite(seconds)) return { ok: false, reason: 'malformed-timestamp' };
-  const age = Math.abs(((now === undefined ? Date.now() : now) / 1000) - seconds);
-  if (age > toleranceSeconds) {
-    return { ok: false, reason: 'stale', ageSeconds: Math.round(age) };
-  }
-
-  // A Buffer is what the parser captured; a string is what a test may pass.
-  const payload = Buffer.isBuffer(rawBody)
-    ? rawBody.toString('utf8')
-    : (typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody ?? {}));
-
-  let expected;
-  try {
-    expected = createHmac('sha256', secret)
-      .update(`${id}.${timestamp}.${payload}`)
-      .digest('base64');
-  } catch (e) {
-    return { ok: false, reason: 'signing-failed' };
-  }
-
-  const expectedBuf = Buffer.from(expected);
-  const offered = String(signature).split(' ').map((s) => s.replace(/^v1,/, ''));
-  for (const candidate of offered) {
-    const buf = Buffer.from(candidate);
-    // timingSafeEqual throws on a length mismatch, which is itself a signal that
-    // the candidate is not the real signature.
-    if (buf.length === expectedBuf.length && timingSafeEqual(buf, expectedBuf)) {
-      return { ok: true, reason: 'ok' };
-    }
-  }
-  return { ok: false, reason: 'signature-mismatch' };
+function verifyResendSignature(opts) {
+  return verifyResendSignatureImpl(opts);
 }
 
 // ── Task Handlers ───────────────────────────────────────────
@@ -1348,7 +1455,7 @@ const toolHandlers = {
     // Jobby's sender is resolved per send, because it can change; everyone
     // else signs from the table.
     const from = agent === 'jobby'
-      ? resolveJobbySender().from
+      ? 'Jobby McJobberson <jobby@31harbor.com>'
       : (AGENT_FROM[agent] || AGENT_FROM.alice);
     const fromAddress = (from.match(/<([^>]+)>/) || [])[1] || from;
     const domain = (fromAddress.match(/@([^>]+)/) || [])[1] || 'mobilemonero.com';
@@ -1648,6 +1755,9 @@ const toolHandlers = {
         const data = await res.json();
         return { success: true, source: 'receiving', id, from: data.from, to: data.to, subject: data.subject, text: data.text || '', html: data.html || '', raw: data.raw || data, attachments: data.attachments };
       }
+      // Release the rejected response body before the next request - an unread
+      // body leaves undici's parser paused (see fetchStatus()).
+      try { await res.body?.cancel(); } catch { /* already closed */ }
       res = await fetch('https://api.resend.com/emails/' + id, {
         headers: { 'Authorization': 'Bearer ' + apiKey },
         signal: AbortSignal.timeout(5000),
@@ -1656,6 +1766,7 @@ const toolHandlers = {
         const data = await res.json();
         return { success: true, source: 'sent', id, from: data.from, to: data.to, subject: data.subject, text: data.text || '', html: data.html || '', raw: data.raw || data };
       }
+      try { await res.body?.cancel(); } catch { /* already closed */ }
       return { success: false, error: 'Resend API returned ' + res.status, status: res.status };
     } catch (e) {
       return { success: false, error: e.message };
@@ -2202,7 +2313,11 @@ const toolHandlers = {
           { name: 'local-sb', healthCheck: () => checkHttp('http://127.0.0.1:54321/health', 2000) },
           { name: 'vite', healthCheck: () => checkHttp('http://127.0.0.1:5173/', 2000) },
           { name: 'tunnel', healthCheck: () => checkProcessByName('cloudflared.exe') || checkProcessByName('cloudflared') },
-          { name: 'python-exec', healthCheck: () => checkHttp('http://127.0.0.1:8070/health', 2000) },
+          // python-exec has no health endpoint of its own: 8070 has been dead
+          // a long time (the capability runs in-process as the python-exec /
+          // shell-exec relay tools; see 2104 above), so every status poll
+          // opened a two-second timeout loop and told agents the service was
+          // "down" when there was nothing behind it to restart.
           { name: 'alice', healthCheck: () => checkProcessByScript('alice.mjs') },
           { name: 'cron-engine-v2', healthCheck: () => checkProcessByScript('cron-engine-v2.mjs') },
           { name: 'cuttlefishclaws-mcp', healthCheck: () => checkHttp('http://127.0.0.1:3120/health', 2000) },
@@ -2870,7 +2985,14 @@ const toolHandlers = {
         case 'get_issue': url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/issues/${data?.issue_number || ''}`; break;
         case 'create_issue': url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/issues`; method = 'POST'; ghBody = { title: data?.title, body: data?.body || '' }; break;
         case 'list_prs': url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/pulls?state=open&per_page=20`; break;
-        case 'search_code': url = `https://api.github.com/search/code?q=${encodeURIComponent(data?.query || '')}+repo:${GITHUB_OWNER}/${repo}`; break;
+        // The query rides in a URL. GitHub rejects a query over 256 characters
+        // anyway, and an unbounded one makes the request unsendable, so it is
+        // cut here rather than at the fetch.
+        case 'search_code': {
+          const { term: ghQuery } = capSearchTerm(data?.query || '');
+          url = `https://api.github.com/search/code?q=${encodeURIComponent(ghQuery)}+repo:${GITHUB_OWNER}/${repo}`;
+          break;
+        }
         case 'list_repos': url = `https://api.github.com/orgs/${GITHUB_OWNER}/repos?per_page=20`; break;
         case 'update_issue': url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/issues/${data?.issue_number || ''}`; method = 'PATCH'; ghBody = { title: data?.title, body: data?.body || '', state: data?.state || undefined }; break;
         default: return { success: false, error: `Unknown action: ${action}` };
@@ -2964,16 +3086,20 @@ const toolHandlers = {
       
       // For search_knowledge, use local REST API directly (faster, no cloud dependency)
       if (mappedAction === 'search_knowledge') {
-        const searchTerm = data.search_term || data.query || data.term || '';
+        const rawTerm = data.search_term || data.query || data.term || '';
+        // The term is cut to a length that can travel in a URL. An agent once
+        // searched with a whole conversation as the term, which made the URL
+        // two megabytes long; `fetch` refused it, and the refusal — which IS
+        // the URL — was written to the activity feed verbatim, 55 MB a day.
+        // The cut is recorded so a partial search is never read as a whole one.
+        const { term: searchTerm, truncated: termTruncated, original_length: termLength } =
+          capSearchTerm(rawTerm);
         const limit = Math.min(parseInt(data.limit || '10', 10), 50);
         const restUrl = `http://127.0.0.1:54321/rest/v1/knowledge_entities`;
         const headers = { 'apikey': 'local-anon-key', 'Authorization': 'Bearer local-anon-key' };
         let url = `${restUrl}?select=*&order=created_at.desc&limit=${limit}`;
         if (searchTerm) {
-          // Truncate search term to 200 chars to prevent PostgREST URL overflow
-          // (agents sometimes pass entire conversation text as search term)
-          const truncated = searchTerm.slice(0, 200);
-          const encoded = encodeURIComponent(truncated);
+          const encoded = encodeURIComponent(searchTerm);
           url += `&or=(name.ilike.*${encoded}*,entity->>description.ilike.*${encoded}*,entity->>content.ilike.*${encoded}*,entity->>name.ilike.*${encoded}*)`;
         }
         try {
@@ -2982,25 +3108,25 @@ const toolHandlers = {
             // Fallback: if REST API fails (e.g. URL too long), use db-query instead
             const safeTerm = (searchTerm || '').replace(/'/g, "''").slice(0, 100);
             const fallbackRes = await queryLocalPg(
-              `SELECT id, name, entity FROM app.knowledge_entities 
-               WHERE name ILIKE $1 OR entity::text ILIKE $1 
+              `SELECT id, name, entity FROM app.knowledge_entities
+               WHERE name ILIKE $1 OR entity::text ILIKE $1
                ORDER BY created_at DESC LIMIT $2`,
               [`%${safeTerm}%`, limit]
             );
-            return { success: true, status: 200, data: { ok: true, results: fallbackRes.rows, count: fallbackRes.rows.length, source: 'db-fallback' } };
+            return { success: true, status: 200, data: { ok: true, results: fallbackRes.rows, count: fallbackRes.rows.length, source: 'db-fallback', search_term_truncated: termTruncated, search_term_length: termLength } };
           }
           const knowledge = await res.json();
-          return { success: true, status: 200, data: { ok: true, results: knowledge, count: knowledge.length } };
+          return { success: true, status: 200, data: { ok: true, results: knowledge, count: knowledge.length, search_term_truncated: termTruncated, search_term_length: termLength } };
         } catch (e) {
           // Network error fallback: use db-query
           const safeTerm = (searchTerm || '').replace(/'/g, "''").slice(0, 100);
           const fallbackRes = await queryLocalPg(
-            `SELECT id, name, entity FROM app.knowledge_entities 
-             WHERE name ILIKE $1 OR entity::text ILIKE $1 
+            `SELECT id, name, entity FROM app.knowledge_entities
+             WHERE name ILIKE $1 OR entity::text ILIKE $1
              ORDER BY created_at DESC LIMIT $2`,
             [`%${safeTerm}%`, limit]
           );
-          return { success: true, status: 200, data: { ok: true, results: fallbackRes.rows, count: fallbackRes.rows.length, source: 'db-fallback' } };
+          return { success: true, status: 200, data: { ok: true, results: fallbackRes.rows, count: fallbackRes.rows.length, source: 'db-fallback', search_term_truncated: termTruncated, search_term_length: termLength } };
         }
       }
       
@@ -3275,19 +3401,24 @@ const toolHandlers = {
 
   // ── Edge Functions needing specific payloads (400 fixable) ──
   'ef:knowledge-search': async (args) => {
-    const query = args?.query || args?.search_term || 'test';
+    const rawQuery = args?.query || args?.search_term || 'test';
+    // The same rule as `ef:knowledge` above: a search term is a term, not a
+    // document. This handler had no cut at all, so a whole conversation could
+    // ride into the URL and make the request unsendable.
+    const { term: boundedQuery, truncated: termTruncated, original_length: termLength } =
+      capSearchTerm(rawQuery);
     const limit = Math.min(parseInt(args?.limit || '10', 10), 50);
     try {
       // Use local REST API directly (faster, no cloud dependency)
       const restUrl = `http://127.0.0.1:54321/rest/v1/knowledge_entities`;
       const headers = { 'apikey': 'local-anon-key', 'Authorization': 'Bearer local-anon-key' };
       let url = `${restUrl}?select=*&order=created_at.desc&limit=${limit}`;
-      if (query) {
-        const encoded = encodeURIComponent(query);
+      if (boundedQuery) {
+        const encoded = encodeURIComponent(boundedQuery);
         url += `&or=(name.ilike.*${encoded}*,entity->>description.ilike.*${encoded}*,entity->>content.ilike.*${encoded}*,entity->>name.ilike.*${encoded}*)`;
       }
       const res = await fetch(url, { headers, signal: AbortSignal.timeout(5000) });
-      if (!res.ok) return { success: true, status: res.status, data: { ok: false, error: `HTTP ${res.status}: ${(await res.text()).slice(0, 200)}` } };
+      if (!res.ok) return { success: true, status: res.status, data: { ok: false, error: capText(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`) } };
       const knowledge = await res.json();
       // Return compact results: just name + short description
       const compact = knowledge.map((k) => ({
@@ -3295,8 +3426,8 @@ const toolHandlers = {
         description: ((k.description || k.entity?.description || '').slice(0, 120) + ((k.description || k.entity?.description || '').length > 120 ? '...' : '')),
         type: k.entity?.type || 'general',
       }));
-      return { success: true, status: 200, data: { ok: true, count: knowledge.length, results: compact } };
-    } catch (err) { return { success: false, error: err.message }; }
+      return { success: true, status: 200, data: { ok: true, count: knowledge.length, results: compact, search_term_truncated: termTruncated, search_term_length: termLength } };
+    } catch (err) { return { success: false, error: capText(err && err.message ? err.message : String(err)) }; }
   },
 
   'ef:generate-payment-link': async (args) => {
@@ -3559,9 +3690,73 @@ const toolHandlers = {
     const validStages = ['DISCUSS', 'PLANNING', 'EXECUTION', 'REVIEW', 'COMPLETION'];
     if (!validStages.includes(to_stage)) return { error: `Invalid stage: ${to_stage}. Valid: ${validStages.join(', ')}` };
     try {
+      // THE CLOSURE PATH IS SEPARATE, AND IT HAS TO BE.
+      //
+      // This tool used to write `stage` and nothing else:
+      //
+      //   UPDATE app.tasks SET stage = $1, stage_started_at = NOW() ...
+      //
+      // A task has two columns that both say "done" - `stage` and `status` -
+      // and the board's own history says the finished shape is
+      // stage=COMPLETED with status=DONE (164 tasks read that way). Writing
+      // one and not the other produced a task at stage COMPLETION with status
+      // REVIEW, and such a task is stuck twice over: the completion trigger
+      // on `status` refuses a completed status without real evidence, and the
+      // one job that advances tasks selects
+      // status IN ('PENDING','CLAIMED','IN_PROGRESS') - REVIEW is not in
+      // that list - so nothing ever picks it up again.
+      //
+      // So the last step goes through relay/lib/task-closure.mjs, which
+      // VERIFIES the work before it closes anything, and every other step
+      // moves both columns together.
+      if (to_stage === 'COMPLETION') {
+        const { closeTask, verifyTask } = await import('./lib/task-closure.mjs');
+        const verdict = await verifyTask(task_id);
+        if (verdict.verdict !== 'verified') {
+          return {
+            success: false,
+            error: `the work is not proven, so the task was not closed: ${verdict.reason}`,
+            verdict: verdict.verdict,
+            next: verdict.next,
+            hint: verdict.next === 'return-to-work'
+              ? 'attach an artifact whose URL points at the work (not at this task) and try again'
+              : verdict.next === 'attach-evidence'
+                ? 'a person confirmed this, but the evidence gate still wants an artifact that points at the work'
+                : undefined,
+          };
+        }
+        const closed = await closeTask(task_id, {
+          by: 'advance_task',
+          note: `advanced to COMPLETION: ${verdict.reason}`,
+        });
+        if (!closed.success) {
+          return { success: false, error: closed.error, verdict: closed.verdict };
+        }
+        try {
+          const msg = `✅ Task **${task_id}** completed: ${closed.task.title}`;
+          await fetch(`http://127.0.0.1:${PORT}/api/fleet-chat/send`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent: 'system', message: msg, channel: 'fleet' }),
+            signal: AbortSignal.timeout(5000),
+          }).catch(() => {});
+        } catch {}
+        return { success: true, task: closed.task, verified: true, evidence: verdict.reason };
+      }
+
+      // A working stage. Both columns move together, because a task whose
+      // stage says "in progress" and whose status says "pending" is a task
+      // that two different pieces of the system disagree about.
+      const statusFor = { DISCUSS: 'PENDING', PLANNING: 'IN_PROGRESS', EXECUTION: 'IN_PROGRESS', REVIEW: 'IN_PROGRESS' };
       const result = await queryLocalPg(
-        `UPDATE app.tasks SET stage = $1, stage_started_at = NOW(), updated_at = NOW() WHERE id = $2 RETURNING *`,
-        [to_stage, task_id]
+        `UPDATE app.tasks
+            SET stage = $1,
+                status = $3,
+                stage_started_at = NOW(),
+                updated_at = NOW(),
+                metadata = COALESCE(metadata, '{}'::jsonb) - 'terminal_reason'
+           WHERE id = $2
+         RETURNING *`,
+        [to_stage, task_id, statusFor[to_stage] || 'IN_PROGRESS']
       );
       if (!result.rows.length) return { error: 'Task not found' };
       const task = result.rows[0];
@@ -4206,8 +4401,19 @@ const toolHandlers = {
       });
       // Clean up temp file
       try { unlinkSync(tmpFile); } catch {}
+      // A non-zero exit MUST carry an error string: the ai-chat edge function
+      // throws `Relay tool 'shell-exec' failed: ${result.error || 'unknown error'}`
+      // (suite/supabase/functions/ai-chat/index.ts), so a command that merely
+      // exited non-zero used to surface as "unknown error" while its own
+      // output and stderr - the actual diagnosis - stayed buried in the
+      // success-shaped body. Keep every field; make the error truthful.
+      const ok = stdout.code === 0;
       return {
-        success: stdout.code === 0,
+        success: ok,
+        ...(ok ? {} : {
+          error: `Command exited with code ${stdout.code}`
+            + (stdout.err && stdout.err.trim() ? ` - stderr: ${stdout.err.trim().slice(0, 500)}` : ''),
+        }),
         output: stdout.out.slice(0, 10000),
         stderr: stdout.err.slice(0, 5000),
         length: stdout.out.length,
@@ -5013,6 +5219,15 @@ app.use(async (req, res, next) => {
       req.path === '/api/leads/pfp' ||
       req.path === '/suite' || req.path.startsWith('/suite/') ||
       req.path === '/elze' || req.path.startsWith('/elze/') ||
+      // The Elze design system is a shared stylesheet referenced from every
+      // Elze page by its ROOT path (/elze-design-system.css), not under
+      // /elze/, so the prefix entry above never covered it. Nothing served
+      // that path either, so the browser got a 404 locally and a 401 through
+      // the tunnel (this middleware runs before any route). Either way the
+      // stylesheet never arrived and every Elze page rendered unstyled — the
+      // landing page had no CSS at all. The file is a static stylesheet with
+      // no secrets in it, so it is public by the same reasoning as /elze.
+      req.path === '/elze-design-system.css' || req.path === '/elze-icons.js' ||
       // AstraGaze brochure. Public by intent: it is the marketing page for the
       // face-recognition console, and the whole reason it exists is to be
       // readable by anyone who arrives while that console is restarting. It
@@ -5663,6 +5878,28 @@ console.log(`  PFP Booking site: ${existsSync(join(PFP_BOOK_DIR, 'index.html')) 
 const ELZE_LANDING_DIR = join(__dirname, 'public', 'elze-landing');
 const ELZE_DIR = join(__dirname, 'public', 'elze-analyzer');
 const ELZE_WRITER_DIR = join(__dirname, 'public', 'elze-writer');
+
+// Shared Elze assets that every page references by ROOT path.
+// The pages link them as /elze-design-system.css (and /elze-icons.js) rather
+// than under /elze/, so the per-directory static mounts below never served
+// them. They were 404 locally and 401 through the tunnel, which meant the
+// design system never reached the browser and every Elze page rendered
+// unstyled — the landing page had no stylesheet whatsoever.
+for (const [route, file] of Object.entries({
+  '/elze-design-system.css': 'elze-design-system.css',
+  '/elze-icons.js': 'elze-icons.js',
+})) {
+  const filePath = join(__dirname, 'public', file);
+  if (!existsSync(filePath)) {
+    console.log(`  Elze asset ${file}: NOT FOUND — skipping`);
+    continue;
+  }
+  app.get(route, (req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.sendFile(filePath);
+  });
+  console.log(`  Elze asset: ${file} -> ${route}`);
+}
 
 // Landing page
 if (existsSync(join(ELZE_LANDING_DIR, 'index.html'))) {
@@ -6753,10 +6990,35 @@ app.get('/api/qwen-memory/by-user/:userId', async (req, res) => {
 
 // ── Supervisor Status API ──────────────────────────────────────
 // Inline health-check helpers (mirrors supervisor.mjs logic)
+// Status-only HTTP probe.
+//
+// The body MUST be released. A fetch whose response body is never read leaves
+// undici's HTTP parser paused on it; when the peer later closes that keep-alive
+// socket, the parser asserts "!this.paused" (Parser.finish <-
+// Socket.onHttpSocketEnd) and the relay logs an uncaught exception. That
+// assertion fired 3,342 times in one session and buried every real error.
+//
+// This is why checkHttp cancels the body instead of ignoring it. Verified with
+// the relay's own request tracker: every leaked body was a status-only probe.
+async function fetchStatus(url, { timeoutMs = 2000, method = 'GET', headers = null, body = null } = {}) {
+  try {
+    const init = { method, signal: AbortSignal.timeout(timeoutMs) };
+    // Only pass headers/body when there are any: undici's Headers constructor
+    // rejects a null headers argument outright ("Argument 1 could not be
+    // converted to..."), which would make every probe throw.
+    if (headers) init.headers = headers;
+    if (body !== null && body !== undefined) init.body = body;
+    const r = await fetch(url, init);
+    // Release the connection. cancel() is a no-op once the body is consumed.
+    try { await r.body?.cancel(); } catch { /* already consumed or closed */ }
+    return { ok: r.status >= 200 && r.status < 400, status: r.status };
+  } catch (e) {
+    return { ok: false, status: 0, error: e.message };
+  }
+}
+
 function checkHttp(url, timeoutMs) {
-  return fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
-    .then(r => r.status >= 200 && r.status < 400)
-    .catch(() => false);
+  return fetchStatus(url, { timeoutMs }).then(r => r.ok);
 }
 function checkProcessRunning(name) {
   // For .mjs scripts, check via supervisor state file first, then wmic
@@ -6916,10 +7178,18 @@ app.get('/api/supervisor/status', async (req, res) => {
           } catch { healthy = false; }
         } else {
           try {
-            const r = await fetch(`http://127.0.0.1:${def.port}/`, {
-              signal: AbortSignal.timeout(1500),
-            });
-            healthy = r.status < 500; // any non-5xx = reachable
+            // Probe with the body released - see fetchStatus(): an unread
+            // response body is what trips undici's "!this.paused" assertion.
+            const r = await fetchStatus(`http://127.0.0.1:${def.port}/`, { timeoutMs: 1500 });
+            if (r.status > 0) {
+              healthy = r.status < 500; // any non-5xx = reachable
+            } else {
+              // No answer at all: fall back to process liveness, exactly as
+              // the old try/catch did. fetchStatus() swallows the error, so
+              // without this the fallback would be dead code and every
+              // unresponsive-but-running service would be reported DOWN.
+              healthy = !!(svcState.childPid && isProcessRunningByPid(svcState.childPid));
+            }
           } catch {
             healthy = !!(svcState.childPid && isProcessRunningByPid(svcState.childPid));
           }
@@ -7620,9 +7890,27 @@ app.post('/log', (req, res) => {
 app.post('/webhook/resend-inbound', async (req, res) => {
   const event = req.body;
 
+  // A self-test request proves the verifier and must not become fleet history.
+  //
+  // The webhook tests post four deliberately bad requests every run (wrong
+  // signature, no headers, stale, and one valid). Every one was written to the
+  // activity feed as a rejection, so the board showed ~140 "inbound failures" a
+  // day and Alice opened a recurring task to fix a fault that only existed
+  // because the tests were reporting themselves. The response is unchanged -
+  // tests still get 200/401 - but a request that says it is a test leaves no
+  // trace in production state.
+  //
+  // Same tag and same guard as the request logger: only a loopback request that
+  // did not come through the tunnel can opt out. An attacker cannot hide a
+  // forgery by adding the header, and a valid signature is still required.
+  const isSelftest = req.headers['x-relay-selftest'] === '1'
+    && !req.headers['cf-ray'] && !req.headers['cf-connecting-ip']
+    && isLoopbackAddress(requestIp(req));
+
   // Handle delivery/open/click/bounce tracking events
   const TRACKING_EVENTS = ['email.delivered', 'email.opened', 'email.clicked', 'email.bounced', 'email.complained'];
   if (TRACKING_EVENTS.includes(event?.type)) {
+    if (isSelftest) return res.json({ success: true, selftest: true });
     const { data } = event;
     const emailId = data?.email_id || data?.id;
     if (emailId) {
@@ -7690,11 +7978,19 @@ app.post('/webhook/resend-inbound', async (req, res) => {
         ? `${EMAIL_DOMAINS[toDomainKey].secret} is not set in relay/.env, so mail for `
           + `${toDomain} cannot be verified and is being rejected`
         : verdict.reason;
-      console.error(`[Resend Inbound] REJECTED ${toDomain}: ${detail}`
-        + (verdict.ageSeconds !== undefined ? ` (${verdict.ageSeconds}s old)` : ''));
+      // The endpoint host is part of the diagnosis: several domains share one
+      // Resend endpoint, and which host delivered the request decides which
+      // signing secret should have been used. Values stay out of the log; the
+      // host is not a credential.
+      const host = String(req.headers.host || 'no-host')
+        .replace(/[^\w.:\-\[\]]/g, '').slice(0, 80);
+      if (isSelftest) return res.status(401).json({ error: 'signature verification failed' });
+      console.error(`[Resend Inbound] REJECTED ${toDomain} from ${host}: ${detail}`
+        + (verdict.ageSeconds !== undefined ? ` (${verdict.ageSeconds}s old)` : '')
+        + (verdict.key_kind ? ` [key: ${verdict.key_kind}]` : ''));
       // Recorded so a rejection is visible later and not just in the log.
       logActivity('resend-inbound-rejected', data.email_id || data.id || 'unknown',
-        'REJECTED', `${toDomain}: ${detail}`);
+        'REJECTED', `${toDomain}: ${detail} [host ${host}]`);
       return res.status(401).json({ error: 'signature verification failed' });
     }
     if (verdict.reason === 'no-secret-configured') {
@@ -7711,6 +8007,10 @@ app.post('/webhook/resend-inbound', async (req, res) => {
         + `(${verdict.reason}) - this domain is not strict yet`);
     }
   }
+
+  // The signature checked out and the caller says it is a test: stop here.
+  // Nothing below this line describes mail that a person sent or received.
+  if (isSelftest) return res.json({ success: true, selftest: true });
 
   const emailId = data.id || data.email_id;
 
@@ -10066,7 +10366,7 @@ function deriveToolDescription(name) {
 }
 
 // ── Agent Authorization ──────────────────────────────────────
-import { checkToolAccess, getToolLevel, registerTrustedAgent, getAgentInfo, listAgents, CORE_AGENTS, TRUST_LEVELS } from './lib/agent-auth.mjs';
+import { checkToolAccess, getToolLevel, registerTrustedAgent, getAgentInfo, listAgents, CORE_AGENTS, TRUST_LEVELS, SERVICE_IDENTITIES } from './lib/agent-auth.mjs';
 import { preflightCheck, getAgentTrustContext } from './lib/trustgraph-preflight.mjs';
 import { runScan as runTrustGraphScan } from './lib/trustgraph-scanner.mjs';
 
@@ -10119,7 +10419,13 @@ app.post('/tools/run', async (req, res) => {
   // Also accept agent-specific API keys (xrt_ prefix) from the agent_api_keys table
   const isCoreAgent = CORE_AGENTS.has(agentId.toLowerCase().trim());
   const hasAgentKey = req.agentAuth && req.agentAuth.method === 'agent_key';
-  if (toolLevel === 'core' && !req.cfAccess && !req.headers['x-api-key'] && !isCoreAgent && !hasAgentKey) {
+  // A service identity (the cron engine) is trusted on its name AND its
+  // credential. Trusting it on the header alone would let anyone who typed
+  // "cron" reach shell-exec; the fleet's personalities keep header-based
+  // trust, which is how they have always worked.
+  const isServiceIdentity = SERVICE_IDENTITIES.has(agentId.toLowerCase().trim());
+  const identityOnly = isCoreAgent && !isServiceIdentity;
+  if (toolLevel === 'core' && !req.cfAccess && !req.headers['x-api-key'] && !identityOnly && !hasAgentKey) {
     return res.status(403).json({
       error: 'CORE-level tools require Cloudflare Access authentication (service token or JWT). Set CF-Access-Client-Id + CF-Access-Client-Secret headers or x-api-key header.',
       agent: agentId,
@@ -10135,7 +10441,11 @@ app.post('/tools/run', async (req, res) => {
       agent: agentId,
       tool,
       toolLevel,
-      agentLevel: getAgentInfo(agentId)?.level || 'unknown',
+      // The decision comes from CAP; the hardcoded CORE set only feeds the
+      // pre-gate and getAgentInfo(). Reporting that hardcoded label while CAP
+      // denied is how agents kept reading "agentLevel: core, denied" in the
+      // same body. Show what the decision was actually based on.
+      agentLevel: (auth && auth.capLevel) || getAgentInfo(agentId)?.level || 'unknown',
     });
   }
   
@@ -10166,10 +10476,15 @@ app.post('/tools/run', async (req, res) => {
   const duration = Date.now() - startTime;
   
   // Log tool execution to activity feed
+  //
+  // `edge_function: 'relay'` names the function that ran the tool, so the
+  // Activity Intelligence panel can say which file threw. A tool failure has
+  // no HTTP route to point at, and without this the panel could only say
+  // "shell-exec failed" — never that relay/server.js is the file to look at.
   logToDb('tool_execution', `Tool: ${tool}`,
     `${agentId} called ${tool} — ${result.error ? 'failed: ' + result.error.slice(0, 100) : 'success'} (${duration}ms)`,
     result.error ? 'error' : 'completed',
-    { tool, agent: agentId, duration_ms: duration, has_error: !!result.error },
+    { tool, agent: agentId, duration_ms: duration, has_error: !!result.error, edge_function: 'relay' },
     agentId
   ).catch(() => {});
 
@@ -11443,7 +11758,7 @@ async function gatherFleetContext() {
   // Shared context from the database (shared memory for all agents)
   let sharedContext = null;
   try {
-    const ctxRows = await localQuery("SELECT context_key, context_type, value, description, last_updated_by FROM knowledge.shared_context ORDER BY context_key");
+    const ctxRows = await localQuery("SELECT context_key, context_type, value, description, last_updated_by, updated_at FROM knowledge.shared_context ORDER BY context_key");
     if (ctxRows && ctxRows.length > 0) {
       sharedContext = ctxRows.map(r => ({
         key: r.context_key,
@@ -11454,6 +11769,12 @@ async function gatherFleetContext() {
         value: typeof r.value === 'string' ? (() => { try { return JSON.parse(r.value); } catch { return r.value; } })() : r.value,
         description: r.description,
         lastUpdatedBy: r.last_updated_by,
+        // The date is carried because the budget needs it and the note needs
+        // it: a model deciding whether to fetch a note should know how fresh
+        // it is, and the rationing of bodies is by recency. It was already
+        // documented as part of the note's identity; it just was not being
+        // carried.
+        lastUpdated: r.updated_at || null,
       }));
 
       // ── The grounding block is the prompt ──────────────────────────────
@@ -12087,6 +12408,7 @@ GROUNDING RULES:
 - If a fact is in the JSON block, reference it directly.
 - If something is NOT in the JSON but a tool in the \`tools\` array can help (web-search, db-query, db-rest, resend-inbox, shared-context, etc.), output a single line \`TOOL_CALL: {"tool":"<name>","args":{...}}\` on its own line. I will execute it, then come back for your final answer.
 - A \`sharedContext\` entry with \`value_truncated: true\` is the HEAD of a longer note, not the whole of it. Do not quote a truncated value as the full value. To read one in full, call \`shared-context\` with \`action: "read"\` and that entry's \`key\`.
+- A \`sharedContext\` entry with \`value_omitted: true\` has NO body in this prompt at all — only its key, type, description and date. That is not an empty note; the note has a body of \`value_chars\` characters that did not fit the budget. To read it, call \`shared-context\` with \`action: "read"\` and that entry's \`key\`.
 - For resend-send-email: ALWAYS include the "agent" field (use "eliza" if you are Eliza). The email body is RENDERED, not printed: write markdown and it becomes a styled email with headings, tables, code blocks and motion. There is no length limit — a full report belongs in the email, and nothing gets truncated. Include a \`\`\`chart block (JSON) for a real chart or a \`\`\`stats block for figures when the numbers matter.
 - Read the \`infrastructure\` field first. It explains the architecture: the database is local Postgres, NOT cloud Supabase. Cloud Supabase is DEPRECATED. A \`supabase.status\` of "error" or "unreachable" means the local-sb REST layer is down, NOT the cloud database.
 - Never claim "all systems nominal" or "no anomalies" without a matching field in the JSON.
@@ -12447,6 +12769,7 @@ The \`tools\` array in the JSON block above lists ALL available tools with descr
 For ALL tools and their descriptions, check the \`tools\` array in the JSON grounding block.
 
 A \`sharedContext\` entry with \`value_truncated: true\` is the HEAD of a longer note, not the whole of it. Do not quote a truncated value as the full value. To read one in full, call \`shared-context\` with \`action: "read"\` and that entry's \`key\`.
+A \`sharedContext\` entry with \`value_omitted: true\` has NO body in this prompt at all — only its key, type, description and date. That is not an empty note; the note has a body of \`value_chars\` characters that did not fit the budget. To read it, call \`shared-context\` with \`action: "read"\` and that entry's \`key\`.
 
 If you need information NOT in the grounding block, output a single line in EXACTLY this JSON format (no other format works):
 \`TOOL_CALL: {"tool":"search_knowledge","args":{"search_term":"term"}}\`
@@ -13872,7 +14195,10 @@ app.post('/api/jobby/onboard', async (req, res) => {
  * rejected by the API, so anything sent from that domain fails.
  */
 function verifySendingKeys() {
-  const sender = resolveJobbySender();
+  // Jobby's sender is resolved per send; at startup we use the default
+  // The fallback sender for when resolveJobbySender() is called without arguments
+  const defaultJobbySender = 'Jobby McJobberson <jobby@31harbor.com>';
+  const sender = { from: defaultJobbySender, domain: '31harbor.com', address: null, clientId: null, source: 'default' };
   // Every registered domain, not the three that happened to exist when this
     // was written. A new domain with a missing or dead key would otherwise
     // not be noticed until its first email failed.
@@ -13926,6 +14252,20 @@ function describeSendFailure(res) {
   return parts.join(' ');
 }
 
+/**
+ * How much room a Jobby chat turn gets, in tokens.
+ *
+ * Owned by relay/jobby/chat.mjs (CHAT_MAX_TOKENS) and re-exported here,
+ * because the relay's chat adapter is also where the guard lives: a reasoning
+ * model can draw its thinking and its answer from the same allowance, so a turn
+ * where it thinks at length can spend the whole cap before it writes a word of
+ * answer - and what comes back is the model's private notes, cut off
+ * mid-sentence, which the candidate must never be shown.
+ *
+ * The adapter below retries once with room to spare and, failing that, says
+ * plainly that it did not reach an answer. That is what makes the cap safe.
+ */
+
 /** POST /api/jobby/chat — one conversation turn. */
 app.post('/api/jobby/chat', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -13952,16 +14292,59 @@ app.post('/api/jobby/chat', async (req, res) => {
           const history = messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-8);
           const flat = history.map(m => `${m.role === 'assistant' ? 'Jobby' : 'Client'}: ${m.content}`).join('\n\n');
           const full = `${system}\n\n---\n\n${flat}\n\nClient: ${prompt}\n\nJobby:`;
+          const budget = opts.maxTokens || JOBBY_CHAT_MAX_TOKENS;
           const res = await ollamaChat(full, {
             agent: 'jobby', temperature: 0.7,
-            maxTokens: opts.maxTokens || 1200,
+            maxTokens: budget,
+            // Ask for less thinking. The candidate reads what comes back, and
+            // thinking is taken out of the same allowance as the answer, so a
+            // model that thinks at length can leave no room to reply.
+            reasoningEffort: 'low',
             sessionId: `jobby-${client.id}`,
           });
           if (res?.error) throw new Error(res.error);
+
+          // The model thought and never answered.
+          //
+          // The provider sends the answer in `content` and the model's private
+          // scratchpad in `reasoning`, and a reasoning model that runs out of
+          // allowance mid-thought sends the second with an empty first. What
+          // the candidate must never be shown is those notes - they are not an
+          // answer, they are the model talking to itself, and they arrive
+          // truncated.
+          //
+          // So: give it more room once, and if it still will not answer, say
+          // so in plain words. An honest "I did not get to an answer" is a
+          // better thing to read than a model's private notes.
+          if (res?.reasoningOnly) {
+            const retry = await ollamaChat(full, {
+              agent: 'jobby', temperature: 0.7,
+              maxTokens: budget * 3,
+              reasoningEffort: 'low',
+              sessionId: `jobby-${client.id}`,
+            });
+            const retryAnswer = retry?.finalAnswer ?? '';
+            if (!retryAnswer) {
+              console.warn(`[jobby-chat] the model spent its whole allowance thinking and did not answer (model ${res?.model}, provider ${res?.provider})`);
+              return {
+                content: 'I worked that out in my head and ran out of room before I could say it. '
+                  + 'Ask me again and I will take another run at it — nothing was changed.',
+                provider: res?.provider,
+                model: res?.model,
+              };
+            }
+            return {
+              content: retryAnswer,
+              provider: retry?.provider || res?.provider,
+              model: retry?.model || res?.model,
+            };
+          }
+
           // ollamaChat normalises to {response, model, provider}; the chat loop
-          // expects {content}.
+          // expects {content}. `finalAnswer` is the provider's answer channel
+          // only - never the scratchpad.
           return {
-            content: res?.response ?? res?.content ?? '',
+            content: res?.finalAnswer ?? '',
             provider: res?.provider,
             model: res?.model,
           };
@@ -14587,17 +14970,46 @@ app.post('/api/employer/chat', async (req, res) => {
             .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'Employer'}: ${m.content}`)
             .join('\n\n');
           const full = `${system}\n\n---\n\n${history}\n\nEmployer: ${prompt}\n\nAssistant:`;
+          const budget = opts.maxTokens || 2500;
           const r = await ollamaChat(full, {
             agent: 'jobby',
             // Lower than the candidate side. An employer document is read by
             // strangers, and a creative pass over a list of requirements is how a
             // requirement the employer never wrote gets into it.
             temperature: 0.3,
-            maxTokens: opts.maxTokens || 1400,
+            maxTokens: budget,
+            // Same reason as the candidate side: thinking and answer share one
+            // allowance, and less thinking leaves more of it for the answer.
+            reasoningEffort: 'low',
             sessionId: `employer-${employer.id}`,
           });
           if (r?.error) throw new Error(r.error);
-          return { content: r?.response ?? r?.content ?? '', provider: r?.provider, model: r?.model };
+          // `finalAnswer` is the provider's answer channel only. The scratchpad
+          // in `reasoning` is the model talking to itself, and an employer
+          // reading that as a reply is worse than being told there was no
+          // reply. So a turn that thought without answering is retried once
+          // with room to spare, and failing that it says so.
+          if (r?.reasoningOnly) {
+            const retry = await ollamaChat(full, {
+              agent: 'jobby',
+              temperature: 0.3,
+              maxTokens: budget * 3,
+              reasoningEffort: 'low',
+              sessionId: `employer-${employer.id}`,
+            });
+            const retryAnswer = retry?.finalAnswer ?? '';
+            if (!retryAnswer) {
+              console.warn(`[employer-chat] the model spent its whole allowance thinking and did not answer (model ${r?.model})`);
+              return {
+                content: 'I worked that out in my head and ran out of room before I could say it. '
+                  + 'Ask me again and I will take another run at it — nothing was changed.',
+                provider: r?.provider,
+                model: r?.model,
+              };
+            }
+            return { content: retryAnswer, provider: retry?.provider || r?.provider, model: retry?.model || r?.model };
+          }
+          return { content: r?.finalAnswer ?? '', provider: r?.provider, model: r?.model };
         },
         search: async (query) => {
           const r = await webSearch(query, { maxResults: 8 });
@@ -15505,10 +15917,10 @@ app.post('/api/fleet-chat/email-webhook', async (req, res) => {
   // domains this relay actually holds a key for. That keeps the existing
   // security property — a request can never choose its own From — while still
   // letting the operator move the sender.
-  const JOBBY_SENDER = resolveJobbySender();
+  const JOBBY_SENDER = 'Jobby McJobberson <jobby@31harbor.com>';
   // Jobby's own sending address. It is resolved per send because it can
   // change; every other agent's address is the table at the top of this file.
-  const AGENT_FROM_LOCAL = { ...AGENT_FROM, 'jobby': JOBBY_SENDER.from };
+  const AGENT_FROM_LOCAL = { ...AGENT_FROM, 'jobby': JOBBY_SENDER };
 
   // SECURITY: No custom from override. The From comes from the agent table and
   // from nowhere else. The candidate path does not go through this route at all -
@@ -18147,12 +18559,36 @@ app.post('/resend/inbox/read', (req, res) => {
 //     extracted: {phone, date_mentioned, guest_count, address, event_type, ...} }
 app.post('/resend/inbox/parsed', (req, res) => {
   const { id, domain, classification, extracted } = req.body || {};
-  if (!id || !domain) return res.status(400).json({ error: 'id and domain required' });
+  // The write-back test asks for a deliberate 404 to prove the body was parsed.
+  // That is a test of this route, not a parse failure, so it must not be fed to
+  // the activity board as one.
+  const isSelftest = req.headers['x-relay-selftest'] === '1'
+    && !req.headers['cf-ray'] && !req.headers['cf-connecting-ip']
+    && isLoopbackAddress(requestIp(req));
+  if (!id || !domain) {
+    // Say WHY. This route used to fail 24 times an hour with an empty body
+    // and say nothing about it, and the 404s that replaced those 400s are
+    // just as silent. A refusal nobody can see is a refusal nobody fixes.
+    if (!isSelftest) logActivity('resend-parse-rejected', id || '(no id)', 'REJECTED',
+      `no id or domain: ${domain || '(no domain)'}`,
+      { id: id || null, domain: domain || null }, 'alice-sidecar');
+    return res.status(400).json({ error: 'id and domain required' });
+  }
   const inbox = getInbox();
   const key = domainToInboxKey(domain || 'partyfavorphoto.com');
-  if (!inbox[key]) return res.status(404).json({ error: 'no inbox for domain' });
+  if (!inbox[key]) {
+    if (!isSelftest) logActivity('resend-parse-rejected', id, 'REJECTED', `no inbox for ${domain} (key ${key})`,
+      { id, domain, key }, 'alice-sidecar');
+    return res.status(404).json({ error: 'no inbox for domain' });
+  }
   const email = inbox[key].find(e => e.id === id);
-  if (!email) return res.status(404).json({ error: 'email not found' });
+  if (!email) {
+    if (!isSelftest) logActivity('resend-parse-rejected', id, 'REJECTED',
+      `email ${id} is not in the ${key} inbox (${inbox[key].length} there, id matched: `
+      + inbox[key].filter(e => e.email_id === id).length + ' by email_id)',
+      { id, domain, key, inbox_size: inbox[key].length }, 'alice-sidecar');
+    return res.status(404).json({ error: 'email not found' });
+  }
   email.read = (classification?.priority || 0) <= 4; // low-priority = auto-read
   email.parsed_by = 'alice-sidecar';
   email.parsed_at = new Date().toISOString();
@@ -18503,13 +18939,17 @@ app.get('/api/obsidian-graph', async (req, res) => {
 
     // ── 10. Live Status Checks ─────────────────────────────────
     // Run parallel health probes for key nodes
+    // Status probes with the response body released - see fetchStatus(). The
+    // GitHub and Resend probes used to leave their bodies unread, which is
+    // what tripped undici's "!this.paused" assertion when those peers closed
+    // the keep-alive socket.
     const statusChecks = {
-      'Relay Server': fetch('http://localhost:8080/health', { signal: AbortSignal.timeout(2000) }).then(r => r.ok ? 'up' : 'degraded').catch(() => 'down'),
+      'Relay Server': fetchStatus('http://localhost:8080/health', { timeoutMs: 2000 }).then(r => r.ok ? 'up' : 'degraded'),
       'Local Supabase': fetch('http://localhost:8080/api/supervisor/status', { signal: AbortSignal.timeout(2000) }).then(r => r.json().then(d => d.services?.find(s => s.name === 'local-sb')?.healthy ? 'up' : 'down').catch(() => 'unknown')).catch(() => 'down'),
       'Cloudflare Tunnel': fetch('http://localhost:8080/api/supervisor/status', { signal: AbortSignal.timeout(2000) }).then(r => r.json().then(d => d.services?.find(s => s.name === 'tunnel')?.healthy ? 'up' : 'down').catch(() => 'unknown')).catch(() => 'down'),
-      'Cron Engine': fetch('http://localhost:8080/cron/status', { signal: AbortSignal.timeout(2000) }).then(r => r.ok ? 'up' : 'degraded').catch(() => 'down'),
-      'GitHub Org': fetch('https://api.github.com/orgs/xmrtdao', { signal: AbortSignal.timeout(3000) }).then(r => r.ok ? 'up' : 'degraded').catch(() => 'down'),
-      'Resend API': fetch('https://api.resend.com/domains', { signal: AbortSignal.timeout(3000), headers: { 'Authorization': 'Bearer re_' } }).then(r => r.status === 401 ? 'up' : 'degraded').catch(() => 'down'),
+      'Cron Engine': fetchStatus('http://localhost:8080/cron/status', { timeoutMs: 2000 }).then(r => r.ok ? 'up' : 'degraded'),
+      'GitHub Org': fetchStatus('https://api.github.com/orgs/xmrtdao', { timeoutMs: 3000 }).then(r => r.ok ? 'up' : 'degraded'),
+      'Resend API': fetchStatus('https://api.resend.com/domains', { timeoutMs: 3000, headers: { 'Authorization': 'Bearer re_' } }).then(r => r.status === 401 ? 'up' : 'degraded'),
     };
     const statusResults = await Promise.allSettled(
       Object.entries(statusChecks).map(async ([name, promise]) => {
@@ -18531,10 +18971,17 @@ app.get('/api/obsidian-graph', async (req, res) => {
     }
 
     // ── 12. Fleet Memory (app.fleet_memory) ────────────────────
+    // `memRows` used to be a const scoped inside this try block, invisible to
+    // the semantic-catalog pass in section 14 below - so every graph rebuild
+    // threw "[graph] semantic catalog error: memRows is not defined" (357x
+    // logged). Hoist it. A failed or empty query here leaves the catalog pass
+    // with nothing to index, which is the safe degradation path.
+    let fleetMemRows = [];
     try {
       const memRows = await localQuery(
         "SELECT id, agent_id, agent_role, memory_type, scope, title, body, created_at FROM app.fleet_memory ORDER BY created_at DESC LIMIT 200"
       );
+      fleetMemRows = memRows;
       for (const mem of memRows) {
         const id = 'memory:' + mem.id;
         addNode(id, mem.title || mem.memory_type, 'memory', {
@@ -18591,8 +19038,9 @@ app.get('/api/obsidian-graph', async (req, res) => {
           addEdge(n.id, 'catalog:' + n.id, 'catalogued-as');
         }
       }
-      // Index fleet memory content
-      for (const mem of memRows) {
+      // Index fleet memory content (fleetMemRows is hoisted from section 12,
+      // where const memRows was scoped out of this block's reach)
+      for (const mem of fleetMemRows) {
         const id = 'catalog:memory:' + mem.id;
         const phrases = (mem.body || '').split('\n').filter(l => l.startsWith('#') || l.startsWith('**')).map(l => l.replace(/^#+\s*/, '').replace(/\*\*/g, '').trim()).filter(Boolean);
         if (phrases.length > 0) {
@@ -19422,18 +19870,108 @@ app.get('/api/signal-constellation', async (req, res) => {
         && Date.now() - constellationCache.at < CONSTELLATION_TTL_MS) {
       return res.json(constellationCache.data);
     }
+
+    // The access chip must come from the same resolver the gate uses. The
+    // roster is cached inside CAP, so this is normally a no-op; when it is
+    // empty, CAP keeps answering PUBLIC and so does the picture — which is
+    // exactly what a tool call would be told.
+    await refreshRoster().catch(() => {});
+
+    const [registryRows, credentialRows] = await Promise.all([
+      queryLocalPg(`SELECT did, name, cac_tier FROM public.registry_agents`),
+      queryLocalPg(
+        `SELECT id, agent_did, tier, status, expires_at
+           FROM public.cac_credentials ORDER BY agent_did, id DESC`
+      ),
+    ]);
+    const view = buildAccessView(registryRows.rows || [], credentialRows.rows || []);
+
     const data = await buildConstellation({
       burnDays,
       activityHours,
       maxNodes,
       includeGraph,
+      tierOf: view.tierOf,
+      accessOf: view.accessOf,
+      credentialOf: view.credentialOf,
     });
+    data.access = accessSummary(view);
     constellationCache.at = Date.now();
     constellationCache.key = key;
     constellationCache.data = data;
     res.json(data);
   } catch (e) {
     console.error('[constellation] build failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Trust history: the constellation's x axis over time ───────────────────
+//
+// The constellation places each agent by its CURRENT trust score. It cannot
+// show how long the agent has been there or what moved it, and that is the
+// question a timeline answers. So this route replays trust_events through the
+// engine and returns BAND SPELLS - the intervals during which each agent held
+// a band - rather than one point per event.
+//
+// Why spells and not points: there are 7,490 events and 3,759 of them belong
+// to eliza. A point per event is a smear at any width. An agent holds a band
+// for weeks, so there are 42 spells across the whole fleet in a 30-day window:
+// countable, readable, and every bar means a real interval.
+//
+// The replay is the expensive part (~450 ms for the full history), and it does
+// not change between page loads at the same window, so the result is cached
+// for the same 20 seconds as the constellation. The software must not let a
+// dashboard poll stall the event loop.
+const trustJanttCache = { at: 0, key: '', data: null };
+const TRUST_JANTT_TTL_MS = 20_000;
+
+app.get('/api/trustgraph/jantt', async (req, res) => {
+  trackRequest('/api/trustgraph/jantt');
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
+    const key = String(days);
+
+    if (!req.query.refresh && trustJanttCache.key === key
+        && Date.now() - trustJanttCache.at < TRUST_JANTT_TTL_MS) {
+      return res.json(trustJanttCache.data);
+    }
+
+    const [events, registry, credentials] = await Promise.all([
+      queryLocalPg(
+        `SELECT agent_did, event_type, delta, score_after, created_at, note, reference
+           FROM public.trust_events
+          ORDER BY created_at ASC`
+      ),
+      queryLocalPg(
+        `SELECT did, name, trust_score, cac_tier FROM public.registry_agents`
+      ),
+      queryLocalPg(
+        `SELECT id, agent_did, tier, status, expires_at
+           FROM public.cac_credentials ORDER BY agent_did, id DESC`
+      ),
+    ]);
+
+    await refreshRoster().catch(() => {});
+    const view = buildAccessView(registry.rows || [], credentials.rows || []);
+
+    const data = buildTrustJantt(events.rows || [], {
+      nameOf: (did) => canonicalName(did),
+      // The credential is the record with a status and an expiry; the registry
+      // column is the one that went stale. The floor follows the credential.
+      tierOf: view.tierOf,
+      accessOf: view.accessOf,
+      credentialOf: view.credentialOf,
+      windowDays: days,
+    });
+    data.access = accessSummary(view);
+
+    trustJanttCache.at = Date.now();
+    trustJanttCache.key = key;
+    trustJanttCache.data = data;
+    res.json(data);
+  } catch (e) {
+    console.error('[trust-jantt] build failed:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -20113,7 +20651,17 @@ const RELAY_NAMESPACES = [
 
 app.use((req, res) => {
   const p = req.path;
-  const ours = RELAY_NAMESPACES.some((ns) => p === ns || p.startsWith(ns + '/'));
+  // A path that tries to climb out of its directory is a probe, whatever
+  // it starts with. Checking only the first segment let
+  // /images/....//....//relay/.env through as "ours" — it starts with a
+  // namespace we serve — and a traversal attempt is not a fault in our
+  // namespace, it is somebody guessing.
+  let decoded = p;
+  try { decoded = decodeURIComponent(p); } catch { /* keep the raw path */ }
+  const looksLikeTraversal = decoded.includes('..') || /%2e%2e/i.test(p);
+
+  const ours = !looksLikeTraversal
+    && RELAY_NAMESPACES.some((ns) => p === ns || p.startsWith(ns + '/'));
   if (ours) {
     // A 404 inside our own namespace. Not a refusal: something we run is
     // asking for something we do not have.

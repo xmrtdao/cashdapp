@@ -30,10 +30,24 @@
  */
 
 import { existsSync, readFileSync, statSync } from 'fs';
-import { join, relative, sep } from 'path';
+import { join, relative, sep, dirname } from 'path';
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
+import { fileURLToPath } from 'url';
 import { query } from './db.mjs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// The repository root, resolved from THIS FILE and not from the working
+// directory.
+//
+// A library that answers differently depending on where it was called from
+// is a library that gives two answers to the same question, and the
+// difference is always found by somebody else. The route-owner lookup
+// failed for exactly this reason: a test that runs from relay/ looked for
+// relay/relay/server.js and found nothing, and concluded that the route
+// had no owner when it has had one all along.
+const REPO_ROOT = join(__dirname, '..', '..');
 
 // ── The files worth watching ───────────────────────────────────────────────
 //
@@ -116,7 +130,9 @@ function gitFor(relPath, repo) {
   if (cached && now - cached.at < GIT_TTL_MS) return cached.data;
 
   let data = null;
-  const cwd = repo === 'suite' ? (process.env.XMRT_SUITE_ROOT || 'suite') : '.';
+  const cwd = repo === 'suite'
+    ? (process.env.XMRT_SUITE_ROOT || join(REPO_ROOT, 'suite'))
+    : REPO_ROOT;
   // The path git wants is relative to the repository, not to the workspace.
   // The suite is its own repository, so 'suite/supabase/functions/ai-chat' is
   // 'supabase/functions/ai-chat' as far as git is concerned — and asking git
@@ -208,7 +224,7 @@ export function scanFile(absPath) {
  * missing (those are reported as missing rather than dropped, because a key
  * file that has gone missing is a finding).
  */
-export function scanInfraFiles(root) {
+export function scanInfraFiles(root = REPO_ROOT) {
   const out = [];
   for (const def of KEY_INFRA_FILES) {
     const abs = join(root, def.path);
@@ -261,7 +277,7 @@ function escapeRe(s) {
  */
 function routeMatchers() {
   if (routeRegexCache && Date.now() - routeRegexCache.at < 30_000) return routeRegexCache.list;
-  const root = routeMapCache?.root || process.cwd();
+  const root = routeMapCache?.root || REPO_ROOT;
   const map = routeOwnerMap(root);
   const list = [];
   for (const [path, owner] of map.entries()) {
@@ -298,7 +314,7 @@ function routeMatchers() {
  * watched file registers is reported as unowned, which is exactly the signal
  * you want for a caller hitting an endpoint that was never wired up.
  */
-export function routeOwnerMap(root) {
+export function routeOwnerMap(root = REPO_ROOT) {
   if (routeMapCache && Date.now() - routeMapCache.at < 30_000) return routeMapCache.map;
   const map = new Map();
   for (const def of KEY_INFRA_FILES) {
@@ -320,7 +336,7 @@ export function routeOwnerMap(root) {
 export function findRouteOwner(path) {
   if (!path) return null;
   try {
-    const root = routeMapCache?.root || process.cwd();
+    const root = routeMapCache?.root || REPO_ROOT;
     const map = routeOwnerMap(root);
     const exact = map.get(path);
     if (exact) return exact;
@@ -329,6 +345,65 @@ export function findRouteOwner(path) {
     }
   } catch {
     /* a broken route map must not take the error panel down with it */
+  }
+  return null;
+}
+
+// ── Function owners ─────────────────────────────────────────────────────────
+//
+// A route tells you which file raised an HTTP error. It tells you nothing
+// about a fault that never had a route: a tool that failed inside an edge
+// function, a cron job that timed out, an edge function that errored.
+//
+// Those were the majority of the errors the Activity Intelligence panel could
+// not attribute. On 2026-10-23, of 235 error rows in a day, 235 had no file
+// owner and no version — because the route map only knows the relay's HTTP
+// routes, and the faults were happening in `suite/supabase/functions/`.
+//
+// So a function names its owner too. The writer records which function ran
+// the work (`metadata.edge_function`), and this map turns that name into a
+// file.
+let functionMapCache = null;
+
+export function functionOwnerMap(root = REPO_ROOT) {
+  if (functionMapCache && Date.now() - functionMapCache.at < 30_000) return functionMapCache.map;
+  const map = new Map();
+  for (const def of KEY_INFRA_FILES) {
+    if (!def.label) continue;
+    const entry = { file: def.path, label: def.label, kind: def.kind };
+    if (!map.has(def.label)) map.set(def.label, entry);
+    // An edge function is addressed by its bare name as well as by its
+    // path, because that is how the caller names it.
+    const bare = def.path.replace(/^suite\/supabase\/functions\//, '').replace(/\/index\.ts$/, '');
+    if (bare !== def.path && !map.has(bare)) map.set(bare, entry);
+  }
+  // The relay is the owner of anything that ran inside it.
+  if (!map.has('relay')) {
+    const relay = KEY_INFRA_FILES.find(d => d.path === 'relay/server.js');
+    if (relay) map.set('relay', { file: relay.path, label: relay.label, kind: relay.kind });
+  }
+  functionMapCache = { at: Date.now(), map, root };
+  return map;
+}
+
+/**
+ * Find the file that owns a named function.
+ *
+ * The name is matched exactly first, then by the same "starts with" rule the
+ * route owners use, so 'ai-chat' finds 'ai-chat/index.ts' and a future
+ * 'ai-chat-v2' finds it too.
+ */
+export function findFunctionOwner(name) {
+  if (!name) return null;
+  try {
+    const map = functionOwnerMap();
+    const exact = map.get(String(name));
+    if (exact) return exact;
+    for (const [key, owner] of map) {
+      if (String(name).startsWith(key)) return owner;
+    }
+  } catch {
+    /* a broken function map must not take the error panel down with it */
   }
   return null;
 }

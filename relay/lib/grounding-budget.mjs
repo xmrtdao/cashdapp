@@ -73,6 +73,36 @@ const DEFAULT_VALUE_CHARS = 300;
 const DEFAULT_HISTORY_MESSAGE_CHARS = 600;
 const DEFAULT_HISTORY_TOTAL_CHARS = 6000;
 
+// The TOTAL number of characters of note bodies the grounding block may carry.
+//
+// This is the budget that was missing.
+//
+// A per-note cap bounds one note. It does not bound the block, because the
+// number of notes has no cap either: on 2026-10-23 the shared-memory table
+// held 251 notes, and 251 notes at 300 characters each is 66,461 characters
+// of body — a grounding block of 152 KB, which is about 38,000 prompt tokens
+// on every single fleet-chat turn.
+//
+// And the notes are not a curated memory. They are a scratchpad that was
+// never swept: `hermes-task-handoff-t-mucocw29-lma2`, `grok_build_input_
+// 2026_09_18`, `deprecated_tasks_ground_truth_2026-09-07`, `dsh_cycle1_
+// complete_2026_09_08`. Records of work that happened, kept forever and
+// reread by the model on every turn, for a chat reply that needs a dozen
+// words.
+//
+// So the bodies are rationed. The bodies go to the notes a model is most
+// likely to need, and the INDEX — every key, type, description and author —
+// is never cut. A note whose body did not make the budget says so.
+//
+// Nothing is dropped and nothing is invented. The note is still there, still
+// named, and one shared-context tool call away:
+//
+//   "the full text of any note is one tool call away, and the
+//    shared-context tool has always been able to read a note by key."
+//
+// Overridable, so it can be tuned without a code change.
+const DEFAULT_SHARED_CONTEXT_CHARS = 12000;
+
 const ELLIPSIS = '…';
 
 function envInt(name, fallback) {
@@ -130,30 +160,120 @@ export function previewValue(value, cap) {
  *
  * Every note keeps its identity. Only the body is cut, and only a body that
  * was cut is marked.
+ *
+ * Two budgets apply, in this order:
+ *
+ *   1. the PER-NOTE budget, which bounds one body; and
+ *   2. the TOTAL budget, which bounds the whole block.
+ *
+ * The second one is the one that actually matters, because the number of
+ * notes is not bounded. Bodies are rationed newest-first: the note a model is
+ * most likely to need is the one that was touched most recently, and the
+ * table records when each note was last written.
+ *
+ * A note that does not get a body is marked `value_omitted`. It keeps its
+ * key, its type, its description and its author, so the model can see that
+ * the note exists, what it is called, and that it is worth one tool call.
+ * It is never silently dropped, and it is never presented as empty.
  */
 export function budgetSharedContext(rows, opts = {}) {
   const cap = opts.valueChars ?? envInt('GROUNDING_VALUE_CHARS', DEFAULT_VALUE_CHARS);
+  const totalBudget = opts.totalChars
+    ?? envInt('GROUNDING_SHARED_CONTEXT_CHARS', DEFAULT_SHARED_CONTEXT_CHARS);
   const list = Array.isArray(rows) ? rows : [];
   let before = 0;
   let after = 0;
   let truncated = 0;
 
-  const out = list.map(row => {
-    if (!row || typeof row !== 'object') return row;
+  // Per-note first: what each body would look like on its own.
+  const perNote = list.map((row, index) => {
+    if (!row || typeof row !== 'object') return { row, index, value: row, wasCut: false, fullChars: 0, len: 0 };
     const { value, truncated: wasCut, fullChars } = previewValue(row.value, cap);
     before += fullChars;
-    after += textOf(value).length;
-    if (!wasCut) return row;
-    truncated += 1;
-    // value_truncated is the whole point: a cut body must not read as a
-    // whole body. The key is already on the row, so the note is one
-    // shared-context tool call away.
-    return { ...row, value, value_truncated: true };
+    return { row, index, value, wasCut, fullChars, len: textOf(value).length };
   });
 
+  // Then the total. Newest first, so the notes a model is most likely to
+  // need get a body; the rest keep their identity and get a tool call.
+  //
+  // "Newest" is the note's own updated_at where the caller supplied one.
+  // The rows arrive with `lastUpdated` (the relay's shape) or `updated_at`.
+  const ageOf = (row) => {
+    const raw = row?.lastUpdated || row?.updated_at || row?.updatedAt || null;
+    if (!raw) return 0;               // unknown age sorts with the newest
+    const t = Date.parse(raw);
+    return Number.isFinite(t) ? t : 0;
+  };
+  const order = [...perNote.keys()].sort((a, b) => {
+    const ra = perNote[a].row || {};
+    const rb = perNote[b].row || {};
+    const d = ageOf(rb) - ageOf(ra);
+    if (d !== 0) return d;
+    return perNote[a].index - perNote[b].index;   // stable
+  });
+
+  const bodies = new Map();          // index -> allowed body length
+  let spent = 0;
+  for (const i of order) {
+    const entry = perNote[i];
+    if (!entry.row || typeof entry.row !== 'object') continue;
+    if (entry.len === 0) { bodies.set(i, 0); continue; }
+    if (spent + entry.len <= totalBudget) {
+      bodies.set(i, entry.len);
+      spent += entry.len;
+      continue;
+    }
+    const room = Math.max(0, totalBudget - spent);
+    if (room > 0) {
+      // There is room for a PART of this body. Take it.
+      const { value, truncated: wasCut, fullChars } = previewValue(entry.row.value, room);
+      entry.value = value;
+      entry.wasCut = wasCut || entry.wasCut;
+      entry.fullChars = fullChars;
+      entry.len = textOf(value).length;
+      bodies.set(i, entry.len);
+      spent += entry.len;
+    } else {
+      bodies.set(i, 0);
+    }
+  }
+
+  const out = perNote.map((entry) => {
+    const { row } = entry;
+    if (!row || typeof row !== 'object') return row;
+    const allowed = bodies.get(entry.index) ?? entry.len;
+    if (allowed <= 0 && entry.fullChars > 0) {
+      // No body at all. The note keeps its identity and says the body is
+      // one tool call away.
+      const { value: _dropped, ...rest } = row;
+      return { ...rest, value_omitted: true, value_chars: entry.fullChars };
+    }
+    if (allowed < entry.len) {
+      const { value, truncated: wasCut } = previewValue(row.value, allowed);
+      truncated += 1;
+      after += textOf(value).length;
+      return { ...row, value, value_truncated: true };
+    }
+    after += entry.len;
+    if (entry.wasCut) {
+      truncated += 1;
+      return { ...row, value: entry.value, value_truncated: true };
+    }
+    return row;
+  });
+
+  const omitted = out.filter(r => r && r.value_omitted).length;
   return {
     rows: out,
-    report: { notes: list.length, truncated, charsBefore: before, charsAfter: after, valueChars: cap },
+    report: {
+      notes: list.length,
+      truncated,
+      omitted,
+      charsBefore: before,
+      charsAfter: after,
+      valueChars: cap,
+      totalChars: totalBudget,
+    },
   };
 }
 
@@ -209,6 +329,7 @@ export function budgetHistory(messages, opts = {}) {
 
 export const GROUNDING_BUDGET_DEFAULTS = {
   valueChars: DEFAULT_VALUE_CHARS,
+  sharedContextChars: DEFAULT_SHARED_CONTEXT_CHARS,
   historyMessageChars: DEFAULT_HISTORY_MESSAGE_CHARS,
   historyTotalChars: DEFAULT_HISTORY_TOTAL_CHARS,
 };

@@ -92,6 +92,88 @@ section('the shared-memory bodies are trimmed, the index is not');
     report.notes === 3 && report.truncated === 1, JSON.stringify(report));
 }
 
+section('the shared-memory block has a TOTAL budget, not just a per-note one');
+{
+  // The gap this closes.
+  //
+  // A per-note cap bounds one note. It does not bound the block, because the
+  // number of notes has no cap either: 251 notes at 300 characters each is
+  // 66,461 characters of body on every fleet-chat turn — a 152 KB grounding
+  // block, about 38,000 prompt tokens, to produce a sentence.
+  //
+  // And the notes were a scratchpad nobody swept:
+  // `hermes-task-handoff-t-mucocw29-lma2`, `grok_build_input_2026_09_18`,
+  // `deprecated_tasks_ground_truth_2026-09-07`. Records of work that
+  // happened, reread by the model on every turn, forever.
+  const notes = [];
+  for (let i = 0; i < 251; i++) {
+    notes.push({
+      key: `note_${String(i).padStart(3, '0')}`,
+      type: 'general',
+      value: 'x'.repeat(600),
+      description: `note ${i}`,
+      lastUpdatedBy: 'eliza',
+      lastUpdated: new Date(Date.now() - i * 3600_000).toISOString(),
+    });
+  }
+  const { rows: out, report } = budgetSharedContext(notes, { valueChars: 300, totalChars: 12000 });
+
+  check('every note is still listed', out.length === 251, out.length);
+  check('every note keeps its key',
+    out.map(r => r.key).join(',') === notes.map(n => n.key).join(','),
+    'the index was cut');
+  check('the body budget is respected',
+    report.charsAfter <= 12000 + 100, report.charsAfter);
+
+  const withBody = out.filter(r => r.value !== undefined && !r.value_omitted);
+  const omitted = out.filter(r => r.value_omitted);
+  check('some notes keep a body', withBody.length > 0, withBody.length);
+  check('some notes have their body omitted', omitted.length > 0, omitted.length);
+  // The fixture makes note_000 the newest (newest minus i hours), so the
+  // notes that kept a body must all be at least as new as the oldest note
+  // that lost its body.
+  const oldestKept = Math.min(...withBody.map(r => Date.parse(r.lastUpdated)));
+  const newestDropped = omitted.length
+    ? Math.max(...omitted.map(r => Date.parse(r.lastUpdated)))
+    : 0;
+  check('the notes that kept a body are the NEWEST ones',
+    oldestKept >= newestDropped,
+    { oldestKept: new Date(oldestKept).toISOString(), newestDropped: new Date(newestDropped).toISOString() });
+
+  check('an omitted note says so', omitted.every(r => r.value_omitted === true));
+  check('an omitted note keeps its identity',
+    omitted.every(r => r.key && r.type && r.lastUpdatedBy),
+    omitted[0]);
+  check('an omitted note records how long its body was',
+    omitted.every(r => Number(r.value_chars) > 0),
+    omitted[0] && omitted[0].value_chars);
+  check('an omitted note has no body at all',
+    omitted.every(r => r.value === undefined),
+    omitted[0] && omitted[0].value);
+
+  // A budget that is not reached changes nothing.
+  const { rows: untouched, report: rep2 } = budgetSharedContext(
+    [{ key: 'k', type: 'general', value: 'short', description: '', lastUpdatedBy: 'z' }],
+    { valueChars: 300, totalChars: 12000 });
+  check('a note that fits is left alone',
+    untouched[0].value === 'short' && untouched[0].value_omitted === undefined,
+    JSON.stringify(untouched[0]));
+  check('nothing is omitted when the budget is not reached', rep2.omitted === 0, rep2);
+
+  // The default is a real number, and it is bounded.
+  check('the default total budget is 12,000 characters',
+    GROUNDING_BUDGET_DEFAULTS.sharedContextChars === 12000,
+    GROUNDING_BUDGET_DEFAULTS.sharedContextChars);
+
+  // The prompt has to explain the new marker, or the model reads an absent
+  // body as an empty note.
+  const serverSrc = readFileSync(join(RELAY, 'server.js'), 'utf8');
+  check('the prompt explains an omitted body',
+    /value_omitted: true/.test(serverSrc), 'the model is not told');
+  check('the prompt says a note with no body is one tool call away',
+    /value_omitted/.test(serverSrc) && /shared-context/.test(serverSrc));
+}
+
 section('a cut value is never mistaken for a whole one');
 {
   // The value is truncated AND says so. An agent that reads a fragment
