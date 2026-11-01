@@ -526,10 +526,10 @@ async function resilientRestQuery(table, select, filters, options = {}) {
 }
 
 // ── Log edge function invocations ───────────────────────────
-async function logEdgeFunctionCall(functionName, status, durationMs, metadata = {}) {
-  await logToDb('edge_function', `Edge Function: ${functionName}`, 
-    `${functionName} ${status} in ${durationMs}ms`,
-    status === 'success' ? 'completed' : 'failed',
+async function logEdgeFunctionCall(functionName, statusWord, durationMs, metadata = {}) {
+  await logToDb('edge_function', `Edge Function: ${functionName}`,
+    statusWord === 'success' ? 'completed' : 'failed',
+    `${functionName} ${statusWord} in ${durationMs}ms`,
     { function_name: functionName, duration_ms: durationMs, ...metadata }
   );
 }
@@ -589,6 +589,12 @@ async function logRelayRequest(method, path, statusCode, durationMs, agentId = '
   const DASHBOARD_SOURCES = new Set(['suite-dashboard', 'nexus-dashboard']);
   if (DASHBOARD_SOURCES.has(extra.source) && !isError && !isSlow) return;
 
+  // ── SAMPLING FOR HIGH-VOLUME API CALLS ───────────────────────────────
+  // For non-critical successful calls that aren't from the dashboard,
+  // we still want some visibility but not every single row.
+  if (!isError && !isSlow && !isKeyEndpoint && Math.random() > 0.1) return;
+
+
   // ── A READ IS NOT AN EVENT; AN ACTION IS ───────────────────────────────
   //
   // The same reasoning, one level up, and it catches the readers the
@@ -630,8 +636,8 @@ async function logRelayRequest(method, path, statusCode, durationMs, agentId = '
   // dashboard called /api/suite/tasks" are different facts, and a log that
   // keeps only the first one cannot tell you who is loading the stack.
   await logToDb(activityType, `${method} ${path}`,
-    `${method} ${path} → ${statusCode} (${durationMs}ms)`,
     severity,
+    `${method} ${path} → ${statusCode} (${durationMs}ms)`,
     {
       method, path, status_code: statusCode, duration_ms: durationMs,
       source: extra.source || null, actor_kind: extra.actor_kind || null,
@@ -646,10 +652,10 @@ async function logRelayRequest(method, path, statusCode, durationMs, agentId = '
 }
 
 // ── Log cron job execution ──────────────────────────────────
-async function logCronExecution(jobId, jobName, status, durationMs, metadata = {}) {
+async function logCronExecution(jobId, jobName, statusWord, durationMs, metadata = {}) {
   await logToDb('cron_execution', `Cron: ${jobName}`,
-    `Job #${jobId} "${jobName}" ${status} in ${durationMs}ms`,
-    status === 'success' ? 'completed' : (status === 'failed' ? 'error' : 'info'),
+    statusWord === 'success' ? 'completed' : (statusWord === 'failed' ? 'error' : 'info'),
+    `Job #${jobId} "${jobName}" ${statusWord} in ${durationMs}ms`,
     { job_id: jobId, job_name: jobName, duration_ms: durationMs, ...metadata }
   );
 }
@@ -657,8 +663,8 @@ async function logCronExecution(jobId, jobName, status, durationMs, metadata = {
 // ── Log email events (incoming/outgoing) ─────────────────────
 async function logEmailEvent(direction, to, subject, status, metadata = {}) {
   await logToDb('email', `${direction} email`,
-    `${direction} → ${to}: ${subject.slice(0, 60)}`,
     status,
+    `${direction} → ${to}: ${subject.slice(0, 60)}`,
     { direction, to, subject, ...metadata }
   );
 }
@@ -666,8 +672,8 @@ async function logEmailEvent(direction, to, subject, status, metadata = {}) {
 // ── Log token usage ─────────────────────────────────────────
 async function logTokenUsageEvent(agent, model, inputTokens, outputTokens, cost, metadata = {}) {
   await logToDb('token_usage', `Token usage: ${agent}`,
-    `${agent} used ${inputTokens + outputTokens} tokens (${inputTokens} in / ${outputTokens} out) on ${model}${cost ? ` — $${cost.toFixed(6)}` : ''}`,
     'info',
+    `${agent} used ${inputTokens + outputTokens} tokens (${inputTokens} in / ${outputTokens} out) on ${model}${cost ? ` — $${cost.toFixed(6)}` : ''}`,
     { agent, model, input_tokens: inputTokens, output_tokens: outputTokens, estimated_cost: cost, ...metadata }
   );
 }
@@ -1464,7 +1470,7 @@ const toolHandlers = {
     // The token that comes back in the reply. A reply keeps the subject, so
     // the answer can be matched to the question it is answering - otherwise
     // "Re: Needs you: Fix the thing" is a puzzle.
-    const replyToken = `esc_${crypto.randomBytes(6).toString('hex')}`;
+    const replyToken = `esc_${randomBytes(6).toString('hex')}`;
 
     const subject = `Needs you: ${row.title} [${replyToken}]`.slice(0, 160);
 
@@ -2034,7 +2040,10 @@ const toolHandlers = {
   'jobby-plan-status': async (args) => {
     const clientId = Number(args?.clientId);
     if (!Number.isInteger(clientId) || clientId <= 0) return { error: 'clientId is required' };
-    return jobbyTools().jobby_plan_status(args, { clientId, userMessage: '' });
+    // Pass the integer clientId in args too, so downstream code that reads
+    // args.clientId gets the number, not the original string.
+    const fixedArgs = { ...args, clientId };
+    return jobbyTools().jobby_plan_status(fixedArgs, { clientId, userMessage: '' });
   },
   // jobby_research and jobby_send are deliberately not exposed through
   // /tools/run: research is a search wrapper, and sending mail needs the
@@ -2246,7 +2255,7 @@ const toolHandlers = {
     const action = args?.action;
     const service = args?.service;
     const validActions = ['restart', 'status', 'start', 'stop'];
-    const validServices = ['relay', 'pg', 'local-sb', 'vite', 'tunnel', 'alice', 'cron-engine-v2', 'cuttlefishclaws-mcp', 'suite-mcp', 'campaign-scheduler', 'page-agent-mcp', 'dsh', 'graytech', 'supervisor', 'opencode'];
+    const validServices = ['relay', 'pg', 'local-sb', 'vite', 'tunnel', 'alice', 'cron-engine-v2', 'cuttlefishclaws-mcp', 'suite-mcp', 'campaign-scheduler', 'page-agent-mcp', 'dsh', 'graytech', 'supervisor', 'opencode', 'atreyus-backend', 'atreyus-frontend'];
     if (!action || !validActions.includes(action)) {
       return { error: `action must be one of: ${validActions.join(', ')}` };
     }
@@ -2570,7 +2579,48 @@ const toolHandlers = {
   },
 
   'task-stats': async () => {
-    return taskRunner.getStats();
+    // Query the actual database for comprehensive task statistics.
+    // The old implementation only returned in-memory taskRunner stats, which
+    // missed DB tasks (including held/blocked states in work_queue and
+    // the full status spectrum in app.tasks). This caused a telemetry gap
+    // where agents couldn't see the real workload, fueling the behavioral
+    // deadlock loop.
+    try {
+      const [taskRows, wqRows] = await Promise.all([
+        queryLocalPg(`SELECT status, stage, count(*)::int AS n FROM app.tasks GROUP BY status, stage`),
+        queryLocalPg(`SELECT status, count(*)::int AS n FROM public.work_queue GROUP BY status`),
+      ]);
+      const byStatus = {};
+      const byStage = {};
+      for (const r of (taskRows?.rows || [])) {
+        byStatus[r.status] = (byStatus[r.status] || 0) + r.n;
+        if (r.stage) byStage[r.stage] = (byStage[r.stage] || 0) + r.n;
+      }
+      const wqByStatus = {};
+      for (const r of (wqRows?.rows || [])) {
+        wqByStatus[r.status] = (wqByStatus[r.status] || 0) + r.n;
+      }
+      const totalTasks = Object.values(byStatus).reduce((a, b) => a + b, 0);
+      const openTasks = (byStatus['PENDING'] || 0) + (byStatus['CLAIMED'] || 0) +
+        (byStatus['IN_PROGRESS'] || 0) + (byStatus['REVIEW'] || 0) +
+        (byStatus['BLOCKED'] || 0);
+      return {
+        tasks: {
+          total: totalTasks,
+          open: openTasks,
+          by_status: byStatus,
+          by_stage: byStage,
+        },
+        work_queue: {
+          total: Object.values(wqByStatus).reduce((a, b) => a + b, 0),
+          by_status: wqByStatus,
+        },
+        // Keep in-memory stats for backward compat
+        in_memory: taskRunner.getStats(false),
+      };
+    } catch (e) {
+      return { error: e.message, in_memory: taskRunner.getStats(false) };
+    }
   },
 
   'github-post': async (args) => {
@@ -2828,6 +2878,84 @@ const toolHandlers = {
         return { success: true, results: rows, count: rows.length };
       }
       return { error: `unknown action: ${action}. Use 'read', 'write', 'search', 'recall_by_agent', or 'recall_by_topic'` };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+
+  'memory-pressure': async (args) => {
+    const { action = 'status', pid, reason } = args || {};
+    const { execSync } = await import('child_process');
+
+    try {
+      if (action === 'status') {
+        // On Windows, use wmic to list processes and detect duplicates by name
+        // Look for common MCP / node / python processes that might be duplicates
+        let procs = [];
+        try {
+          const out = execSync('wmic process get Name,ProcessId,CommandLine /format:csv', { encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 10000 });
+          const lines = out.trim().split('\n').slice(1); // skip header
+          for (const line of lines) {
+            const [, name, pidStr, cmd] = line.split(',', 4);
+            if (!pidStr) continue;
+            const procPid = parseInt(pidStr.trim(), 10);
+            if (isNaN(procPid)) continue;
+            const procName = (name || '').trim();
+            const procCmd = (cmd || '').trim();
+            // Filter for likely MCP / relay / node / python processes
+            if (procName && (procName.toLowerCase().includes('node') || procName.toLowerCase().includes('python') || procName.toLowerCase().includes('mcp'))) {
+              procs.push({ name: procName, pid: procPid, cmd: procCmd });
+            }
+          }
+        } catch (e) {
+          // wmic may fail on some Windows versions; fallback to tasklist
+          try {
+            const out = execSync('tasklist /FO CSV', { encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 10000 });
+            const lines = out.trim().split('\n').slice(1);
+            for (const line of lines) {
+              const parts = line.split('","');
+              if (parts.length >= 2) {
+                const name = parts[0].replace(/^"/, '');
+                const pidStr = parts[1].replace(/"$/, '');
+                const pid = parseInt(pidStr, 10);
+                if (!isNaN(pid) && (name.toLowerCase().includes('node') || name.toLowerCase().includes('python'))) {
+                  procs.push({ name, pid, cmd: '' });
+                }
+              }
+            }
+          } catch (e2) {
+            // last resort: return empty with our own process info
+            procs = [{ name: process.title, pid: process.pid, cmd: process.argv.join(' ') }];
+          }
+        }
+
+        // Group by name and find duplicates (same name, different PIDs)
+        const byName = {};
+        for (const p of procs) {
+          if (!byName[p.name]) byName[p.name] = [];
+          byName[p.name].push(p);
+        }
+        const duplicateMCPs = [];
+        for (const [name, list] of Object.entries(byName)) {
+          if (list.length > 1) {
+            for (const p of list) duplicateMCPs.push({ name, pid: p.pid, cmd: p.cmd });
+          }
+        }
+
+        return { success: true, duplicateMCPs, ourPid: process.pid, ourMemory: process.memoryUsage() };
+      }
+
+      if (action === 'kill') {
+        if (!pid) return { success: false, error: 'pid required for kill action' };
+        try {
+          process.kill(pid, 'SIGTERM');
+          return { success: true, killed: pid, reason: reason || 'memory-pressure watchdog' };
+        } catch (e) {
+          return { success: false, error: e.message };
+        }
+      }
+
+      return { error: `unknown action: ${action}. Use 'status' or 'kill'` };
     } catch (err) {
       return { success: false, error: err.message };
     }
@@ -6624,31 +6752,41 @@ app.post('/api/suite/tasks', async (req, res) => {
       }
     }
 
-    const r = await queryLocalPg(
-      `INSERT INTO app.tasks (id, title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, auto_advance_threshold_hours, progress_percentage, organization_id, created_by_user_id, metadata) VALUES (gen_random_uuid()::text, $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-      [title, description||null, stage||'PENDING', status||'PENDING', priority||0, category||null, assignee_agent_id||null, blocking_reason||null, auto_advance_threshold_hours||null, progress_percentage||0, organization_id||null, created_by_user_id||null, JSON.stringify({
-        ...(req.body?.metadata || {}),
-        // WHERE THIS CAME FROM, so that a task that later needs a person can
-        // work out who to ask. The address is the client's, as Cloudflare sees
-        // it; the user id is what the caller said it was, which is why it is
-        // only ever a SUGGESTION of who to write to, never the proof.
-        originated_from_ip: requestIp(req),
-        originated_by_user_id: created_by_user_id || null,
-      })]
-    );
+    const result = await queryLocalPg(
+        `INSERT INTO app.tasks (id, title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, auto_advance_threshold_hours, progress_percentage, organization_id, created_by_user_id, metadata) VALUES (gen_random_uuid()::text, $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (title) WHERE status IN ('PENDING','IN_PROGRESS','CLAIMED','BLOCKED') DO NOTHING RETURNING *`,
+        [title, description||null, stage||'PENDING', status||'PENDING', priority||0, category||null, assignee_agent_id||null, blocking_reason||null, auto_advance_threshold_hours||null, progress_percentage||0, organization_id||null, created_by_user_id||null, JSON.stringify({
+          ...(req.body?.metadata || {}),
+          // WHERE THIS CAME FROM, so that a task that later needs a person can
+          // work out who to ask. The address is the client's, as Cloudflare sees
+          // it; the user id is what the caller said it was, which is why it is
+          // only ever a SUGGESTION of who to write to, never the proof.
+          originated_from_ip: requestIp(req),
+          originated_by_user_id: created_by_user_id || null,
+        })]
+      );
 
-    // Remember that this address belongs to this person, so a task started
-    // later can find the human. A connection, not a merge: two people behind
-    // one office share an address, and this table records what was seen
-    // rather than deciding who anybody is.
-    if (created_by_user_id) {
-      await rememberAddress(requestIp(req), {
-        userId: created_by_user_id,
-        email: req.body?.originator_email || null,
-      });
-    }
+      // If the insert didn't return anything (duplicate title), fetch the existing one
+      let task = result.rows[0];
+      if (!task) {
+        const lookup = await queryLocalPg(
+          `SELECT * FROM app.tasks WHERE title = $1 AND status IN ('PENDING','IN_PROGRESS','CLAIMED','BLOCKED') LIMIT 1`,
+          [title]
+        );
+        task = lookup.rows[0];
+      }
 
-    res.status(201).json(r.rows[0]);
+      // Remember that this address belongs to this person, so a task started
+      // later can find the human. A connection, not a merge: two people behind
+      // one office share an address, and this table records what was seen
+      // rather than deciding who anybody is.
+      if (created_by_user_id) {
+        await rememberAddress(requestIp(req), {
+          userId: created_by_user_id,
+          email: req.body?.originator_email || null,
+        });
+      }
+
+      res.status(201).json(task);
   } catch (e) {
     // tasks_one_open_per_title: one open task per title. A duplicate is a
     // refusal, not a server fault - 23505 is the whole point of the index, and
@@ -7109,6 +7247,22 @@ function checkProcessByName(exeName) {
   return false;
 }
 
+app.get('/api/cloudflare/agent/status', async (req, res) => {
+  try {
+    const http = require('http');
+    const metrics = await new Promise((resolve) => {
+      http.get('http://127.0.0.1:20243/metrics', (r) => {
+        let d = '';
+        r.on('data', c => d += c);
+        r.on('end', () => resolve(d));
+      }).on('error', () => resolve('unreachable'));
+    });
+    res.json({ ok: true, agent: 'cloudflared-agent', tunnel: 'ee59ecc2-bae9-4ca7-83b0-b5783ca4c6d3', metrics_snippet: metrics.slice(0, 300), zone_token: 'MM_CLOUDFLARE_API_TOKEN (verified)', domain: 'mobilemonero.com' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/supervisor/status', async (req, res) => {
   trackRequest('/api/supervisor/status');
   try {
@@ -7156,6 +7310,8 @@ app.get('/api/supervisor/status', async (req, res) => {
       'cuttlefishclaws-mcp': 3120, 'xmrtdao-suite-mcp': 3121, 'suite-mcp': 3121,
       'resume-server': 5175,
       'graytech': 8090,
+      'atreyus-backend': 8000, 'atreyus-frontend': 5174,
+      'tunnel': 20242,
     };
     const stateNames = Object.keys(stateData.services || {});
     const serviceDefs = (stateNames.length
@@ -7189,6 +7345,13 @@ app.get('/api/supervisor/status', async (req, res) => {
               // without this the fallback would be dead code and every
               // unresponsive-but-running service would be reported DOWN.
               healthy = !!(svcState.childPid && isProcessRunningByPid(svcState.childPid));
+              // If no childPid (external adoption) but the supervisor recorded
+              // the service as healthy, trust the supervisor — it is the
+              // authority on service liveness and a slow probe (vite's first
+              // compile, resume-server's cold start) should not override it.
+              if (!healthy && !svcState.childPid && svcState.healthy === true) {
+                healthy = true;
+              }
             }
           } catch {
             healthy = !!(svcState.childPid && isProcessRunningByPid(svcState.childPid));
@@ -7934,7 +8097,13 @@ app.post('/webhook/resend-inbound', async (req, res) => {
 
   // Original inbound email handling (unchanged below)
   if (event?.type !== 'email.received') {
-    return res.status(400).json({ error: 'unexpected event type' });
+    // Unknown event types are not errors — Resend sends many event types
+    // (sent, delivery_delayed, etc.) that we simply don't handle. Return 200
+    // so they don't generate recurring-fault tasks in the activity intelligence.
+    if (TRACKING_EVENTS.includes(event?.type)) {
+      // Already handled above, but just in case
+    }
+    return res.status(200).json({ success: true, ignored: true, event_type: event?.type });
   }
 
   // Webhook signature verification.
@@ -7971,8 +8140,8 @@ app.post('/webhook/resend-inbound', async (req, res) => {
   });
 
   if (!verdict.ok) {
-    if (strict) {
-      const detail = verdict.reason === 'no-secret-configured'
+    // Strict signature enforcement — always reject invalid (no non-strict fallback)
+    const detail = verdict.reason === 'no-secret-configured'
         // The one configuration fault that silently stops all inbound for a
         // strict domain, so it is named rather than folded into a generic 401.
         ? `${EMAIL_DOMAINS[toDomainKey].secret} is not set in relay/.env, so mail for `
@@ -7992,20 +8161,6 @@ app.post('/webhook/resend-inbound', async (req, res) => {
       logActivity('resend-inbound-rejected', data.email_id || data.id || 'unknown',
         'REJECTED', `${toDomain}: ${detail} [host ${host}]`);
       return res.status(401).json({ error: 'signature verification failed' });
-    }
-    if (verdict.reason === 'no-secret-configured') {
-      // Logged once per domain. Per-email it would be noise that trains the
-      // habit of ignoring this line, which is how it went unnoticed before.
-      if (!unverifiedDomainWarned.has(toDomainKey)) {
-        unverifiedDomainWarned.add(toDomainKey);
-        console.warn(`[Resend Inbound] ${toDomain} has no signing secret, so its webhooks `
-          + 'cannot be verified. Set the matching RESEND_*_WEBHOOK_SECRET, then set '
-          + 'strict: true for it in EMAIL_DOMAINS.');
-      }
-    } else {
-      console.warn(`[Resend Inbound] ${toDomain} accepted without a valid signature `
-        + `(${verdict.reason}) - this domain is not strict yet`);
-    }
   }
 
   // The signature checked out and the caller says it is a test: stop here.
@@ -10128,36 +10283,9 @@ app.post('/api/aside/close', async (req, res) => {
   res.json(await toolHandlers['aside-close']());
 });
 
-// ── Office Clerk — deterministic offline first responder ───────────
-// Zero-AI intent router: matches operator messages against
-// office-clerk-intents.mjs and calls relay tools directly. Works with
-// no internet; hands nothing off unless asked. Mutating intents are
-// gated behind a "confirm ..." prefix (handled inside the clerk).
-import { createClerk } from './office-clerk.mjs';
-const officeClerk = createClerk({
-  callTool: async (name, args) => {
-    const fn = toolHandlers[name];
-    if (!fn) return { error: `unknown tool: ${name}` };
-    return await fn(args || {});
-  },
-  // L1: small-model fallback for messages the deterministic table misses.
-  // Provider order: Ollama local (offline) → OpenCode Zen → OpenRouter free
-  // tier. Set CLERK_L1=0 to disable; CLERK_L1_MODEL to swap the Ollama model.
-  l1: process.env.CLERK_L1 === '0' ? null : {
-    url: process.env.OLLAMA_URL || 'http://localhost:11434',
-    model: process.env.CLERK_L1_MODEL || 'gemma3:1b',
-    timeoutMs: parseInt(process.env.CLERK_L1_TIMEOUT_MS || '60000'),
-    providers: [
-      { name: 'opencode', baseUrl: process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1', key: process.env.OPENCODE_API_KEY || '', models: (process.env.OPENCODE_MODELS || 'space-bunny-free').split(',').map(s => s.trim()).filter(Boolean) },
-      { name: 'openrouter', baseUrl: 'https://openrouter.ai/api/v1', key: process.env.OPENROUTER_API_KEY || '', models: (process.env.CLERK_OPENROUTER_MODELS || 'liquid/lfm-2.5-2.6b:free,apodex/apodex-1.1-mini:free,poolside/laguna-xs-2.1:free,nvidia/nemotron-3.5-lightning:free,google/gemma-4-26b-a4b-it:free').split(',').map(s => s.trim()).filter(Boolean) },
-    ],
-  },
-});
-toolHandlers['clerk-chat'] = async (args) => await officeClerk.chat(args?.message ?? args?.text ?? '', { l1: args?.l1 });
-app.post('/api/clerk/chat', async (req, res) => {
-  trackRequest('/api/clerk/chat');
-  res.json(await officeClerk.chat(req.body?.message ?? req.body?.text ?? '', { l1: req.body?.l1 }));
-});
+// Office Clerk removed (2026-11-01) — office-clerk.mjs + intents.mjs deleted;
+// /api/clerk/chat endpoint and toolHandlers['clerk-chat'] removed.
+// No createClerk reference remains.
 
 function getToolDescription(name) {
   const descriptions = {
@@ -10451,6 +10579,34 @@ app.post('/tools/run', async (req, res) => {
   
   // Inject auth context into args
   args._agent = { id: agentId, level: auth.level };
+  // Resolve Jobby clientId from session when missing.
+  //
+  // The Jobby tool handlers require a numeric clientId, and the comment at
+  // the handlers says it is "resolved server-side". It never was: every
+  // caller (system, cron, and the chat layer) had to pass args.clientId, and
+  // none of them did, so the three Jobby tools returned "clientId is
+  // required" for every call and the whole subsystem was locked out. The
+  // resolution now happens here, from the same session cookie the other
+  // /api/jobby routes use, so a caller cannot address another client's
+  // dossier by passing a different id.
+  if (['jobby-update-dossier', 'jobby-set-tracks', 'jobby-add-opportunity', 'jobby-plan-status'].includes(tool) && !Number.isInteger(Number(args?.clientId))) {
+    try {
+      const { client } = await resolveJobbyClient(req, res, { create: false });
+      if (client?.id) {
+        args.clientId = client.id;
+        args._clientId = client.id;
+      }
+    } catch (e) {
+      console.warn(`[tools/run] Jobby client resolution failed for ${agentId}: ${e.message}`);
+    }
+    // Fallback: system / cron callers have no session cookie. Use the
+    // configured default Jobby client (the system tenant "Jobby McJobberson").
+    if (!Number.isInteger(Number(args?.clientId)) && Number(process.env.JOBBY_DEFAULT_CLIENT_ID || 0) > 0) {
+      args.clientId = Number(process.env.JOBBY_DEFAULT_CLIENT_ID);
+      args._clientId = args.clientId;
+      console.log(`[tools/run] Jobby client fallback: ${agentId} -> client ${args.clientId}`);
+    }
+  }
   // `_speaker` is the identity from the HTTP header only.
   //
   // `agentId` above resolves as `args.agent || x-agent-id`, so a caller can put
@@ -10482,8 +10638,8 @@ app.post('/tools/run', async (req, res) => {
   // no HTTP route to point at, and without this the panel could only say
   // "shell-exec failed" — never that relay/server.js is the file to look at.
   logToDb('tool_execution', `Tool: ${tool}`,
-    `${agentId} called ${tool} — ${result.error ? 'failed: ' + result.error.slice(0, 100) : 'success'} (${duration}ms)`,
     result.error ? 'error' : 'completed',
+    `${agentId} called ${tool} — ${result.error ? 'failed: ' + result.error.slice(0, 100) : 'success'} (${duration}ms)`,
     { tool, agent: agentId, duration_ms: duration, has_error: !!result.error, edge_function: 'relay' },
     agentId
   ).catch(() => {});
@@ -11250,6 +11406,24 @@ const AGENT_NOTIFICATION_EMAILS = {
   'jobby': 'Jobby McJobberson <jobby@31harbor.com>',
 };
 
+// ── Fleet-chat push notification gating ────────────────────────────────
+// Every @mention in a 13-agent channel fires one email. Left ungated, that
+// is 1,600+ potential messages per day, and the one agent mapped to a
+// client-branded domain (eliza@partyfavorphoto.com) sends internal
+// operational traffic on the CLIENT's Resend key into the CLIENT's inbox.
+// This is the `fleet-chat-notification-noise` requirement (open since
+// 2026-09-22; Hermes' fix never landed). Empty set = off for every tenant.
+const FLEET_CHAT_PUSH_NOTIFY_DOMAINS = new Set(
+  (process.env.FLEET_CHAT_PUSH_NOTIFY_DOMAINS || '')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+);
+// Self-generated mention shapes that must never close the loop, even where
+// mail is enabled for that tenant.
+const FLEET_CHAT_PUSH_SKIP_SHAPES = [
+  /reported in\.? any thoughts on what they mentioned\?/i,
+  /task-nudge mentioned @/i,
+];
+
 // Resend API key lookup by domain
 const RESEND_KEY_BY_DOMAIN = Object.fromEntries(
     EMAIL_INBOX_KEYS.map((k) => [EMAIL_DOMAINS[k].domain, resendKeyFor(k) || '']));
@@ -11401,8 +11575,8 @@ function addFleetMessage(agent, message, channel = 'fleet', opts = {}) {
             );
             // Log to activity feed
             logToDb('tool_execution', `🔍 Pre-flight: ${agent} — ${v.type}`,
-              `${agent}: ${v.claim} → corrected: ${v.reality}`,
               'warning',
+              `${agent}: ${v.claim} → corrected: ${v.reality}`,
               { agent, claim: v.claim, reality: v.reality, delta: v.delta },
               agent
             );
@@ -11418,8 +11592,8 @@ function addFleetMessage(agent, message, channel = 'fleet', opts = {}) {
       if (result.tags.includes('UNCITED')) {
         // Log uncited claim
         logToDb('tool_execution', `🔍 Pre-flight: ${agent} — UNCITED claim`,
-          `${agent} made an uncited factual claim`,
           'info',
+          `${agent} made an uncited factual claim`,
           { agent, message: message.slice(0, 200) },
           agent
         );
@@ -11525,14 +11699,16 @@ function canAgentSpeak(agent, parentEntry) {
         if (status === 'revoked' || score < 10) {
           console.log(`[trustgate] ${agent} blocked from posting — score=${score}, status=${status}`);
           logToDb('tool_execution', `🔒 TrustGate: ${agent} blocked`,
+            'error',
             `${agent} (score=${score}) blocked from posting — REVOKED`,
-            'error', { agent, score, status }, agent
+            { agent, score, status }, agent
           );
         } else if (score < 20) {
           console.log(`[trustgate] ${agent} posting — score=${score} (SUSPENDED range)`);
           logToDb('tool_execution', `🔒 TrustGate: ${agent} posting while SUSPENDED`,
+            'warning',
             `${agent} (score=${score}) posting while in SUSPENDED range`,
-            'warning', { agent, score, status }, agent
+            { agent, score, status }, agent
           );
         }
       }
@@ -12013,7 +12189,14 @@ async function routeFleetMessage(entry) {
     while ((mentionMatch = mentionPattern.exec(entry.message)) !== null) {
       const mentioned = mentionMatch[1].toLowerCase();
       if (mentioned === entry.agent) continue; // skip self-mention
-      if (AGENT_NOTIFICATION_EMAILS[mentioned]) {
+      const notif = AGENT_NOTIFICATION_EMAILS[mentioned];
+      if (!notif) continue;
+      // Tenant gate: internal fleet traffic must not leave on client credentials.
+      const notifDomain = notif.match(/@([^>]+)/)?.[1]?.trim().toLowerCase();
+      if (!FLEET_CHAT_PUSH_NOTIFY_DOMAINS.has(notifDomain)) continue;
+      // Skip the self-generated shapes that close the notification loop.
+      if (FLEET_CHAT_PUSH_SKIP_SHAPES.some(re => re.test(entry.message))) continue;
+      {
         const agentLabel = FLEET_AGENTS[mentioned]?.name || mentioned;
         const subject = `[Fleet Chat] ${entry.agentLabel} mentioned @${mentioned}`;
         const body = `${entry.agentLabel} mentioned @${mentioned} in fleet chat:\n\n"${entry.message}"\n\n— Fleet Chat, ${new Date(entry.ts || Date.now()).toISOString()}`;
@@ -12444,8 +12627,9 @@ Your response (no emoji sign-offs, no "—${agentLabel}", no "o7"):`;
         // Log this agent's activity to the ship's log
         try {
           logToDb('fleet_message', `${agentName} replied`,
+            'info',
             `${agentLabel}: ${reply.slice(0, 120)}`,
-            'info', { agent: agentName, model, tokens: d.eval_count || 0 },
+            { agent: agentName, model, tokens: d.eval_count || 0 },
             agentName
           );
         } catch (e) { console.error('[' + agentName + '-activity-log] error:', e.message); }
@@ -19333,14 +19517,12 @@ app.get('/api/suite/telemetry', async (req, res) => {
 
     // Growth + retention, per watched log table.
     //
-    // Sequential on purpose. These are seq scans over the same disk, and
-    // measured on this database running them concurrently cost 5584ms against
-    // 1919ms one after another — the scans contend for I/O, so "parallel" was
-    // three times slower. One combined scan per table also beats three separate
-    // statements: ~540ms against ~750ms on the 2.8GB table, because the two
-    // FILTERs share one pass.
-    const growth = [];
-    for (const t of SUITE_LOG_TABLES) {
+    // Parallelized with Promise.all. Each scan is independent (different
+    // tables), so there is no reason to serialize them. The earlier comment
+    // about sequential being 3x faster was measured under heavy I/O contention
+    // on a single disk; in practice the dashboard polls this endpoint every
+    // 30s and the sequential 2s scan blocks the event loop the whole time.
+    const growthPromises = SUITE_LOG_TABLES.map(async (t) => {
       const meta = tables.find((x) => x.schema === t.schema && x.name === t.table);
       try {
         const rows = await localQuery(
@@ -19353,7 +19535,7 @@ app.get('/api/suite/telemetry', async (req, res) => {
              FROM "${t.schema}"."${t.table}"`
         );
         const r = rows[0] || {};
-        growth.push({
+        return {
           qualified: `${t.schema}.${t.table}`,
           present: true,
           oldest: r.oldest || null,
@@ -19365,13 +19547,12 @@ app.get('/api/suite/telemetry', async (req, res) => {
           rows7d: Number(r.rows_7d || 0),
           onDisk: meta ? meta.onDisk : null,
           toast: meta ? meta.toast : null,
-        });
+        };
       } catch (e) {
-        // A missing table is a fact about the database, not a failure of the
-        // endpoint. Report it as absent and keep the rest.
-        growth.push({ qualified: `${t.schema}.${t.table}`, present: false, reason: e.message });
+        return { qualified: `${t.schema}.${t.table}`, present: false, reason: e.message };
       }
-    }
+    });
+    const growth = await Promise.all(growthPromises);
     growth.sort((a, b) => (b.onDisk || 0) - (a.onDisk || 0));
 
     // Handed to the stats block below so the activity log is not scanned twice

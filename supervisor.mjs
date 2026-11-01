@@ -175,6 +175,11 @@ const SERVICE_DEFS = [
       // disagreeing and every connection was refused.
       OPENCODE_PASSWORD: RELAY_ENV.OPENCODE_SERVER_PASSWORD || process.env.OPENCODE_PASSWORD || '',
       OPENCODE_SERVER_PASSWORD: RELAY_ENV.OPENCODE_SERVER_PASSWORD || process.env.OPENCODE_SERVER_PASSWORD || '',
+      // Cascade / free-model fallback — same as relay/suite (OpenRouter + local ollama)
+      OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || RELAY_ENV.OPENROUTER_API_KEY || '',
+      OPENROUTER_MODELS: (process.env.OPENROUTER_MODELS || RELAY_ENV.OPENROUTER_MODELS || 'minimax/minimax-m3.1-flash,liquid/lfm-2.5-2.6b:free,apodex/apodex-1.1-mini:free,google/gemma-3-4b-it:free,thinkingmachines/inkling-small:free,nvidia/nemotron-3.5-lightning:free').toString(),
+      OLLAMA_URL: process.env.OLLAMA_URL || RELAY_ENV.OLLAMA_URL || 'http://localhost:11434',
+      OLLAMA_MODEL: process.env.OLLAMA_MODEL || RELAY_ENV.OLLAMA_MODEL || 'minimax-m3.1-flash',
     },
     healthCheck: () => checkHttp('http://127.0.0.1:4096/health', 2000),
     startupGraceMs: 10000,
@@ -266,7 +271,7 @@ const SERVICE_DEFS = [
     healthUrl: null,
     healthCheck: null,
     tcpPort: 5432,          // TCP port for health checking
-    startupGraceMs: 12000,
+    startupGraceMs: 2000,
     dependsOn: [],
   },
   {
@@ -291,6 +296,18 @@ const SERVICE_DEFS = [
     healthCheck: () => true,  // any HTTP response = alive
     startupGraceMs: 10000,
     dependsOn: [],
+  },
+  // ── Tunnel & Zone Agent ───────────────────────────────────────
+  {
+    name: 'cloudflared-agent',
+    cmd: 'node',
+    args: ['relay/cloudflared-agent.mjs'],
+    cwd: ROOT,
+    healthUrl: 'http://127.0.0.1:20243/metrics',
+    tcpPort: 20243,
+    startupGraceMs: 15000,
+    maxRestartsPerHour: 3,
+    dependsOn: ['tunnel'],
   },
   {
     name: 'tunnel',
@@ -473,11 +490,86 @@ const SERVICE_DEFS = [
       maxFailures: 2,
     dependsOn: [],
   },
+  {
+    // Atreyus AI Takeoff — backend (FastAPI + contour detector on :8000)
+    // and frontend (Vite on :5174, published as atreyus.mobilemonero.com
+    // through the tunnel's `atreyus` ingress).
+    //
+    // Two services, not one wrapper script: start.ps1 spawned two children
+    // into one supervised process, so killing one half orphaned the other and
+    // the health check could only ever see one of them. The supervisor's model
+    // is one long-lived child per service name (the same reason resume-server
+    // runs resolvePython() and never the `py` launcher).
+    //
+    // The backend is python.exe, NOT pythonw.exe. Under pythonw there is no
+    // stdout at all, and one `print(..., flush=True)` in the request path ends
+    // the response as a bare 500 — observed as "AI backend unavailable (backend
+    // 500)" while the same endpoint answered fine when piped. The supervisor's
+    // stdio redirect to a log file also needs a real handle.
+    name: 'atreyus-backend',
+    cmd: resolvePython(),
+    args: ['main.py'],
+    cwd: join(ROOT, 'atreyus', 'backend_ai'),
+    healthUrl: 'http://127.0.0.1:8000/health',
+    healthCheck: null,
+    tcpPort: 8000,
+    // First cold start compiles nothing but does import cv2/fastapi — tens of
+    // seconds is normal on this machine's disk.
+    startupGraceMs: 60000,
+    dependsOn: [],
+  },
+  {
+    // Atreyus AI Takeoff — frontend. Vite dev server on :5174.
+    // `--host 0.0.0.0` matches vite.config.mjs so the tunnel's Host header
+    // (atreyus.mobilemonero.com, in allowedHosts) is not rejected;
+    // binding only to 127.0.0.1 would still work for the tunnel, which connects
+    // from localhost, but the config already asks for the wider bind.
+    name: 'atreyus-frontend',
+    cmd: 'cmd',
+    args: ['/c', 'npm run dev'],
+    cwd: join(ROOT, 'atreyus'),
+    healthUrl: 'http://127.0.0.1:5174/',
+    healthCheck: () => true,  // any HTTP response = alive
+    tcpPort: 5174,
+    startupGraceMs: 30000,
+    dependsOn: ['atreyus-backend'],
+  },
+  {
+    name: 'atreyus-backend',
+    cmd: 'python',
+    args: ['atreyus/backend_ai/main.py'],
+    cwd: ROOT,
+    healthUrl: 'http://127.0.0.1:8001/health',
+    tcpPort: 8001,
+    startupGraceMs: 10000,
+    dependsOn: [],
+  },
+  {
+    name: 'atreyus-frontend',
+    cmd: 'node',
+    args: ['node_modules/vite/bin/vite.js', '--port', '5174', '--host', '127.0.0.1'],
+    cwd: join(ROOT, 'atreyus'),
+    healthUrl: 'http://127.0.0.1:5174/',
+    tcpPort: 5174,
+    startupGraceMs: 15000,
+    dependsOn: [],
+  },
+  {
+    name: 'atreyus-proxy',
+    cmd: 'node',
+    args: ['relay/atreyus-proxy.mjs'],
+    cwd: ROOT,
+    tcpPort: 8000,
+    startupGraceMs: 2000,
+    dependsOn: ['atreyus-backend'],
+  },
 ];
 
 // graytech is independent of every other service - it needs no database and no
 // tunnel to answer on :8090 - so it starts last and blocks nothing.
-const START_ORDER = ['pg', 'local-sb', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'designer', 'alice', 'cron-engine-v2', 'campaign-scheduler', 'opencode', 'opencode-agent', 'browser-view', 'dsh', 'resume-server', 'graytech'];
+// atreyus-frontend depends on atreyus-backend, so both go after 'tunnel' as
+// leaves; the frontend must come after the backend in the order.
+const START_ORDER = ['pg', 'local-sb', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'designer', 'alice', 'cron-engine-v2', 'security', 'verifier', 'campaign-scheduler', 'opencode', 'opencode-agent', 'browser-view', 'dsh', 'resume-server', 'graytech', 'atreyus-backend', 'atreyus-frontend'];
 
 // ── State ────────────────────────────────────────────────────────────
 const state = {};
