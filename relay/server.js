@@ -10014,13 +10014,6 @@ const CURATED_TOOL_SCHEMAS = {
     },
     required: ['message'],
   },
-  'clerk-chat': {
-    type: 'object',
-    properties: {
-      message: { type: 'string', description: 'Operator message to route through the deterministic intent table.' },
-    },
-    required: ['message'],
-  },
   'shell-exec': {
     type: 'object',
     properties: {
@@ -10318,7 +10311,6 @@ function getToolDescription(name) {
     'aside-close': 'Close the aside pane on all open XMRT Nexus dashboards.',
     'fleet-announce': 'Speak to the operator OUT LOUD. Escalation tool: makes the operator\'s Nexus dashboard read your message aloud through the browser\'s free built-in speech synthesis, so a human who is not watching the board still hears it. Use it when you have found something you cannot fix alone and it needs a person — a credential you cannot obtain, a decision only they can make, a service down with no safe next step, a request they explicitly asked to be told about. Do NOT use it for progress notes or routine updates: it is rate-limited (once per 10 min per agent, 4 per 30 min for the whole fleet, 2 urgent per hour) and every announcement is on their speakers in their room. Args: message (what they need to know), speech (optional shorter aloud phrasing), urgency ("normal" | "urgent"). Returns { success, spoken, suppressed, reason, detail } — when the operator has switched the voice off you get { operatorMuted: true }, which is final: put the information in fleet chat instead and do not retry.',
     'fleet-announce-status': 'Read-only: whether the operator\'s outside voice is currently armed or switched off, how many announcements have been spoken or suppressed recently, and the rate limits in force. Cheap; check before escalating.',
-    'clerk-chat': 'Office Clerk — deterministic offline responder. Args: message. Matches the message against a wired intent table (status, resources, tasks, external, mining, ollama, remember/recall, aside open/close, restart) and executes the mapped relay tool with no AI involved. Returns { text, provenance, intent, tool }. Use as a zero-cost first responder or offline fallback.',
     'github-post': 'Post a comment on a GitHub issue',
     'elze-templates': 'Elze Contract Suite template & clause retrieval. Actions: templates (all with metadata), template {id} (single + ordered clauses), clauses {template_id}, search {q, category}. Filters: category, jurisdiction. Reads canonical DB (lease_templates / clause_definitions). Use to fetch template structure for the lease writer.',
     'elze-learnings': 'Elze AI-Learnings. Capture accept/reject/edit feedback (action: feedback with attorney_id, matter_id, clause_id, playbook_rule_id, action, edited_text) and query the learning dashboard (action: dashboard, by_attorney, preferences). Roll up per-rule acceptance and infer per-attorney preferences. Use to track how the firm learns over time.',
@@ -19340,6 +19332,12 @@ const SUITE_LOG_TABLES = [
 const SUITE_GRAPH_CACHE_TTL_MS = 60_000;
 let _suiteGraphCache = { at: 0, data: null };
 
+// ── Telemetry cache (30s TTL) — reduces /api/suite/telemetry from ~10.9s
+// to <2s by avoiding repeated 2.8GB activity-log count, table-scan, and
+// workflow registry queries on every dashboard poll.
+const SUITE_TELEMETRY_TTL_MS = 30_000;
+let _suiteTelemetryCache = { at: 0, data: null };
+
 async function fetchGalaxyCached() {
   const now = Date.now();
   if (_suiteGraphCache.data && now - _suiteGraphCache.at < SUITE_GRAPH_CACHE_TTL_MS) {
@@ -19431,6 +19429,17 @@ app.get('/api/entity-resolver/metrics', (req, res) => {
 });
 
 app.get('/api/suite/telemetry', async (req, res) => {
+  // ── Telemetry cache (30s TTL) — reduces /api/suite/telemetry from ~10.9s
+  // to <2s by reusing the previous poll's data instead of re-scanning the
+  // 2.8GB activity log, running table counts, and regenerating the graph.
+  const now = Date.now();
+  if (_suiteTelemetryCache.data && now - _suiteTelemetryCache.at < SUITE_TELEMETRY_TTL_MS) {
+    const cached = _suiteTelemetryCache.data;
+    cached.cached = true;
+    cached.cacheAgeMs = now - _suiteTelemetryCache.at;
+    res.json(cached);
+    return;
+  }
   const startedAt = Date.now();
   const warnings = [];
   // Set by the storage block so the stats block can reuse the activity-log
@@ -19739,7 +19748,7 @@ app.get('/api/suite/telemetry', async (req, res) => {
     warnings.push(`graph: ${e.message}`);
   }
 
-  res.json({
+  const payload = {
     generatedAt: new Date().toISOString(),
     tenant: { node: SUITE_TENANT_NODE, host: SUITE_TENANT_HOST },
     storage,
@@ -19748,7 +19757,11 @@ app.get('/api/suite/telemetry', async (req, res) => {
     graph,
     warnings,
     tookMs: Date.now() - startedAt,
-  });
+  };
+  // Store in telemetry cache so the next poll within 30s reuses this build
+  // instead of re-scanning the 2.8GB activity log again.
+  _suiteTelemetryCache = { at: Date.now(), data: payload };
+  res.json(payload);
 });
 
 
