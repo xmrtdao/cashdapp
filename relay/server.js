@@ -3996,19 +3996,6 @@ const toolHandlers = {
     } catch (err) { return { success: false, error: err.message }; }
   },
 
-  'ef:vertex-ai': async (args) => {
-    const action = args?.action || 'chat';
-    try {
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/vertex-ai-chat`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(args),
-        signal: AbortSignal.timeout(60000),
-      });
-      return { success: true, status: res.status, data: await res.json() };
-    } catch (err) { return { success: false, error: err.message }; }
-  },
-
   'ef:paragraph-publish': async (args) => {
     const title = args?.title;
     const content = args?.content || args?.body;
