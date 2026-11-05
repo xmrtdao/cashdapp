@@ -10205,7 +10205,17 @@ const CURATED_TOOL_SCHEMAS = {
   },
   'fleet_memory_write': {
     type: 'object',
-    properties: { agent: { type: 'string' }, memory: { type: 'string' }, key: { type: 'string' } },
+    properties: {
+      agent: { type: 'string', description: 'Agent identifier (alias: agent_id)' },
+      key: { type: 'string', description: 'Memory title (aliases: title; falls back to first line of memory)' },
+      memory: { type: 'string', description: 'Memory body text (alias: body)' },
+      memory_type: { type: 'string', description: 'observation | decision | context | reflection (default observation)' },
+      scope: { type: 'string', description: 'Memory scope (default fleet)' },
+      agent_id: { type: 'string', description: 'Alias for agent' },
+      title: { type: 'string', description: 'Alias for key' },
+      body: { type: 'string', description: 'Alias for memory' },
+      tags: { type: 'array', items: { type: 'string' }, description: 'Tags/references' },
+    },
     required: ['agent'],
   },
   'fleet_memory_read': {
@@ -10409,7 +10419,7 @@ function getToolDescription(name) {
     'suite_query': 'Query any local-sb REST table via PostgREST. Args: table (required), select, filters (object), order, limit. Read-only.',
     'suite_insert': 'Insert a row into a local-sb REST table. Args: table (required), row (object).',
     'suite_update': 'Update rows in a local-sb REST table. Args: table (required), row (object), filters (object).',
-    'fleet_memory_write': 'Write a durable memory for an agent. Args: agent, key/memory, tags, metadata. Use to persist what should survive a restart.',
+    'fleet_memory_write': 'Write a durable memory for an agent. Args: agent, memory (body text), key (optional title; defaults to first line of memory), memory_type, scope, tags. agent_id/title/body are accepted as aliases of agent/key/memory. Use to persist what should survive a restart.',
     'fleet_memory_read': 'Read durable memories for an agent. Args: agent, key, limit.',
     'inbox_messages': 'Read the shared agent inbox. Args: agent, type (email/sms), is_read, limit.',
     'inbox_write': 'Write to the shared agent inbox. Args: agent, message, type, metadata.',

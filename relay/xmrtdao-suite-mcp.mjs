@@ -220,29 +220,54 @@ const TOOLS = {
     inputSchema: {
       type: 'object',
       properties: {
-        agent_id:    { type: 'string', description: 'Agent identifier' },
+        agent_id:    { type: 'string', description: 'Agent identifier (alias: agent)' },
+        agent:       { type: 'string', description: 'Alias for agent_id — the curated catalog advertises this shape' },
         agent_role:  { type: 'string', description: 'Agent role (default: observer)' },
-        memory_type: { type: 'string', description: 'Memory type (e.g., observation, decision, context, reflection)' },
+        memory_type: { type: 'string', description: 'Memory type (e.g., observation, decision, context, reflection). Default: observation' },
         scope:       { type: 'string', description: 'Memory scope (default: fleet)' },
-        title:       { type: 'string', description: 'Short title' },
-        body:        { type: 'string', description: 'Memory body text' },
-        payload:     { type: 'object', description: 'Structured payload (default: {})' },
+        title:       { type: 'string', description: 'Short title (alias: key; falls back to first line of memory)' },
+        key:         { type: 'string', description: 'Alias for title' },
+        body:        { type: 'string', description: 'Memory body text (alias: memory)' },
+        memory:      { type: 'string', description: 'Alias for body — used by the curated (agent, key, memory) shape' },
+        payload:     { type: 'object', description: 'Structured payload (aliases: metadata). Default: {}' },
         confidence:  { type: 'number', description: 'Confidence 0-1 (default: 1.0)' },
         refs:        { type: 'array', items: {}, description: 'References array (default: [])' },
+        tags:        { type: 'array', items: { type: 'string' }, description: 'Alias for refs' },
         ttl_at:      { type: 'string', description: 'Optional TTL timestamp (ISO-8601)' },
       },
       required: ['agent_id', 'memory_type', 'title', 'body'],
     },
     handler: async (args) => {
-      const { agent_id, agent_role = 'observer', memory_type, scope = 'fleet',
-              title, body, payload = {}, confidence = 1.0, refs = [], ttl_at } = args;
+      // Alias tolerance (2026-11-05): the curated catalog advertises this tool
+      // as (agent, key, memory) while app.fleet_memory needs (agent_id, title,
+      // body). Agents following the catalog sent `agent` and the insert hit the
+      // NOT NULL agent_id constraint — the "fleet_memory_write NULL agent_id"
+      // defect reported on fleet chat for days. Both shapes must work.
+      const agent_id = args.agent_id || args.agent;
+      const agent_role = args.agent_role || 'observer';
+      const memory_type = args.memory_type || 'observation';
+      const scope = args.scope || 'fleet';
+      const body = args.body || args.memory;
+      let title = args.title || args.key;
+      if (!title && body) title = String(body).split(/\r?\n/)[0].slice(0, 80);
+      const payload = args.payload != null ? args.payload : (args.metadata != null ? args.metadata : {});
+      const refs = Array.isArray(args.refs) ? args.refs : (Array.isArray(args.tags) ? args.tags : []);
+      const confidence = typeof args.confidence === 'number' ? args.confidence : 1.0;
+      const ttl_at = args.ttl_at || null;
+
+      if (!agent_id) {
+        return { success: false, error: 'fleet_memory_write: an agent is required (agent or agent_id)' };
+      }
+      if (!title || !body) {
+        return { success: false, error: 'fleet_memory_write: memory text is required (memory, body, or key+memory)' };
+      }
       const rows = await dbQuery(
         `INSERT INTO app.fleet_memory
            (agent_id, agent_role, memory_type, scope, title, body, payload, refs, confidence, ttl_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          RETURNING id, agent_id, title, created_at`,
         [agent_id, agent_role, memory_type, scope, title, body,
-         JSON.stringify(payload), JSON.stringify(refs), confidence, ttl_at || null]
+         JSON.stringify(payload), JSON.stringify(refs), confidence, ttl_at]
       );
       return { success: true, memory: rows[0] };
     },
@@ -257,14 +282,16 @@ const TOOLS = {
     inputSchema: {
       type: 'object',
       properties: {
-        agent_id:    { type: 'string', description: 'Filter by agent_id' },
+        agent_id:    { type: 'string', description: 'Filter by agent_id (alias: agent)' },
+        agent:       { type: 'string', description: 'Alias for agent_id' },
         scope:       { type: 'string', description: 'Filter by scope (e.g., fleet, project)' },
         memory_type: { type: 'string', description: 'Filter by memory_type' },
         limit:       { type: 'number', description: 'Max rows (default 50, max 200)' },
       },
     },
     handler: async (args) => {
-      const { agent_id, scope, memory_type, limit = 50 } = args;
+      const agent_id = args.agent_id || args.agent;
+      const { scope, memory_type, limit = 50 } = args;
       const rowLimit = Math.min(limit, 200);
       let sql = 'SELECT id, agent_id, agent_role, memory_type, scope, title, body, payload, refs, confidence, created_at, updated_at FROM app.fleet_memory WHERE 1=1';
       const params = [];
