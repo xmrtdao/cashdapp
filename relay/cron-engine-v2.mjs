@@ -21,7 +21,7 @@
 import pg from 'pg';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, renameSync, unlinkSync } from 'node:fs';
 const { Client, Pool } = pg;
 // Use the shared connection pool from relay/lib/db.mjs to prevent
 // "too many clients" — was creating a separate pool here (max 5) that
@@ -57,6 +57,13 @@ const PG_URL = process.env.LOCAL_DATABASE_URL
 // env var if the suite runtime comes back.
 const RUNTIME_URL = process.env.LOCAL_RUNTIME_URL || 'http://127.0.0.1:54321';
 
+// How long to wait before the one retry a connectivity failure gets.
+//
+// Long enough to cover the relay coming back, short enough not to hold the
+// tick hostage: the tick runs jobs one after another, so a long wait here is a
+// long wait for every job behind this one.
+const TRANSIENT_RETRY_DELAY_MS = 8_000;
+
 // The relay's own API key, for the calls this engine makes back into the
 // relay (the python-exec tool below). It was a literal in this file, which put
 // a live credential in every copy of the source and in git history.
@@ -66,35 +73,129 @@ const RUNTIME_URL = process.env.LOCAL_RUNTIME_URL || 'http://127.0.0.1:54321';
 // here.
 const RELAY_API_KEY = process.env.RELAY_API_KEY || '';
 
+// ── Log rotation ────────────────────────────────────────────
+//
+// The log was 125MB of append-only text and still growing: the daemon writes
+// about forty lines every thirty seconds, forever, with nothing ever removing
+// them. "Review cron-engine-v2 logs" is the instruction half the fleet keeps
+// receiving, and a 125MB file is not a file anybody reviews - it is a file
+// people grep once and give up on.
+//
+// Three generations are kept. The oldest is dropped, so the disk cost is
+// bounded at roughly four times the threshold however long the daemon runs.
+const LOG_MAX_BYTES = 20 * 1024 * 1024;
+const LOG_GENERATIONS = 3;
+
+function rotateLogIfNeeded() {
+  try {
+    const st = statSync(LOG_FILE);
+    if (!st || st.size < LOG_MAX_BYTES) return;
+    for (let i = LOG_GENERATIONS; i >= 1; i--) {
+      const from = `${LOG_FILE}.${i}`;
+      if (!existsSync(from)) continue;
+      if (i === LOG_GENERATIONS) {
+        try { unlinkSync(from); } catch {}
+      } else {
+        try { renameSync(from, `${LOG_FILE}.${i + 1}`); } catch {}
+      }
+    }
+    renameSync(LOG_FILE, `${LOG_FILE}.1`);
+  } catch {
+    // No log file yet, or the filesystem said no. Rotation is housekeeping;
+    // failing to rotate must never stop the daemon from running a job.
+  }
+}
+
 function log(msg, level = 'INFO') {
   const line = `[${new Date().toISOString()}] [${level}] ${msg}`;
   console.log(line);
+  try { rotateLogIfNeeded(); } catch {}
   try { writeFileSync(LOG_FILE, line + '\n', { flag: 'a' }); } catch {}
 }
 
-function parseCron(expr) {
-  const parts = expr.trim().split(/\s+/);
+// ── Cron scheduling ───────────────────────────────────────────────────────
+//
+// A job is due when its schedule matched ANY minute since it last ran - not
+// only when it matches the minute the engine happens to look at it.
+//
+// This distinction is the difference between a scheduler and a coin toss.
+//
+// The engine walks the job list in order, and that list is the 37 cron.job
+// rows first, then the jobs from cron-jobs.json. By the time it reaches the
+// later entries the tick is 30-100 seconds old (the tick runs jobs SERIALLY,
+// and several of them take 30-60 seconds), so the wall-clock minute has
+// MOVED PAST the minute those jobs are scheduled for. Asking such a job
+// only "does your schedule match right now?" skips it forever: the minute
+// it is evaluated in is never one of its own.
+//
+// That is not a hypothesis - it is what the estate measured.
+//
+//   learning-cycle, system-status, code-monitor-daemon, cron-proxy,
+//   fleet-chat-heartbeat, opportunity-scanner-fast, api-key-health-monitor,
+//   video-job-processor and the daily/weekly posts: ZERO executions since
+//   Oct 21, while every cron.job row ran at 94-100% of its schedule.
+//
+// Their silence read as "not scheduled", and the repair that followed (the
+// Oct 19 incident recorded in PIPELINE_PLAN.md) never touched them, because
+// they were not failing. They were simply never reached at the right minute.
+//
+// Catch-up semantics fixes both halves of the problem: a slot that passed
+// while the engine was busy, behind a 60-second edge call, or during a
+// restart runs exactly once when the engine next looks - never zero times,
+// and never twice.
+
+const CRON_MAX_CATCHUP_DAYS = 400;
+
+function cronFieldMatches(field, value) {
+  if (field === '*') return true;
+  if (field.startsWith('*/')) return value % parseInt(field.slice(2), 10) === 0;
+  if (field.includes(',')) return field.split(',').map(Number).includes(value);
+  if (field.includes('-')) {
+    const [lo, hi] = field.split('-').map(Number);
+    return value >= lo && value <= hi;
+  }
+  return parseInt(field, 10) === value;
+}
+
+function cronFieldValues(field, lo, hi) {
+  const out = [];
+  for (let v = lo; v <= hi; v++) if (cronFieldMatches(field, v)) out.push(v);
+  return out;
+}
+
+/**
+ * Is `expr` due between sinceMs and nowMs?
+ *
+ * Walks the DAYS in the window (never every minute of it), and for each day
+ * that satisfies the day-of-month/month/day-of-week fields, checks the
+ * candidate hour/minute pairs against the window.
+ */
+function cronDueSince(expr, sinceMs, nowMs) {
+  const parts = String(expr || '').trim().split(/\s+/);
   if (parts.length !== 5) return { error: `Invalid cron: ${expr}` };
-  const now = new Date();
-  const minute = now.getMinutes();
-  const hour = now.getHours();
-  const day = now.getDate();
-  const month = now.getMonth() + 1;
-  const dow = now.getDay();
-  const match = (field, value) => {
-    if (field === '*') return true;
-    if (field.startsWith('*/')) return value % parseInt(field.slice(2)) === 0;
-    if (field.includes(',')) return field.split(',').map(Number).includes(value);
-    if (field.includes('-')) {
-      const [lo, hi] = field.split('-').map(Number);
-      return value >= lo && value <= hi;
+  const minutes = cronFieldValues(parts[0], 0, 59);
+  const hours = cronFieldValues(parts[1], 0, 23);
+  if (!minutes.length || !hours.length) return { error: `Invalid cron: ${expr}` };
+  const now = new Date(nowMs);
+  const earliest = new Date(Math.max(sinceMs, nowMs - CRON_MAX_CATCHUP_DAYS * 86400000));
+  const day = new Date(earliest.getFullYear(), earliest.getMonth(), earliest.getDate());
+  const lastDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  while (day <= lastDay) {
+    if (cronFieldMatches(parts[2], day.getDate())
+      && cronFieldMatches(parts[3], day.getMonth() + 1)
+      && cronFieldMatches(parts[4], day.getDay())) {
+      for (const h of hours) {
+        for (const m of minutes) {
+          const t = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, m, 0, 0);
+          // Strictly after the last run: the slot the job already served
+          // (and only that slot) must not be served twice.
+          if (t.getTime() > sinceMs && t.getTime() <= nowMs) return { due: true };
+        }
+      }
     }
-    return parseInt(field) === value;
-  };
-  return {
-    match: match(parts[0], minute) && match(parts[1], hour) &&
-           match(parts[2], day) && match(parts[3], month) && match(parts[4], dow)
-  };
+    day.setDate(day.getDate() + 1);
+  }
+  return { due: false };
 }
 
 // ── DB Activity Logger ──────────────────────────────────
@@ -121,6 +222,98 @@ async function logToDb(activityType, title, status, description, metadata = {}, 
 // plus the existing eliza_activity_log feed. This closes the
 // "write path gap" where cron jobs ran but nothing recorded them
 // in the dedicated log tables (they were stuck at 0 rows).
+
+/**
+ * The one sentence that says why a job failed.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ *
+ * A shell job that exits non-zero used to produce `FAIL: undefined` in the log
+ * and an EMPTY `error` column in cron_execution_log. The reason was in the
+ * child's stderr, which the runner captured and then threw away, because the
+ * failure branch of runShellCommand() returned `ok:false` and nothing else.
+ *
+ * That is not a cosmetic problem. It is the reason this task exists.
+ *
+ * The fleet reads cron_execution_log and posts the failures to the fleet board
+ * every thirty minutes; a shell failure arrived there as "relay-health-check
+ * failed 7x - no detail". The log said `FAIL: undefined`. The dashboard panel
+ * said `cron relay-health-check failed`. Nothing anywhere said WHY. Every
+ * agent that read any of those surfaces was told to go and investigate cron job
+ * errors with no error to investigate - and the fleet-chat task creator
+ * dutifully filed "Investigate cron job errors" again and again, from its own
+ * announcements, because the announcements mentioned cron and failure and
+ * nothing else.
+ *
+ * So: every failure gets a reason, in every place the failure is written.
+ * A failure with no recorded reason is a failure nobody can fix.
+ */
+export function jobErrorText(res) {
+  if (!res || res.ok) return '';
+  const parts = [];
+  const raw = String(res.error || '').trim();
+  if (raw) parts.push(raw);
+  if (!parts.length && res.stderr) {
+    const err = String(res.stderr).trim();
+    if (err) parts.push(err);
+  }
+  if (!parts.length && res.exitCode !== undefined && res.exitCode !== null) {
+    parts.push(`exit ${res.exitCode}`);
+  }
+  if (!parts.length) parts.push('failed with no reason reported by the job');
+  return parts.join(' | ').slice(0, 2000);
+}
+
+/**
+ * Write the audit row for one cron run, and do not lose it to a busy database.
+ *
+ * The shared pool gives every connection `statement_timeout = 10s`
+ * (relay/lib/db.mjs). Under load - and the database IS under load here, this
+ * runs once per job per tick - the insert can exceed that and be cancelled.
+ * When that happened the run simply vanished: no row, no error, and the
+ * operator's only evidence that anything went wrong was a WARN line in a log
+ * file nobody reads.
+ *
+ * So the write is retried once, and the failure is announced loudly if it
+ * still fails. The audit trail is the record; a record that drops itself under
+ * load is not a record.
+ */
+async function writeCronExecutionRow(pool, { job, jobName, fnName, platform, status, startedAt, finishedAt, durationMs, res, errorText }) {
+  const params = [
+    jobName,
+    fnName,
+    platform,
+    status,
+    startedAt ? startedAt.toISOString() : null,
+    finishedAt.toISOString(),
+    durationMs,
+    JSON.stringify({ jobId: job.id, type: job.type }),
+    res.ok ? JSON.stringify({ rows: res.rows ?? null, status: res.status ?? null }) : null,
+    res.ok ? null : errorText,
+    1,
+    'cron',
+  ];
+  const sql = `INSERT INTO public.cron_execution_log
+         (job_name, function_name, platform, status, started_at, finished_at, duration_ms, payload, result, error, run_count, owner_agent, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await pool.query(sql, params);
+      return true;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < 2) {
+        log(`logCronExecution: cron_execution_log write failed (${e.message}); retrying`, 'WARN');
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+  log(`logCronExecution: cron_execution_log write failed: ${lastErr?.message} — the run of "${jobName}" is NOT in the audit trail`, 'ERROR');
+  return false;
+}
+
 async function logCronExecution(job, res, startedAt) {
   const finishedAt = new Date();
   const durationMs = startedAt ? Math.max(0, finishedAt.getTime() - startedAt.getTime()) : null;
@@ -129,31 +322,19 @@ async function logCronExecution(job, res, startedAt) {
   const status = res.ok ? 'completed' : 'failed';
   const platform = job.type === 'edge' ? 'edge' : 'local';
   const pool = getSharedPool();
+  const errorText = jobErrorText(res);
 
   // 1. cron_execution_log — one row per run
-  try {
-    await pool.query(
-      `INSERT INTO public.cron_execution_log
-         (job_name, function_name, platform, status, started_at, finished_at, duration_ms, payload, result, error, run_count, owner_agent, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())`,
-      [
-        jobName,
-        fnName,
-        platform,
-        status,
-        startedAt ? startedAt.toISOString() : null,
-        finishedAt.toISOString(),
-        durationMs,
-        JSON.stringify({ jobId: job.id, type: job.type }),
-        res.ok ? JSON.stringify({ rows: res.rows ?? null, status: res.status ?? null }) : null,
-        res.ok ? null : String(res.error || '').slice(0, 2000),
-        1,
-        'cron',
-      ]
-    );
-  } catch (e) {
-    log(`logCronExecution: cron_execution_log write failed: ${e.message}`, 'WARN');
-  }
+  //
+  // The write is retried. It failed on 2026-10-22 with "canceling statement
+  // due to statement timeout" - the shared pool sets statement_timeout to
+  // 10s on every connection (relay/lib/db.mjs), and a busy database can miss
+  // that. When it fails, the run is not in the audit trail AT ALL: the row is
+  // the only record that the job ran and failed, and a failure that leaves no
+  // trace is a failure the operator is told about by nobody.
+  await writeCronExecutionRow(pool, {
+    job, jobName, fnName, platform, status, startedAt, finishedAt, durationMs, res, errorText,
+  });
 
   // 2. edge_function_logs — only for edge-function jobs
   if (job.type === 'edge' && fnName) {
@@ -165,7 +346,7 @@ async function logCronExecution(job, res, startedAt) {
         [
           fnName,
           'cron_execution',
-          res.ok ? `Cron job ${jobName} completed` : `Cron job ${jobName} failed: ${String(res.error || '').slice(0, 200)}`,
+          res.ok ? `Cron job ${jobName} completed` : `Cron job ${jobName} failed: ${errorText.slice(0, 200)}`,
           res.ok ? 'info' : 'error',
           finishedAt.toISOString(),
           durationMs,
@@ -201,8 +382,8 @@ async function logCronExecution(job, res, startedAt) {
     status,
     res.ok
       ? `${job.type}: ${jobName}`
-      : `Error: ${(res.error || '').slice(0, 200)}`,
-    { jobId: job.id, rows: res.rows, status: res.status, error: res.error },
+      : `Error: ${errorText.slice(0, 200)}`,
+    { jobId: job.id, rows: res.rows, status: res.status, error: res.ok ? null : errorText },
     'cron'
   );
 }
@@ -239,7 +420,26 @@ export function classifyCommand(cmd) {
 }
 
 export async function loadJobsFromPg() {
-  const c = await getSharedPool().connect();
+  let c = null;
+  try {
+    c = await getSharedPool().connect();
+  } catch (e) {
+    // THE DATABASE IS NOT THERE. THAT IS NOT A REASON TO DO NOTHING.
+    //
+    // connect() sits OUTSIDE the try/catch below, so a database that was down
+    // (or restarting) threw out of this function, out of tick(), and the whole
+    // tick was abandoned. Every job that was due in that minute - a health
+    // check, a heartbeat, a task escalation - did not run, and did not even
+    // log. The daemon said "tick error: connect ECONNREFUSED 127.0.0.1:5432"
+    // and then carried on thirty seconds later, as if a minute of work had
+    // been done.
+    //
+    // The JSON file is a complete enough source on its own - it holds 69 of
+    // the 106 jobs - so the tick keeps running from it, and the jobs that
+    // need the database will say so themselves.
+    log(`loadJobsFromPg: database unreachable (${e.message}); running from cron-jobs.json`, 'WARN');
+    return readJobsJson();
+  }
   try {
     // The supabase schema has cron jobs in cron.job (pg_cron). The
     // local PG might or might not have pg_cron installed; if not,
@@ -272,6 +472,13 @@ export async function loadJobsFromPg() {
       const tableIds = new Set(rows.map((r) => Number(r.id)));
       const jsonOnly = jsonJobs.filter((j) => !tableIds.has(Number(j.id)));
       const tableOnly = rows.filter((r) => !jsonJobs.some((j) => Number(j.id) === Number(r.id)));
+      // Jobs in BOTH registries are dropped from the JSON side: the table
+      // wins on the id. That is the intended de-duplication, but when the
+      // two entries are DIFFERENT jobs that share an id, the JSON one dies
+      // without a trace - which is what happened to
+      // XMRT-DAO-SeasonalScraper (json id 14), shadowed by the table's
+      // id 14 "memory-watchdog". It had never run once, and nothing said so.
+      const shadowed = jsonJobs.filter((j) => tableIds.has(Number(j.id)));
 
       rows = rows.concat(jsonOnly);
 
@@ -282,6 +489,17 @@ export async function loadJobsFromPg() {
       if (tableOnly.length) {
         log(`cron.job has ${tableOnly.length} job(s) not in cron-jobs.json ` +
           `(${tableOnly.slice(0, 8).map(r => `${r.id}:${r.name}`).join(',')}${tableOnly.length > 8 ? ',...' : ''})`);
+      }
+      for (const j of shadowed) {
+        // A disabled JSON entry that shadows a table row is a deliberate
+        // de-duplication, not a lost job. Only an ENABLED entry with a
+        // different name is a job that will never run.
+        if (j.disabled) continue;
+        const t = rows.find((r) => Number(r.id) === Number(j.id));
+        if (t && String(t.name) !== String(j.name)) {
+          log(`SHADOWED JOB: cron-jobs.json id ${j.id} "${j.name}" (${j.schedule}) ` +
+            `is NOT scheduled - cron.job id ${j.id} "${t.name}" owns that id`, 'WARN');
+        }
       }
     } catch (e) {
       // pg_cron not available; read from relay-data/cron-jobs.json
@@ -312,11 +530,53 @@ function readJobsJson() {
   const jobs = Array.isArray(parsed) ? parsed : (parsed.jobs || Object.values(parsed).flat());
   return jobs.map((j) => {
     const common = { id: j.id, schedule: j.schedule, name: j.name, disabled: j.disabled === true };
-    if (j.type === 'sql' && j.sql) return { ...common, type: 'sql', command: j.sql };
-    if (j.type === 'ef' && j.fn) return { ...common, type: 'edge', fn: j.fn, body: j.body || {} };
+    if (j.type === 'sql' && j.sql) return { ...common, type: 'sql', command: expandEnv(j.sql) };
+    if (j.type === 'ef' && j.fn) return { ...common, type: 'edge', fn: j.fn, body: expandEnv(j.body || {}) };
     if (j.type === 'local' && j.action) return { ...common, type: 'local', action: j.action };
     return j;
   });
+}
+
+/**
+ * Expand ${VAR} and ${VAR:-default} in a string, or in the strings of an
+ * object.
+ *
+ * WHY THIS EXISTS
+ * ---------------
+ *
+ * relay-data/cron-jobs.json is a LIVE CONFIGURATION FILE, and it used to
+ * hold the relay's own API key in plain text - because the only way to
+ * give a job a key was to type the key.
+ *
+ * A scanner that "fixed" that by writing "${RELAY_API_KEY}" into the file
+ * would have broken every job in it, because nothing expanded it: the cron
+ * engine would have sent the literal string "${RELAY_API_KEY}" as the API
+ * key and been refused.
+ *
+ * So the reader expands references FIRST, and the file can be rewritten
+ * afterwards. The order matters: teach the reader, then change the file.
+ *
+ * A reference that names a variable that is not set is left ALONE, rather
+ * than becoming an empty string. An empty key fails with a confusing
+ * "unauthorized", and a literal "${RELAY_API_KEY}" fails with an
+ * obviously wrong value, which is much easier to read.
+ */
+function expandEnv(value) {
+  if (typeof value === 'string') {
+    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (match, name, fallback) => {
+      const found = process.env[name];
+      if (found !== undefined && found !== '') return found;
+      if (fallback !== undefined) return fallback;
+      return match;
+    });
+  }
+  if (Array.isArray(value)) return value.map(expandEnv);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = expandEnv(v);
+    return out;
+  }
+  return value;
 }
 
 async function runSql(sql) {
@@ -476,6 +736,8 @@ async function runFleetChatTaskCreator() {
     const agentBResponse = msgs[agentBIdx];
     const combinedText = (agentAResponse.message + ' ' + agentBResponse.message).toLowerCase();
     let taskTitle = null, taskDescription = null, taskPriority = 3;
+    // Break self-reinforcing loop: skip if this is the engine's own announcement (line 739-759 cause)
+    if (combinedText.includes('Task created from fleet discussion: Investigate cron job errors')) return { ok: true, result: 'Self-reinforcing announcement skipped' };
     if (combinedText.includes('cron') && (combinedText.includes('error') || combinedText.includes('fail'))) {
       taskTitle = 'Investigate cron job errors'; taskDescription = 'Agents identified cron job issues in fleet chat. Review cron-engine-v2 logs and fix failing jobs.'; taskPriority = 1;
     } else if (combinedText.includes('service') && (combinedText.includes('down') || combinedText.includes('unreachable'))) {
@@ -534,7 +796,16 @@ async function runFleetChatTaskCreator() {
     if (createRes.status === 409) {
       return { ok: true, result: `Already tracked (raced): ${taskTitle}` };
     }
-    return { ok: false, result: `Failed to create task (HTTP ${createRes.status})` };
+    // A failure MUST carry its reason. This branch used to return
+    // {ok, result} with no error field, and jobErrorText() - which reads
+    // error / stderr / exitCode, never result - wrote the failure up as
+    // "failed with no reason reported by the job" (2026-11-06 16:47:25).
+    // The status code AND the response body are the reason; read both.
+    const createBody = await createRes.text().catch(() => '');
+    return {
+      ok: false,
+      error: `Failed to create task (HTTP ${createRes.status}): ${(createBody || '(empty response body)').slice(0, 200)}`,
+    };
   } catch (err) { return { ok: false, error: err.message }; }
 }
 
@@ -851,9 +1122,39 @@ async function runEdgeFunctionByName(fnName, body = {}) {
         : typeof parsed?.advance_summary?.rows === 'number'
           ? parsed.advance_summary.rows
           : null;
-    return { ok: r.ok, status: r.status, rows, preview: text.slice(0, 200) };
+    // A failure MUST carry its reason. The result used to be
+    // {ok, status, rows, preview} with no error field, and the reporter -
+    // which reports `error` - then wrote "failed with no reason reported by
+    // the job" for every non-2xx edge response. The actual cause
+    // ("Title and content (markdown or body) are required.") was in the
+    // preview and in the response body, and nowhere else. Two jobs have
+    // been failing on that blank line.
+    if (!r.ok) {
+      const detail = (typeof parsed?.error === 'string' && parsed.error)
+        || (typeof parsed?.message === 'string' && parsed.message)
+        || text.slice(0, 200).trim()
+        || '(empty response body)';
+      return {
+        ok: false,
+        status: r.status,
+        rows,
+        preview: text.slice(0, 200),
+        error: `edge function "${fnName}" returned HTTP ${r.status}: ${detail}`,
+      };
+    }
+    return { ok: true, status: r.status, rows, preview: text.slice(0, 200) };
   } catch (e) {
-    return { ok: false, error: e.message };
+    // An aborted edge call used to report "The operation was aborted due to
+    // timeout", which does not say WHICH function, or how long it was given.
+    // extract-knowledge timed out three times in three days and the log line
+    // could not tell it apart from any other timed-out call.
+    const aborted = e?.name === 'TimeoutError' || /abort/i.test(e?.message || '');
+    return {
+      ok: false,
+      error: aborted
+        ? `edge function "${fnName}" timed out after 60000ms (${target})`
+        : `edge function "${fnName}" failed: ${e?.message || e}`,
+    };
   }
 }
 
@@ -907,7 +1208,68 @@ async function runPythonJob(code) {
 // 'close' event (all stdio drained + handle settled) and always clear the
 // timer before resolving, so a timer kill can never race a closing handle.
 import { spawn } from 'node:child_process';
-async function runShellCommand(command, { timeoutMs = 120_000, cwd = __dirname } = {}) {
+
+/**
+ * Turn a non-zero shell exit into a sentence somebody can act on.
+ *
+ * The exit code is the fact; the child's stderr is the reason. Both are
+ * wanted: "exit 1" alone says the job broke and nothing about why, and the
+ * stderr alone loses the fact that it was this job that broke.
+ *
+ * The TAIL of stderr is used, not the head. These scripts print their reason
+ * last ("[heartbeat] FAIL: fetch failed"), and a job that printed a stack
+ * trace first would otherwise have its actual message cut off.
+ */
+export function describeShellFailure(code, signal, stderr = '', stdout = '') {
+  const text = String(stderr || '').trim() || String(stdout || '').trim();
+  const how = code === null || code === undefined
+    ? (signal ? `killed by ${signal}` : 'killed')
+    : `exit ${code}`;
+  const tail = text ? `: ${text.slice(-300)}` : ' (the job printed nothing)';
+  return `shell command ${how}${tail}`;
+}
+
+/**
+ * Is this failure worth trying again?
+ *
+ * The relay is a dependency of most of the shell jobs - they fetch
+ * http://127.0.0.1:8080 to do their work - and the relay stops answering for
+ * a few seconds at a time when it is busy. On 2026-10-22 that produced
+ * "relay-health-check failed", "fleet-chat-productivity-agent failed",
+ * "escalate-waiting-tasks failed" and "fleet-summary-announcer failed" within
+ * a minute of each other, four failures for one cause, none of them the fault
+ * of the four jobs.
+ *
+ * A connectivity failure is worth one more attempt, because the job never got
+ * to do its work at all. A job that ran and produced a wrong answer is not:
+ * re-running that is how a loop starts.
+ *
+ * The patterns are the ones Node and undici actually print for "the peer was
+ * not there", plus the phrase these scripts print when their fetch times out.
+ */
+const TRANSIENT_PATTERNS = [
+  'econnrefused',
+  'econnreset',
+  'ehostunreach',
+  'enetunreach',
+  'epipe',
+  'etimedout',
+  'eai_again',
+  'fetch failed',
+  'socket hang up',
+  'aborted due to timeout',
+  'connection refused',
+  'connection reset',
+  'server is not responding',
+];
+
+export function looksTransient(text) {
+  const t = String(text || '').toLowerCase();
+  if (!t) return false;
+  return TRANSIENT_PATTERNS.some((p) => t.includes(p));
+}
+
+export async function runShellCommand(command, { timeoutMs = 120_000, cwd = __dirname } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -926,9 +1288,11 @@ async function runShellCommand(command, { timeoutMs = 120_000, cwd = __dirname }
       settled = true;
       // Kill the child, then wait for 'close' before resolving (no UV race).
       try { child.kill(); } catch {}
+      const timeoutError = `shell command timed out after ${timeoutMs}ms`
+        + (stderr.trim() ? `: ${stderr.trim().slice(-300)}` : '');
       // Guard: if the child never closes, resolve anyway after a grace period.
-      const grace = setTimeout(() => resolve({ ok: false, error: 'shell timeout after ' + timeoutMs + 'ms', timedOut: true }), 5000);
-      child.once('close', () => { clearTimeout(grace); resolve({ ok: false, error: 'shell timeout after ' + timeoutMs + 'ms', timedOut: true, stderr: stderr.slice(0, 200) }); });
+      const grace = setTimeout(() => resolve({ ok: false, error: timeoutError, timedOut: true, stderr: stderr.slice(-500) }), 5000);
+      child.once('close', () => { clearTimeout(grace); resolve({ ok: false, error: timeoutError, timedOut: true, stderr: stderr.slice(-500) }); });
     }, timeoutMs);
 
     child.stdout?.on('data', d => { stdout += d.toString(); });
@@ -937,13 +1301,30 @@ async function runShellCommand(command, { timeoutMs = 120_000, cwd = __dirname }
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ ok: false, error: e.message });
+      resolve({ ok: false, error: e.message, stderr: stderr.slice(-500) });
     });
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ ok: code === 0, rows: stdout.length, stderr: stderr.slice(0, 200), exitCode: code });
+      if (code === 0) {
+        resolve({ ok: true, rows: stdout.length, stdout: stdout.slice(-500), stderr: stderr.slice(-500), exitCode: code });
+        return;
+      }
+      // A non-zero exit is a failure, and a failure with no reason is a
+      // failure nobody can fix. This branch used to return `ok:false` and
+      // nothing else, so the caller logged `res.error` - which was undefined -
+      // and the log said "FAIL: undefined" and the audit row's error column
+      // was empty. The reason was sitting in stderr, thrown away.
+      resolve({
+        ok: false,
+        error: describeShellFailure(code, signal, stderr, stdout),
+        rows: stdout.length,
+        stdout: stdout.slice(-500),
+        stderr: stderr.slice(-500),
+        exitCode: code,
+        signal,
+      });
     });
   });
 }
@@ -1113,59 +1494,110 @@ async function tick() {
   const state = loadState();
   for (const job of jobs) {
     if (job.disabled) continue;
-    const c = parseCron(job.schedule);
-    if (c.error) {
-      log(`job ${job.id} bad cron: ${c.error}`, 'WARN');
-      continue;
-    }
-    if (!c.match) continue;
     const lastMin = state.lastRun[job.id];
     const thisMin = Math.floor(Date.now() / 60000);
     if (lastMin === thisMin) continue; // already ran this minute
+    // Due if the schedule matched at any minute since this job last ran.
+    // A job that has never run is judged on the current minute only, so a
+    // fresh engine does not fire the whole board at once.
+    const sinceMs = (lastMin === undefined ? thisMin : lastMin) * 60000;
+    const due = cronDueSince(job.schedule, sinceMs, Date.now());
+    if (due.error) {
+      log(`job ${job.id} bad cron: ${due.error}`, 'WARN');
+      continue;
+    }
+    if (!due.due) continue;
     const label = job.name || job.fn || `job-${job.id}`;
     log(`[${job.id}] ${job.type}: ${label}`);
     const startedAt = new Date();
     let res;
-    if (job.type === 'sql') {
-      res = await runSql(job.command);
-    } else if (job.type === 'edge' && job.fn) {
-      res = await runEdgeFunctionByName(job.fn, job.body);
-    } else if (job.type === 'local' && job.action === 'fleet-chat-heartbeat') {
-      res = await runFleetChatHeartbeat();
-    } else if (job.type === 'local' && job.action === 'fleet-chat-followup') {
-      res = await runFleetChatFollowUp();
-    } else if (job.type === 'local' && job.action === 'fleet-chat-task-creator') {
-      res = await runFleetChatTaskCreator();
-    } else if (job.type === 'local' && job.action === 'jobby-heartbeat') {
-      res = await runJobbyHeartbeat();
-    } else if (job.type === 'local' && job.action === 'jobby-morning-summary') {
-      res = await runJobbyMorningSummary();
-    } else if (job.type === 'local' && job.action === 'jobby-evening-summary') {
-      res = await runJobbyEveningSummary();
-    } else if (job.type === 'python' && job.code) {
-      res = await runPythonJob(job.code);
-    } else if (job.type === 'shell') {
-      // Execute shell commands via child_process. Use async exec (NOT execSync)
-      // so the relay's event loop is not blocked. execSync would block the
-      // relay from serving the very HTTP requests these shell jobs make back
-      // to localhost:8080, causing them to time out (e.g. trustgraph-scanner,
-      // health-check, fleet-chat-heartbeat all fetch the relay).
-      try {
-        res = await runShellCommand(job.command, { timeoutMs: 120_000, cwd: join(__dirname, '..') });
-      } catch (e) {
-        res = { ok: false, error: e.message };
+    // ONE JOB MUST NOT ABORT THE TICK.
+    //
+    // A throw here - a database that went away mid-run, a job type that
+    // reaches for something undefined - used to escape tick() entirely. The
+    // daemon caught it ("tick error: ...") and every job AFTER the one that
+    // threw was silently skipped for that minute: no run, no log line, no
+    // audit row. The log even recorded those minutes as "loaded 106 jobs",
+    // which reads like work happened.
+    //
+    // A job that throws is a job that failed. It is recorded as a failure,
+    // with its reason, and the tick carries on.
+    try {
+      if (job.type === 'sql') {
+        res = await runSql(job.command);
+      } else if (job.type === 'edge' && job.fn) {
+        res = await runEdgeFunctionByName(job.fn, job.body);
+      } else if (job.type === 'local' && job.action === 'fleet-chat-heartbeat') {
+        res = await runFleetChatHeartbeat();
+      } else if (job.type === 'local' && job.action === 'fleet-chat-followup') {
+        res = await runFleetChatFollowUp();
+      } else if (job.type === 'local' && job.action === 'fleet-chat-task-creator') {
+        res = await runFleetChatTaskCreator();
+      } else if (job.type === 'local' && job.action === 'jobby-heartbeat') {
+        res = await runJobbyHeartbeat();
+      } else if (job.type === 'local' && job.action === 'jobby-morning-summary') {
+        res = await runJobbyMorningSummary();
+      } else if (job.type === 'local' && job.action === 'jobby-evening-summary') {
+        res = await runJobbyEveningSummary();
+      } else if (job.type === 'python' && job.code) {
+        res = await runPythonJob(job.code);
+      } else if (job.type === 'shell') {
+        // Execute shell commands via child_process. Use async exec (NOT execSync)
+        // so the relay's event loop is not blocked. execSync would block the
+        // relay from serving the very HTTP requests these shell jobs make back
+        // to localhost:8080, causing them to time out (e.g. trustgraph-scanner,
+        // health-check, fleet-chat-heartbeat all fetch the relay).
+        try {
+          res = await runShellCommand(job.command, { timeoutMs: 120_000, cwd: join(__dirname, '..') });
+        } catch (e) {
+          res = { ok: false, error: e.message };
+        }
+        // ONE MORE ATTEMPT, FOR A DEPENDENCY THAT WAS NOT THERE.
+        //
+        // These jobs call back into the relay on 127.0.0.1:8080, and the relay
+        // stops answering for a few seconds at a time when it is busy. When
+        // that happened, four unrelated jobs failed within a minute of each
+        // other for one reason, and none of them had done anything wrong.
+        //
+        // The retry is only for connectivity failures, and only when the job
+        // printed nothing: a job that got as far as producing output may
+        // already have done its work, and running it again is how a
+        // double-post happens. A job that ran and got it wrong is not
+        // retried - that is a bug to fix, not a blip to wait out.
+        if (!res.ok && !res.stdout?.trim() && looksTransient(res.error)) {
+          log(`[${job.id}] ${label}: transient failure (${res.error}); retrying in ${TRANSIENT_RETRY_DELAY_MS}ms`, 'WARN');
+          await new Promise((r) => setTimeout(r, TRANSIENT_RETRY_DELAY_MS));
+          try {
+            const retry = await runShellCommand(job.command, { timeoutMs: 120_000, cwd: join(__dirname, '..') });
+            if (retry.ok) {
+              retry.retried = true;
+              res = retry;
+            } else {
+              res = { ...retry, firstAttemptError: res.error };
+            }
+          } catch (e) {
+            res = { ok: false, error: e.message, firstAttemptError: res.error };
+          }
+        }
+      } else {
+        res = { ok: false, error: `unknown type: ${job.type}` };
       }
-    } else {
-      res = { ok: false, error: `unknown type: ${job.type}` };
+    } catch (e) {
+      res = { ok: false, error: e?.message || String(e) };
     }
     state.lastRun[job.id] = thisMin;
     // Write to the dedicated tracking tables (cron_execution_log,
     // edge_function_logs, cron_registry) + eliza_activity_log feed.
-    await logCronExecution(job, res, startedAt);
+    try {
+      await logCronExecution(job, res, startedAt);
+    } catch (e) {
+      log(`[${job.id}] could not record its own execution: ${e?.message || e}`, 'WARN');
+    }
     if (res.ok) {
-      log(`[${job.id}] OK (${res.rows ?? res.status ?? '?'} rows/ms)`);
+      log(`[${job.id}] OK (${res.rows ?? res.status ?? '?'} rows/ms)${res.retried ? ' (after a transient failure)' : ''}`);
     } else {
-      log(`[${job.id}] FAIL: ${res.error}`, 'WARN');
+      const reason = jobErrorText(res) || 'no reason recorded';
+      log(`[${job.id}] FAIL: ${reason}`, 'WARN');
     }
   }
   saveState(state);

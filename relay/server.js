@@ -6739,8 +6739,21 @@ app.post('/api/suite/tasks', async (req, res) => {
       }
     }
 
+    // NO ON CONFLICT clause. The dedupe index is
+    // tasks_one_open_per_title: UNIQUE (lower(title))
+    //   WHERE status <> ALL(ARRAY['DONE','CANCELLED','COMPLETED'])
+    // An ON CONFLICT inference target must match the index EXACTLY -
+    // expression AND predicate - and that is impossible to write here
+    // without copying the index definition verbatim into the query. The
+    // attempt that shipped inferred bare (title) with
+    // status IN (...), inferred nothing, and every insert failed with
+    // 42P10 "no unique or exclusion constraint matching the ON CONFLICT
+    // specification" - which surfaced in cron logs as a task-creator
+    // failure with no reason, 221 of them since the clause landed.
+    // The catch below already answers a real 23505 with 409, which is
+    // the behaviour this endpoint documented and callers expect.
     const result = await queryLocalPg(
-        `INSERT INTO app.tasks (id, title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, auto_advance_threshold_hours, progress_percentage, organization_id, created_by_user_id, metadata) VALUES (gen_random_uuid()::text, $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (title) WHERE status IN ('PENDING','IN_PROGRESS','CLAIMED','BLOCKED') DO NOTHING RETURNING *`,
+        `INSERT INTO app.tasks (id, title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, auto_advance_threshold_hours, progress_percentage, organization_id, created_by_user_id, metadata) VALUES (gen_random_uuid()::text, $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
         [title, description||null, stage||'PENDING', status||'PENDING', priority||0, category||null, assignee_agent_id||null, blocking_reason||null, auto_advance_threshold_hours||null, progress_percentage||0, organization_id||null, created_by_user_id||null, JSON.stringify({
           ...(req.body?.metadata || {}),
           // WHERE THIS CAME FROM, so that a task that later needs a person can
