@@ -19761,6 +19761,105 @@ app.get('/api/suite/telemetry', async (req, res) => {
   res.json(payload);
 });
 
+// ── /api/suite/knowledge-stats + /api/suite/workflow-stats ──────────
+// fetchKnowledgeStats() in the SPA called these two paths and returned
+// hardcoded zeros because they 404'd — they had never existed. The comment
+// in local-api.ts said as much ("that path 404s"), and the panels kept
+// showing 0 for knowledge entities and active workflows while the very
+// same numbers were already counted one endpoint over in
+// /api/suite/telemetry's stats block.
+//
+// These handlers stand up the two paths properly. The counts are cheap
+// (small tables, indexed), but they share the telemetry Section's values,
+// so a 30s cache keeps the two panels from disagreeing with telemetry
+// between polls.
+const SUITE_KNOWLEDGE_STATS_TTL_MS = 30_000;
+let _suiteKnowledgeStatsCache = { at: 0, data: null };
+
+async function buildSuiteKnowledgeStats() {
+  const warnings = [];
+  let knowledgeEntities = 0;
+  let sharedContext = 0;
+  let memoryContexts = 0;
+  try {
+    const know = await localQuery(`SELECT count(*) AS n FROM public.knowledge_entities`);
+    knowledgeEntities = Number(know[0]?.n || 0);
+  } catch (e) { warnings.push(`knowledge_entities: ${e.message}`); }
+  try {
+    const ctx = await localQuery(`SELECT count(*) AS n FROM knowledge.shared_context`);
+    sharedContext = Number(ctx[0]?.n || 0);
+  } catch (e) { warnings.push(`shared_context: ${e.message}`); }
+  try {
+    const mem = await localQuery(`SELECT count(*) AS n FROM public.memory_contexts`);
+    memoryContexts = Number(mem[0]?.n || 0);
+  } catch (e) { warnings.push(`memory_contexts: ${e.message}`); }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    // The two keys fetchKnowledgeStats() reads. `total` is the knowledge
+    // entity count; `userContext` is shared_context — the shape the SPA's
+    // dashboard was already reading from telemetry's stats block, so the
+    // two sources now report the same numbers.
+    total: knowledgeEntities,
+    userContext: sharedContext,
+    memoryContexts,
+    warnings,
+  };
+}
+
+app.get('/api/suite/knowledge-stats', async (req, res) => {
+  trackRequest('/api/suite/knowledge-stats');
+  const now = Date.now();
+  if (_suiteKnowledgeStatsCache.data && now - _suiteKnowledgeStatsCache.at < SUITE_KNOWLEDGE_STATS_TTL_MS) {
+    res.json(_suiteKnowledgeStatsCache.data);
+    return;
+  }
+  const data = await buildSuiteKnowledgeStats();
+  _suiteKnowledgeStatsCache = { at: Date.now(), data };
+  res.json(data);
+});
+
+let _suiteWorkflowStatsCache = { at: 0, data: null };
+
+async function buildSuiteWorkflowStats() {
+  const warnings = [];
+  let jobs = 0;
+  let active = 0;
+  try {
+    // Same table and columns the telemetry endpoint's workflows block reads,
+    // so "active workflows" on the knowledge panel cannot disagree with the
+    // unified-data module.
+    const rows = await localQuery(
+      `SELECT count(*) AS jobs, count(*) FILTER (WHERE is_active) AS active
+         FROM public.cron_registry`
+    );
+    jobs = Number(rows[0]?.jobs || 0);
+    active = Number(rows[0]?.active || 0);
+  } catch (e) { warnings.push(`cron_registry: ${e.message}`); }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    // `active` is what fetchKnowledgeStats() reads as userWorkflows.
+    jobs,
+    active,
+    inactive: Math.max(0, jobs - active),
+    warnings,
+  };
+}
+
+app.get('/api/suite/workflow-stats', async (req, res) => {
+  trackRequest('/api/suite/workflow-stats');
+  const now = Date.now();
+  if (_suiteWorkflowStatsCache.data && now - _suiteWorkflowStatsCache.at < SUITE_KNOWLEDGE_STATS_TTL_MS) {
+    res.json(_suiteWorkflowStatsCache.data);
+    return;
+  }
+  const data = await buildSuiteWorkflowStats();
+  _suiteWorkflowStatsCache = { at: Date.now(), data };
+  res.json(data);
+});
+
+
 
 // ── Suite Dashboard API (31 Harbor multi-tenant app) ────────────────
 // registerSuiteRoutes(app) used to be called here. It lived at the BOTTOM of
