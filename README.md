@@ -1,74 +1,72 @@
-# Jobby McJobberson
+# XMRT Ecosystem
 
-Jobby McJobberson is a multi-track opportunity and outreach engine for Joseph Andrew Lee's job search. It keeps recipient preparation, campaign delivery, and ATS automation separate so each boundary can be tested and audited.
+**The XMRT ecosystem — a supervised process stack providing a fleet relay, local Supabase-compatible runtime, Postgres, Cloudflare tunnel, fleet agents, and the XMRT Suite dashboard.**
 
-## Track status
+**Live Relay:** [relay.mobilemonero.com](https://relay.mobilemonero.com) · **Suite Dashboard:** [suite.mobilemonero.com](https://suite.mobilemonero.com)
 
-| Track | Purpose | Current status |
-| --- | --- | --- |
-| Track 1 | Contract consultancy and high-engagement personalized outreach | Active recipient pipeline: normalization, deduplication, suppression, and malformed-record auditing |
-| Track 2 | Temporary and contract opportunities | Planned |
-| Track 3 | Full-time employment opportunities | Planned |
-| Track 4 | ATS application automation | Planned; use the canonical page-agent boundary |
+---
 
-The current repository does **not** contain a scraper, scheduler, sender, or ATS implementation. Track 1 currently prepares verified recipient records only; it does not send messages.
+## What this repository contains
 
-## Track 1 recipient pipeline
+This repository contains the full XMRT ecosystem stack:
 
-`lead_utils.py` provides the pure Python pipeline used by the tests:
+- **`relay/`** — The fleet relay server (Express, port 8080). 213+ tools, fleet chat, task management, harness registry, AI cascade (26 providers), TrustGraph scoring, email integration, and supervised process management.
+- **`local-supabase/`** — local-sb, a drop-in Supabase replacement (PostgREST-compatible REST, Deno edge functions, auth, storage). Runs on Node + Deno + Postgres, zero Docker.
+- **`suite/`** — XMRT Suite SPA (React/Vite). The operator's cockpit: Unified Chat with Eliza, Agent & Task Visualizer, mining/DAO tooling, memory & learning.
+- **`scripts/`** — Utility scripts (encoding checks, migrations, etc.)
+- **`docs/`** — Documentation and brand guides.
 
-- normalize recipient fields and email addresses without mutating the input;
-- preserve missing and explicitly unverified contacts as unknown;
-- create stable identity keys for verified emails or missing-email records;
-- deduplicate recipients first-wins while preserving order;
-- apply identity, verified-email, and explicit consent-denial suppression;
-- discard malformed records with audit data.
+## Quick Start
 
-Jobby must never invent an email address, phone number, or other contact detail. Unknown contacts stay unknown.
+See [relay/README](relay/README.md) and [suite/README.md](suite/README.md) for detailed installation instructions.
 
-## Scope boundary
+### Prerequisites (Linux)
 
-The original lead-scraper code was built for Party Favor Photo (PFP) event-related leads. Its PFP-specific sources, fields, estimates, and outreach assumptions are legacy and are not part of Jobby. The unrelated PFP scraper, outreach, manual-collection, template, and resume files have been removed from this repository.
+- Node.js 20+
+- PostgreSQL 15+
+- Deno 1.x+
+- Git
+- Ollama (optional, for local LLM inference)
 
-Do not add a parallel scheduler, sender, scraper, database, or ATS service. Future integrations must adapt to the canonical fleet services:
-
-- `campaign-scheduler` and Resend handle campaign cadence and delivery;
-- `page-agent` handles ATS form filling and resume upload;
-- Jobby remains the opportunity/recipient adapter and preparation layer.
-
-Costa Rica targeting and Spanish-language messaging are additive variants. They must not change the canonical identity, suppression, or no-fabrication rules.
-
-## Canonical outbound inputs
-
-The outbound email structure and resume live in shared context, not in this repository:
-
-- `hiring_manager_email_template_v1`
-- `resume_joseph_lee`
-- `contact_joseph_andrew_lee`
-
-Outbound hiring-manager messages use this order: a short positioning pitch, the canonical chronological resume, then Joseph's LinkedIn and phone contact block. Messages are sent as Joseph Andrew Lee, never as a fleet-agent persona. Do not commit the resume or email bodies to this repository.
-
-## Development and verification
-
-The project uses Python 3.13 in CI and has no third-party runtime dependency for the current recipient pipeline.
-
-From the repository root:
+### Start the stack
 
 ```bash
-python -m unittest discover -s tests -v
-python -m compileall -q lead_utils.py tests
-git diff --check
+# Clone
+git clone https://github.com/xmrtdao/mobilemonero.git
+cd mobilemonero
+
+# Install
+cd relay && npm install && cd ..
+cd local-supabase && npm install && cd ..
+cd suite && npm install --legacy-peer-deps && cd ..
+
+# Configure
+cp relay/.env.example relay/.env
+cp suite/.env.example suite/.env.local
+# Edit both .env files with your API keys
+
+# Start
+node supervisor.mjs --serve
+
+# Verify
+curl http://localhost:8080/health
 ```
 
-On the Windows fleet workspace, the equivalent test command is:
+## Repository Layout
 
-```powershell
-py -m unittest discover -s tests -v
-```
+- `relay/` — Fleet relay server, tools, migrations, cron engine
+- `local-supabase/` — Supabase-compatible local runtime
+- `suite/` — XMRT Suite dashboard (React SPA)
+- `scripts/` — Utility scripts
+- `docs/` — Documentation
 
-## Repository layout
+## Related Repositories
 
-- `lead_utils.py` - recipient normalization, identity, deduplication, and suppression helpers
-- `tests/` - standard-library unit tests for the recipient pipeline
-- `.github/workflows/ci.yml` - compile, test, and diff-cleanliness gate
-- `requirements.txt` - intentionally empty because the current pipeline uses only the Python standard library
+- **[xmrtdao/suite](https://github.com/xmrtdao/suite)** — XMRT Suite frontend (standalone)
+- **[xmrtdao/mobilemonero](https://github.com/xmrtdao/mobilemonero)** — Relay + local-sb + supervisor
+- **[xmrtdao/jobbymcjobberson](https://github.com/xmrtdao/jobbymcjobberson)** — Jobby McJobberson job search engine (separate project)
+- **[xmrtdao/cashdapp](https://github.com/xmrtdao/cashdapp)** — CashDapp payments platform (separate project)
+
+## License
+
+MIT
