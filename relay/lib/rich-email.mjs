@@ -424,7 +424,10 @@ export function markdownToHtml(markdown, options = {}) {
 
   const flushParagraph = (buf) => {
     if (!buf.length) return;
-    out.push(`<p class="txt" style="margin:0 0 14px;font-size:16px;line-height:1.62;color:${T.text};">${inlineMarkdown(buf.join('<br />'), T)}</p>`);
+    // Escape/format each line FIRST, then join with <br />. Joining first and
+    // then calling inlineMarkdown (which calls esc()) would escape the <br />
+    // tags into literal "&lt;br /&gt;" text in the rendered email.
+    out.push(`<p class="txt" style="margin:0 0 14px;font-size:16px;line-height:1.62;color:${T.text};">${buf.map((line) => inlineMarkdown(line, T)).join('<br />')}</p>`);
   };
 
   let para = [];
@@ -488,7 +491,7 @@ export function markdownToHtml(markdown, options = {}) {
         buf.push(lines[i].replace(/^\s*>\s?/, ''));
         i++;
       }
-      out.push(`<blockquote class="quote" style="margin:0 0 16px;padding:12px 16px;border-left:3px solid ${T.violet};background:${T.panelAlt};border-radius:0 10px 10px 0;color:${T.text};">${inlineMarkdown(buf.join('<br />'), T)}</blockquote>`);      continue;
+      out.push(`<blockquote class="quote" style="margin:0 0 16px;padding:12px 16px;border-left:3px solid ${T.violet};background:${T.panelAlt};border-radius:0 10px 10px 0;color:${T.text};">${buf.map((line) => inlineMarkdown(line, T)).join('<br />')}</blockquote>`);      continue;
     }
 
     // ── Table ──────────────────────────────────────────────

@@ -593,6 +593,11 @@ async function runSql(sql) {
 
 // ── Fleet Chat Heartbeat ──────────────────────────────────
 async function runFleetChatHeartbeat() {
+  // DISABLED: was causing recursive notification loops (system posts → agents
+  // comment → system posts about comments → agents comment again). The fleet
+  // chat is now driven by genuine agent activity, not automated prompts.
+  console.log('[fleet-chat-heartbeat] DISABLED — recursive notification loop prevention');
+  return { ok: true, result: 'disabled: recursive loop prevention' };
   try {
     const msgsRes = await fetch('http://127.0.0.1:8080/api/fleet-chat/messages?limit=10', { signal: AbortSignal.timeout(5000) });
     const msgsData = await msgsRes.json().catch(() => ({ messages: [] }));
@@ -647,6 +652,9 @@ async function runFleetChatHeartbeat() {
 
 // ── Fleet Chat Follow-Up ──────────────────────────────────
 async function runFleetChatFollowUp() {
+  // DISABLED: was causing recursive notification loops.
+  console.log('[fleet-chat-followup] DISABLED — recursive notification loop prevention');
+  return { ok: true, result: 'disabled: recursive loop prevention' };
   try {
     const msgsRes = await fetch('http://127.0.0.1:8080/api/fleet-chat/messages?limit=10', { signal: AbortSignal.timeout(5000) });
     const msgsData = await msgsRes.json().catch(() => ({ messages: [] }));
