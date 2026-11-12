@@ -69,7 +69,7 @@ const DID_OVERRIDES = {
   'did:test:fix-verification-agent': 'fix-verification-agent',
 };
 
-function canonicalName(raw) {
+export function canonicalName(raw) {
   if (!raw) return null;
   const key = String(raw).trim();
   if (DID_OVERRIDES[key]) return DID_OVERRIDES[key];
@@ -135,6 +135,21 @@ async function safe(label, fn, fallback) {
  * fleet at all, so a test that reads it sees an empty picture and learns
  * nothing.
  */
+// ── resolveAgentTiers ─────────────────────────────────────────────
+// Build a Map from agent name to tier, from registry rows.
+export function resolveAgentTiers(registryRows) {
+  const agentTiers = new Map();
+  for (const row of (registryRows || [])) {
+    const canon = canonicalName(row.name) || canonicalName(row.did) || row.name || row.did;
+    if (!canon) continue;
+    const tier = row.trust_score || row.cac_tier || row.tier || 'explorer';
+    agentTiers.set(canon, tier);
+    if (row.name) agentTiers.set(row.name, tier);
+    if (row.did) agentTiers.set(row.did, tier);
+  }
+  return agentTiers;
+}
+
 export async function buildConstellation({
   queryFn = query,
   burnDays = 30,

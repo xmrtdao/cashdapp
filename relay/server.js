@@ -229,7 +229,8 @@ import { randomBytes } from 'node:crypto';
 import { verifyResendSignature as verifyResendSignatureImpl }
   from './lib/resend-signature.mjs';
 import { ollamaChat, ollamaGenerate, listModels, checkOllamaHealth } from './tools/ollama-chat.mjs';
-import { chat as jobbyChat, onboardFromDossier, CHAT_MAX_TOKENS as JOBBY_CHAT_MAX_TOKENS } from './jobby/chat.mjs';
+import { chat as jobbyChat, onboardFromDossier } from './jobby/chat.mjs';
+const JOBBY_CHAT_MAX_TOKENS = 1200;
 import { displayNameFor, formatFrom, isCandidateMailbox, domainOf, MAILBOX_DOMAIN }
   from './jobby/mailbox.mjs';
 import { createJobbyTools } from './jobby/tools.mjs';
@@ -10684,7 +10685,8 @@ function deriveToolDescription(name) {
 }
 
 // ── Agent Authorization ──────────────────────────────────────
-import { checkToolAccess, getToolLevel, registerTrustedAgent, getAgentInfo, listAgents, CORE_AGENTS, TRUST_LEVELS, SERVICE_IDENTITIES } from './lib/agent-auth.mjs';
+import { checkToolAccess, getToolLevel, registerTrustedAgent, getAgentInfo, listAgents, CORE_AGENTS, TRUST_LEVELS } from './lib/agent-auth.mjs';
+const SERVICE_IDENTITIES = new Set(['cron', 'system']);
 import { preflightCheck, getAgentTrustContext } from './lib/trustgraph-preflight.mjs';
 import { runScan as runTrustGraphScan } from './lib/trustgraph-scanner.mjs';
 
