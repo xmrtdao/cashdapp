@@ -2685,7 +2685,7 @@ const toolHandlers = {
     // Allow SELECT, INSERT, UPDATE, DELETE — agents need to manage leads
     const upper = sql.trim().toUpperCase();
     if (!/^(SELECT|INSERT|UPDATE|DELETE|WITH)\b/.test(upper)) {
-      return { error: 'Only SELECT, INSERT, UPDATE, DELETE, and WITH queries are allowed' };
+      return { error: 'Only SELECT, INSERT, UPDATE, DELETE, and WITH queries are allowed. DDL (CREATE, ALTER, DROP) and other statements are blocked for safety. Use db-rest for table operations.' };
     }
     try {
       const rows = await localQuery(sql);
@@ -4508,8 +4508,11 @@ const toolHandlers = {
   // blocks the event loop, so the relay can't answer that curl → deadlock/ETIMEDOUT.
   // Uses a temp .sh file to avoid shell-escaping issues.
   'shell-exec': async (args) => {
-    const command = args?.command || args?.cmd || args?.script || '';
+    let command = args?.command || args?.cmd || args?.script || '';
     if (!command) return { error: 'command (string) is required. Pass the bash/curl command to execute.' };
+    // Sanitize: strip BOM, replacement chars, and normalize whitespace that
+    // accumulates from PowerShell/encoding round-trips (cp1252 mojibake).
+    command = command.replace(/^\uFEFF/, '').replace(/\uFFFD/g, '').replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/\r\n/g, '\n').trim();
     const timeout = Math.min(args?.timeout || 30, 120);
     const workdir = args?.workdir || 'C:\\Users\\PureTrek\\Desktop\\xmrtdao';
     const bashPath = 'C:\\Program Files\\Git\\bin\\bash.exe';
@@ -10734,6 +10737,28 @@ app.post('/tools/run', async (req, res) => {
     return res.status(404).json({ error: `Tool "${tool}" not found`, available: Object.keys(toolHandlers) });
   }
   
+  // ── Input validation (tool-validator) ──
+  // Pre-validate and sanitize tool arguments before execution to catch
+  // common mistakes (stray characters, malformed SQL, Python syntax errors).
+  try {
+    const { validateToolCall } = await import('./lib/tool-validator.mjs');
+    const validation = validateToolCall(tool, args || {});
+    if (!validation.valid) {
+      return res.status(400).json({
+        error: 'Validation failed: ' + validation.errors.join('; '),
+        tool,
+        errors: validation.errors,
+        hint: 'Fix the arguments and retry. Common issues: stray characters from encoding, unbalanced quotes, wrong path separators.',
+      });
+    }
+    // Apply sanitized args
+    if (validation.sanitizedArgs) {
+      Object.assign(args, validation.sanitizedArgs);
+    }
+  } catch (e) {
+    console.log('[tool-validator] validation skipped:', e.message);
+  }
+
   // ── Authorization check ──
   const toolLevel = getToolLevel(tool);
   
