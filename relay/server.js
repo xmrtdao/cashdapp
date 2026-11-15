@@ -5085,6 +5085,23 @@ function guessHandlerFromTitle(title) {
 // ── Express App ─────────────────────────────────────────────
 const app = express();
 
+// ── RSI-enabled agent inference endpoint ─────────────────────
+// Any agent (vex, alice, trib, arch, hermes, etc.) can call this to get
+// an RSI-enabled response: learning session injection, positive reinforcement,
+// self-correction, episodic memory, tool validation. Routes through ai-chat.
+app.post('/api/agent-infer', express.json(), async (req, res) => {
+  trackRequest('/api/agent-infer');
+  const { agent, message, session_id, history } = req.body || {};
+  if (!message) return res.status(400).json({ error: 'message is required' });
+  const agentName = agent || 'eliza';
+  try {
+    const result = await relayToElizaCloud(message, agentName, session_id || null, session_id || null, history || null);
+    if (!result) return res.status(502).json({ error: 'inference failed' });
+    res.json({ success: true, agent: agentName, ...result });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 // ── Response compression ─────────────────────────────────────
 // Added 2026-10-12. The Suite SPA's main bundle is ~11.7 MB of JS and was being
 // served UNCOMPRESSED — express.static does not gzip, and no compression
