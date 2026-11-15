@@ -809,7 +809,7 @@ export function createCampusHandler(deps) {
        beats a plain id selector, so without the exclusion the overlay was
        silently forced to position:relative and z-index:10, which pushed it
        into the flow of the page and put it behind the content. */
-    body > *:not(.scanline):not(canvas#mesh-bg):not(script):not(#intel-overlay) { position: relative; z-index: 10; }
+    body > *:not(.scanline):not(canvas#mesh-bg):not(script):not(#intel-overlay):not(#harness-overlay) { position: relative; z-index: 10; }
 
     /* ── Lumen Component Enhancements ── */
     /* Typography */
