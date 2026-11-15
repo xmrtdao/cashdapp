@@ -5181,3 +5181,277 @@ window.openBrowserPane = function(u, title) {
     setHtml('intel-sources', html);
   }
 })();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HARNESS FLEET + OPENFILM PROJECTS
+// The OpenHands control-plane view. Two tiles in the Suite section, and one
+// full-screen overlay (#harness-overlay) modelled on the Activity
+// Intelligence overlay.
+//
+// Every number on these surfaces is a live read, not a stored verdict:
+// /api/harnesses/board returns the registry with health re-checked by the
+// relay every 60 seconds, plus the active-task load each runtime carries.
+// ═══════════════════════════════════════════════════════════════════════════
+(function () {
+  function el(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function fmtBytes(n) {
+    if (n == null) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(0) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+  }
+  function fmtAgo(ts) {
+    if (!ts) return 'never';
+    var ms = Date.now() - new Date(ts).getTime();
+    if (ms < 60000) return Math.round(ms / 1000) + 's ago';
+    if (ms < 3600000) return Math.round(ms / 60000) + 'm ago';
+    if (ms < 86400000) return Math.round(ms / 3600000) + 'h ago';
+    return Math.round(ms / 86400000) + 'd ago';
+  }
+  function statusClass(s) {
+    var allowed = ['healthy', 'degraded', 'down', 'not-installed', 'unknown'];
+    return allowed.indexOf(s) >= 0 ? s : 'unknown';
+  }
+
+  // ── Compact fleet list (the tile) ───────────────────────────────────────
+  var lastBoard = null;
+
+  window.loadHarnessFleet = function () {
+    apiFetch('/api/harnesses/board')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || d.error) throw new Error((d && d.error) || 'empty response');
+        lastBoard = d;
+        renderFleetList(d);
+      })
+      .catch(function (err) {
+        var host = el('harness-fleet-list');
+        if (host) host.innerHTML = '<div class="stat"><span class="label" style="color:#E4695A;">Fleet read failed: ' + esc(err && err.message) + '</span></div>';
+        console.warn('[harness-fleet] load failed:', err && err.message);
+      });
+  };
+
+  function renderFleetList(d) {
+    var listEl = el('harness-fleet-list');
+    var sumEl = el('harness-fleet-summary');
+    if (!listEl || !sumEl) return;
+    var s = d.summary || {};
+    sumEl.textContent = 'installed ' + (s.installed || 0) + '/' + (s.total || 0)
+      + ' · healthy ' + (s.healthy || 0)
+      + (s.degraded ? ' · degraded ' + s.degraded : '')
+      + (s.down ? ' · down ' + s.down : '')
+      + (s['not-installed'] ? ' · not-installed ' + s['not-installed'] : '');
+    var html = (d.harnesses || []).map(function (h) {
+      var caps = (h.capabilities || []).slice(0, 3).map(function (c) {
+        return '<span style="border:1px solid var(--border);border-radius:3px;padding:0 3px;font-size:0.48rem;color:var(--text-dim);">' + esc(c) + '</span>';
+      }).join(' ');
+      var errLine = '';
+      if (h.status === 'down' || h.status === 'degraded') {
+        errLine = '<div style="color:#E4695A;font-size:0.52rem;">' + esc((h.error || 'unreachable') + '').slice(0, 90) + '</div>';
+      } else if (h.status === 'not-installed') {
+        errLine = '<div style="color:var(--text-dim);font-size:0.52rem;">' + esc((h.installHint || 'not installed') + '').slice(0, 90) + '</div>';
+      }
+      var open = h.ui
+        ? ' <button class="hf-open" data-ui="' + esc(h.ui) + '" title="Open this runtime\'s UI" style="background:none;border:1px solid var(--border);color:#4ade80;border-radius:4px;padding:0 5px;font-size:0.5rem;cursor:pointer;">UI ↗</button>'
+        : '';
+      return '<div style="display:flex;align-items:flex-start;gap:7px;padding:5px 6px;background:#0a0a14;border:1px solid var(--border);border-radius:6px;">'
+        + '<span class="harness-status-dot harness-status-' + statusClass(h.status) + '" title="' + esc(h.status) + '" style="margin-top:2px;"></span>'
+        + '<span style="min-width:82px;"><b style="font-size:0.62rem;color:var(--text-primary);display:block;">' + esc(h.name) + '</b>'
+        + '<span style="font-size:0.5rem;color:var(--text-dim);">' + esc(h.type) + ' · ' + esc(h.mode || '?') + '</span>'
+        + '</span>'
+        + '<span style="flex:1;min-width:0;">' + caps + errLine + '</span>'
+        + '<span style="font-size:0.5rem;color:var(--text-dim);white-space:nowrap;margin-top:1px;">load ' + (h.load || 0) + '</span>'
+        + open
+        + '</div>';
+    }).join('');
+    listEl.innerHTML = html;
+    listEl.querySelectorAll('.hf-open').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        openBrowserPane(btn.getAttribute('data-ui'), 'harness');
+      });
+    });
+  }
+
+  // ── Full board (the overlay) ───────────────────────────────────────────
+  window.openHarnessBoard = function () {
+    var overlay = el('harness-overlay');
+    if (!overlay) return;
+    overlay.classList.add('open');
+    document.body.style.overflow = 'hidden';
+    refreshHarnessBoard(true);
+  };
+  window.closeHarnessBoard = function () {
+    var overlay = el('harness-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('open');
+    document.body.style.overflow = '';
+  };
+  window.refreshHarnessBoard = function () {
+    apiFetch('/api/harnesses/board')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || d.error) throw new Error((d && d.error) || 'empty response');
+        lastBoard = d;
+        renderBoard(d);
+      })
+      .catch(function (err) {
+        var host = el('harness-grid');
+        if (host) host.innerHTML = '<div class="intel-card"><div class="intel-empty" style="color:#E4695A;">Board failed: ' + esc(err && err.message) + '</div></div>';
+      });
+  };
+
+  function renderBoard(d) {
+    var gen = el('harness-generated');
+    if (gen) gen.textContent = 're-checked by the relay every 60s · generated ' + new Date(d.generatedAt).toLocaleTimeString();
+
+    var s = d.summary || {};
+    var sum = el('harness-summary');
+    if (sum) {
+      sum.innerHTML = [
+        ['healthy', s.healthy],
+        ['degraded', s.degraded],
+        ['down', s.down],
+        ['not-installed', s['not-installed']],
+        ['unknown', s.unknown],
+      ].filter(function (p) { return (p[1] || 0) > 0 || p[0] === 'healthy'; })
+       .map(function (p) {
+          return '<span><span class="harness-status-dot harness-status-' + p[0] + '"></span>' + p[0] + ' <b>' + p[1] + '</b></span>';
+        }).join('')
+        + '<span style="color:var(--text-dim);">total ' + (s.total || 0) + ' · installed ' + (s.installed || 0) + '</span>';
+    }
+
+    var gridEl = el('harness-grid');
+    if (!gridEl) return;
+    gridEl.innerHTML = (d.harnesses || []).map(function (h) {
+      var dot = '<span class="harness-status-dot harness-status-' + statusClass(h.status) + '"></span>';
+      var caps = (h.capabilities || []).map(function (c) {
+        return '<span style="border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-size:0.52rem;color:var(--text-dim);">' + esc(c) + '</span>';
+      }).join(' ');
+      var errLine = h.error
+        ? '<div style="color:#E4695A;font-size:0.58rem;margin-top:4px;word-break:break-word;">' + esc(String(h.error).slice(0, 180)) + '</div>'
+        : '';
+      var open = h.ui
+        ? '<button class="intel-btn hb-open" data-ui="' + esc(h.ui) + '" style="margin-top:6px;">open UI ↗</button>'
+        : '';
+      return '<div class="intel-card">'
+        + '<h4>' + dot + esc(h.name) + ' <span class="hint">' + esc(h.type) + '</span></h4>'
+        + '<div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px;">' + caps + '</div>'
+        + '<div style="font-family:\'Space Mono\',monospace;font-size:0.58rem;color:var(--text-dim);line-height:1.6;">'
+        + 'endpoint: ' + esc(h.endpoint || '—') + '<br>'
+        + 'mode: ' + esc(h.mode || '?') + ' · load: ' + (h.load || 0) + ' · supervised: ' + (h.supervised ? 'yes' : 'no') + '<br>'
+        + 'last check: ' + esc(h.lastCheck ? fmtAgo(h.lastCheck) : 'never')
+        + '</div>'
+        + errLine
+        + open
+        + '</div>';
+    }).join('');
+    gridEl.querySelectorAll('.hb-open').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        openBrowserPane(btn.getAttribute('data-ui'), 'harness');
+      });
+    });
+  }
+
+  // ── Routing test ───────────────────────────────────────────────────────
+  window.routeHarness = function () {
+    var input = el('harness-route-input');
+    var out = el('harness-route-result');
+    if (!input || !out) return;
+    var cap = input.value.trim();
+    if (!cap) { out.textContent = 'enter a capability'; return; }
+    out.textContent = 'asking the registry…';
+    apiFetch('/api/harnesses/find-best', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ category: cap, capabilities: [cap] }),
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && d.harness) {
+        out.textContent = '→ ' + d.harness.name + ' (' + d.harness.id + ') · ' + d.harness.status;
+        out.style.color = '#4ade80';
+      } else {
+        out.textContent = 'no healthy harness matches "' + cap + '"';
+        out.style.color = '#E4695A';
+      }
+    }).catch(function (err) {
+      out.textContent = 'routing failed: ' + (err && err.message);
+      out.style.color = '#E4695A';
+    });
+  };
+
+  // ── OpenFilm projects ──────────────────────────────────────────────────
+  window.loadOpenfilmProjects = function () {
+    apiFetch('/api/openfilm/projects')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var host = el('openfilm-projects');
+        if (!host) return;
+        var projects = (d && d.projects) || [];
+        if (!projects.length) { host.innerHTML = '<div class="stat"><span class="label">No OpenFilm projects found.</span></div>'; return; }
+        host.innerHTML = projects.map(function (p) {
+          var meta = [
+            p.scenes + ' scene' + (p.scenes === 1 ? '' : 's'),
+            (Math.round(p.duration || 0)) + 's',
+            p.voiceover ? 'voiceover' : null,
+            p.mp4 ? p.mp4.name + ' · ' + fmtBytes(p.mp4.bytes) : 'not rendered',
+            'modified ' + fmtAgo(p.updatedAt),
+          ].filter(Boolean).join(' · ');
+          return '<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#0a0a14;border:1px solid var(--border);border-radius:6px;">'
+            + '<span style="font-size:1rem;">🎬</span>'
+            + '<span style="flex:1;min-width:0;"><b style="font-size:0.68rem;color:var(--text-primary);display:block;">' + esc(p.name) + '</b>'
+            + '<span style="font-size:0.52rem;color:var(--text-dim);">' + esc(meta) + '</span></span>'
+            + '<button class="of-open" data-project="' + esc(p.name) + '" style="background:#f472b6;color:#0D0F0C;border:0;border-radius:5px;padding:4px 10px;font-size:0.6rem;font-weight:600;cursor:pointer;white-space:nowrap;">Open ↗</button>'
+            + '</div>';
+        }).join('');
+        host.querySelectorAll('.of-open').forEach(function (btn) {
+          btn.addEventListener('click', function () { openOpenFilmInStudio(btn.getAttribute('data-project'), btn); });
+        });
+      })
+      .catch(function (err) {
+        var host = el('openfilm-projects');
+        if (host) host.innerHTML = '<div class="stat"><span class="label" style="color:#E4695A;">Could not read projects: ' + esc(err && err.message) + '</span></div>';
+        console.warn('[openfilm-projects] load failed:', err && err.message);
+      });
+  };
+
+  // Opening a film needs the Studio's cookie key, which only `openfilm open`
+  // prints. Ask the relay to run it; the output contains the keyed URL.
+  window.openOpenFilmInStudio = function (project, btn) {
+    if (btn) { btn.textContent = 'opening…'; btn.disabled = true; }
+    apiFetch('/tools/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool: 'openfilm', args: { action: 'open', project: project } }),
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      var output = (d && d.output) || '';
+      var m = output.match(/https?:\/\/[^\s]+key=[^\s]+/);
+      if (m) {
+        openBrowserPane(m[0], project);
+      } else {
+        throw new Error('no studio URL in the openfilm output');
+      }
+    }).catch(function (err) {
+      var host = el('openfilm-projects');
+      if (host) host.insertAdjacentHTML('beforeend', '<div class="stat"><span class="label" style="color:#E4695A;">Open failed for ' + esc(project) + ': ' + esc(err && err.message) + '</span></div>');
+    }).finally ? null : null;
+    if (btn) {
+      setTimeout(function () { btn.textContent = 'Open ↗'; btn.disabled = false; }, 4000);
+    }
+  };
+
+  function init() {
+    var t = el('harness-fleet-list');
+    var p = el('openfilm-projects');
+    if (t) loadHarnessFleet();
+    if (p) loadOpenfilmProjects();
+    setInterval(loadHarnessFleet, 60000);
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();

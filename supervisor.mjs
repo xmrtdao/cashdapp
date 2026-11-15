@@ -433,6 +433,24 @@ const SERVICE_DEFS = [
     dependsOn: ['pg', 'relay'],
   },
   {
+    // Local inference. Installed at C:\Users\PureTrek\AppData\Local\Programs\Ollama
+    // with 17 models on disk, including the custom gemma3-xmrt the Suite
+    // cascade's local fallback tier falls back to. The harness registry had
+    // recorded it as 'healthy' while nothing was listening on :11434, so the
+    // local fallback was dead for weeks and nothing ever started the server.
+    //
+    // It is supervised now. GET /api/tags answers 200 with the model list
+    // when it is up; a bare TCP check would pass while the server was broken.
+    name: 'ollama',
+    cmd: 'C:\\Users\\PureTrek\\AppData\\Local\\Programs\\Ollama\\ollama.exe',
+    args: ['serve'],
+    cwd: ROOT,
+    healthUrl: 'http://127.0.0.1:11434/api/tags',
+    tcpPort: 11434,
+    startupGraceMs: 60000,
+    dependsOn: [],
+  },
+  {
     // DeepSeek Harness web UI — Builder's workspace + watchable harness on :3080.
     // The detached .cjs launcher sets DEEPSEEK_BASE_URL/API_KEY in the child env
     // and writes the one-time auth-token URL to dsh/dsh-web-harness.log (that's
@@ -612,7 +630,7 @@ const SERVICE_DEFS = [
 // tunnel to answer on :8090 - so it starts last and blocks nothing.
 // atreyus-frontend depends on atreyus-backend, so both go after 'tunnel' as
 // leaves; the frontend must come after the backend in the order.
-const START_ORDER = ['pg', 'local-sb', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'designer', 'alice', 'cron-engine-v2', 'security', 'verifier', 'campaign-scheduler', 'opencode', 'opencode-agent', 'browser-view', 'dsh', 'resume-server', 'graytech', 'atreyus-backend', 'atreyus-frontend'];
+const START_ORDER = ['pg', 'local-sb', 'ollama', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'designer', 'alice', 'cron-engine-v2', 'security', 'verifier', 'campaign-scheduler', 'opencode', 'opencode-agent', 'browser-view', 'dsh', 'resume-server', 'graytech', 'atreyus-backend', 'atreyus-frontend'];
 
 // ── State ────────────────────────────────────────────────────────────
 const state = {};

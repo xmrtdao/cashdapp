@@ -1021,6 +1021,30 @@ export function createCampusHandler(deps) {
     .intel-card h4 .hint { color: var(--text-dim); font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 0.58rem; }
     .intel-scroll { max-height: 260px; overflow-y: auto; }
 
+    /* ── Harness Fleet overlay ──────────────────────────────
+       The OpenHands control-plane view. A fixed, ink-dark layer like
+       #intel-overlay, but for the agent runtimes. */
+    #harness-overlay {
+      display: none;
+      position: fixed; inset: 0; z-index: 401;
+      background: rgba(9, 11, 9, 0.97);
+      backdrop-filter: blur(3px);
+      font-family: var(--font-sans);
+    }
+    #harness-overlay.open { display: flex; flex-direction: column; }
+    #harness-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-card); }
+    #harness-head .spacer { flex: 1; }
+    #harness-head h3 {
+      font-family: var(--font-display); font-size: 0.95rem; letter-spacing: 0.08em;
+      text-transform: uppercase; color: #4ade80; margin: 0;
+    }
+    #harness-body { flex: 1; overflow: auto; padding: 10px 12px 24px; }
+    .harness-status-dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--text-dim); vertical-align:middle; margin-right:5px; }
+    .harness-status-healthy { background:#4ade80; box-shadow:0 0 6px rgba(74,222,128,0.6); }
+    .harness-status-degraded { background:#fbbf24; }
+    .harness-status-down { background:#f87171; }
+    .harness-status-not-installed, .harness-status-unknown { background:#565866; }
+
     /* ── Jantt ──────────────────────────────────────────────────────────────
        The bars grow from the left when the board opens. The animation is on
        width (not transform) so the label inside a bar is never stretched,
@@ -1676,6 +1700,33 @@ export function createCampusHandler(deps) {
     <div id="task-pipeline-content" style="height:290px;overflow-y:auto;font-size:0.55rem;"></div>
   </div>
 </div>
+<!-- 🤖 Harness Fleet — the OpenHands control plane. One row per local agent
+     runtime, with the health verdict the relay re-checks every minute.
+     The ⛶ button opens the full Harness Fleet board (overlay). -->
+<div class="card" id="harnesses">
+  <h3 style="color:#4ade80;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    🤖 Harness Fleet
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— OpenHands · runtimes &amp; routing</span>
+    <button onclick="openHarnessBoard()" title="Open the Harness Fleet board" style="margin-left:auto;background:var(--bg-card);color:#4ade80;border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:0.62rem;cursor:pointer;">⛶ board</button>
+  </h3>
+  <div id="harness-fleet-summary" style="font-size:0.62rem;color:var(--text-dim);font-family:'Space Mono',monospace;margin:2px 0 5px;">loading…</div>
+  <div id="harness-fleet-list" style="display:flex;flex-direction:column;gap:3px;max-height:285px;overflow-y:auto;font-size:0.62rem;">
+    <div class="stat"><span class="label">Loading harnesses…</span></div>
+  </div>
+</div>
+
+<!-- 🎬 OpenFilm Projects — the films on this machine, read straight from
+     their film.html. Clicking a project opens it in the Studio (through
+     the relay's openfilm tool, which prints the cookie-keyed URL). -->
+<div class="card" id="openfilm">
+  <h3 style="color:#f472b6;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    🎬 OpenFilm Projects
+    <span style="color:var(--text-dim);font-weight:400;font-size:0.7rem;">— local films · agent-assisted edition</span>
+  </h3>
+  <div id="openfilm-projects" style="display:flex;flex-direction:column;gap:5px;max-height:340px;overflow-y:auto;font-size:0.62rem;">
+    <div class="stat"><span class="label">Loading projects…</span></div>
+  </div>
+</div>
     </div><!-- /tenant-grid suite -->
   </section>
 
@@ -2025,7 +2076,36 @@ export function createCampusHandler(deps) {
        them; if dashboard.js fails to load the board shows its own text
        rather than an empty frame, because an empty frame reads as "no data"
        and the truth would be "the renderer is broken". -->
-  <div id="intel-overlay" role="dialog" aria-modal="true" aria-label="Activity Intelligence">
+  <!-- 🤖 Harness Fleet · full board — the OpenHands control plane view.
+     Modelled on #intel-overlay: a fixed, ink-dark layer so the operator
+     never loses the board they are watching. -->
+<div id="harness-overlay" role="dialog" aria-modal="true" aria-label="Harness Fleet">
+  <div id="harness-head">
+    <h3>🤖 Harness Fleet <span class="intel-sub" id="harness-generated">…</span></h3>
+    <span class="spacer"></span>
+    <button class="intel-btn" onclick="refreshHarnessBoard(true)">↻ refresh</button>
+    <button class="intel-btn" onclick="closeHarnessBoard()">✕ close</button>
+  </div>
+  <div id="harness-body">
+    <div class="intel-card" style="margin-bottom:10px;">
+      <h4>Routing <span class="hint">which runtime picks up which capability?</span></h4>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+        <input id="harness-route-input" placeholder="capability — e.g. code, research, chat, tts"
+               style="background:#0a0a14;color:var(--text-primary);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.7rem;min-width:230px;"
+               onkeydown="if(event.key==='Enter')routeHarness()">
+        <button class="intel-btn" onclick="routeHarness()">route →</button>
+        <span id="harness-route-result" style="font-size:0.68rem;color:var(--text-dim);"></span>
+      </div>
+    </div>
+    <div class="intel-card" style="margin-bottom:10px;">
+      <h4>Fleet <span class="hint" id="harness-fleet-count">health re-checked every 60 s</span></h4>
+      <div id="harness-summary" style="display:flex;gap:14px;flex-wrap:wrap;font-size:0.72rem;margin-bottom:8px;font-family:'Space Mono',monospace;"></div>
+      <div id="harness-grid" class="intel-grid"></div>
+    </div>
+  </div>
+</div>
+
+<div id="intel-overlay" role="dialog" aria-modal="true" aria-label="Activity Intelligence">
     <div id="intel-head">
       <h3>📡 Activity Intelligence</h3>
       <span class="intel-sub" id="intel-generated">loading…</span>

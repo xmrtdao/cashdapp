@@ -7138,6 +7138,99 @@ const { listHarnesses, getHarness, upsertHarness, updateHarnessHealth, updateHar
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // GET /api/harnesses/board — one payload for the Harness Fleet board.
+  // Returns the registry rows with live health plus the active-task load
+  // each harness carries, so the dashboard does not have to make N calls.
+  app.get('/api/harnesses/board', async (req, res) => {
+    trackRequest('GET /api/harnesses/board');
+    try {
+      const { listHarnesses, summarizeHarnesses } = await import('./lib/harness-registry.mjs');
+      const harnesses = await listHarnesses(queryLocalPg);
+
+      let load = {};
+      try {
+        const rows = await queryLocalPg(
+          "SELECT metadata->>'assigned_harness' AS harness, count(*)::int AS n FROM app.tasks WHERE status IN ('PENDING','CLAIMED','IN_PROGRESS','REVIEW') AND metadata->>'assigned_harness' IS NOT NULL GROUP BY 1", []
+        );
+        for (const row of rows.rows || []) load[row.harness] = row.n;
+      } catch (e) { console.log('[harnesses/board] task load query failed:', e.message); }
+
+      const summary = summarizeHarnesses(harnesses);
+      const out = harnesses.map((h) => ({
+        id: h.id, name: h.name, type: h.type, endpoint: h.endpoint,
+        ui: h.ui_endpoint, status: h.status, error: h.last_health_error,
+        lastCheck: h.last_health_check, capabilities: h.capabilities || [],
+        load: load[h.id] || 0, supervised: Boolean(h.supervised),
+        installHint: h.install_hint, mode: h.health_mode || null,
+      }));
+      res.json({ success: true, generatedAt: Date.now(), summary, harnesses: out });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // GET /api/openfilm/projects — the OpenFilm projects that live on this machine.
+  // Reads the film.html files to compute duration + voiceover so the
+  // dashboard can show what each project is without an agent doing it.
+  app.get('/api/openfilm/projects', async (req, res) => {
+    trackRequest('GET /api/openfilm/projects');
+    try {
+      const fs = await import('fs');
+      const { join } = await import('path');
+      const root = 'C:\\Users\\PureTrek\\Desktop\\xmrtdao';
+      const skipDirs = new Set(['node_modules', '.git', '.ci-workflows', 'pg', 'OpenFilm']);
+      const projects = [];
+      for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || skipDirs.has(entry.name) || entry.name.startsWith('.')) continue;
+        const dir = join(root, entry.name);
+        const filmPath = join(dir, 'film.html');
+        if (!fs.existsSync(filmPath)) continue;
+
+        const html = fs.readFileSync(filmPath, 'utf8');
+        const attr = (tag, name) => {
+          const m = tag.match(new RegExp(name + '="([^"]*)"'));
+          return m ? m[1] : null;
+        };
+        let duration = 0;
+        let scenes = 0;
+        const iframeRe = /<iframe[^>]*>/g;
+        let m;
+        while ((m = iframeRe.exec(html))) {
+          const tag = m[0];
+          const startAt = parseFloat(attr(tag, 'at') || '0');
+          const src = attr(tag, 'src') || '';
+          let clipLen = 5;
+          const tm = src.match(/#t=([0-9.]+),([0-9.]+)/);
+          if (tm) clipLen = Math.max(0, parseFloat(tm[2]) - parseFloat(tm[1]));
+          const end = startAt + clipLen;
+          if (end > duration) duration = end;
+          scenes++;
+        }
+
+        const audioM = html.match(/<audio[^>]*src="([^"]+)"/);
+        let filmId = null;
+        try { filmId = fs.readFileSync(join(dir, '.film', 'id'), 'utf8').trim(); } catch {}
+        let mp4 = null;
+        try {
+          const files = fs.readdirSync(dir);
+          const mp4f = files.find((f) => f.endsWith('.mp4'));
+          if (mp4f) mp4 = { name: mp4f, bytes: fs.statSync(join(dir, mp4f)).size };
+        } catch {}
+
+        projects.push({
+          name: entry.name,
+          filmId,
+          scenes,
+          duration: Math.round(duration * 10) / 10,
+          voiceover: Boolean(audioM),
+          audioAsset: audioM ? audioM[1] : null,
+          mp4,
+          updatedAt: fs.statSync(filmPath).mtimeMs,
+        });
+      }
+      projects.sort((a, b) => b.updatedAt - a.updatedAt);
+      res.json({ success: true, count: projects.length, projects });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // GET /api/harnesses/:id — get a single harness
   app.get('/api/harnesses/:id', async (req, res) => {
     trackRequest('/api/harnesses/:id');
@@ -7200,6 +7293,7 @@ const { listHarnesses, getHarness, upsertHarness, updateHarnessHealth, updateHar
       res.json({ success: true, harness });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
+
 
   console.log('[relay] Harness registry endpoints registered');
 
@@ -18532,6 +18626,34 @@ const relayHttpServer = app.listen(PORT, '0.0.0.0', async () => {
     () => { runInboundSyncPass({ ...inboundSyncArgs(), trigger: 'periodic' }); },
     INBOUND_SYNC_INTERVAL_MS
   );
+
+  // ── Harness health sweep (OpenHands control plane) ──
+  // app.harnesses was last really re-checked on Nov 9 and nothing re-checked
+  // it after that, so the registry carried six-day-old verdicts. This does a
+  // parallel, read-only probe of every harness every minute and writes only
+  // the rows whose verdict changed. Runs on the same cadence as the inbox
+  // sync because it costs the same class of thing: one fetch per harness,
+  // not thousands.
+  const HARNESS_HEALTH_INTERVAL_MS = 60 * 1000;
+  const harnessLastStatus = new Map();
+  async function harnessHealthSweepNow() {
+    const { runHealthChecks } = await import('./lib/harness-registry.mjs');
+    const results = await runHealthChecks(queryLocalPg);
+    const changes = [];
+    for (const r of results) {
+      const prev = harnessLastStatus.get(r.id);
+      harnessLastStatus.set(r.id, r.status);
+      if (prev === undefined || prev !== r.status) changes.push(r.id + '=' + r.status);
+    }
+    if (changes.length) console.log('[harness-health] status change: ' + changes.join(', '));
+    return results;
+  }
+  setTimeout(() => {
+    harnessHealthSweepNow().catch(e => console.log('[harness-health] boot sweep error:', e.message));
+    setInterval(() => {
+      harnessHealthSweepNow().catch(e => console.log('[harness-health] sweep error:', e.message));
+    }, HARNESS_HEALTH_INTERVAL_MS);
+  }, 10000);
   console.log(`[inbox-sync] periodic inbound sync every ${INBOUND_SYNC_INTERVAL_MS / 60000} min `
     + `across ${EMAIL_INBOX_KEYS.length} domains (${EMAIL_INBOX_KEYS.map(k => EMAIL_DOMAINS[k].domain).join(', ')})`);
 
