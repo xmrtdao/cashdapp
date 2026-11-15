@@ -704,26 +704,69 @@ function findProcessByName(name) {
   }
 }
 
+// ── Process table ───────────────────────────────────────────────────
+//
+// One `wmic process` call enumerates every node.exe on the box with its
+// command line. Asking for one service at a time cost 30+ wmic calls per
+// tick, and wmic is slow: the tick was measured at up to 167 seconds, so the
+// state file the product reads was minutes stale, and the portless services
+// failed their health check whenever a wmic call timed out - a service that
+// was demonstrably running was reported DOWN.
+//
+// The table is refreshed at most once every PROCESS_TABLE_TTL_MS and filtered
+// in JS. The matching semantics are unchanged: a case-insensitive substring
+// match on the command line, exactly like the `LIKE '%...%'` it replaces.
+const PROCESS_TABLE_TTL_MS = 15000;
+let processTable = null;   // { rows: [{pid, cmd}], at: number }
+
+function refreshProcessTable() {
+  const now = Date.now();
+  if (processTable && (now - processTable.at) < PROCESS_TABLE_TTL_MS) {
+    return processTable.rows;
+  }
+  try {
+    const out = execSync(
+      `wmic process where "name='node.exe'" get ProcessId,CommandLine /format:csv`,
+      { stdio: ['pipe', 'pipe', 'ignore'], timeout: 15000, encoding: 'utf8', windowsHide: true }
+    );
+    const rows = [];
+    for (const line of out.split(/\r?\n/)) {
+      // wmic's CSV is `Node,CommandLine,ProcessId` - the columns come out in
+      // ALPHABETICAL order, not the order they were asked for, and the quoting
+      // is broken: a command line containing a comma is wrapped in an opening
+      // quote and never closed. So the pid is always the LAST field and the
+      // command line is everything between the first comma and the last one.
+      // Parsing it the documented way (`Node,ProcessId,CommandLine`) silently
+      // produced an empty table, which made every script-name lookup miss.
+      const m = line.trim().match(/^[^,]*,(.*),(\d+)\s*$/);
+      if (!m) continue;
+      const pid = parseInt(m[2], 10);
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      let cmd = m[1].trim();
+      if (cmd.startsWith('"')) cmd = cmd.slice(1);
+      if (cmd.endsWith('"')) cmd = cmd.slice(0, -1);
+      rows.push({ pid, cmd });
+    }
+    processTable = { rows, at: now };
+  } catch {
+    // wmic failed. Keep the previous table rather than reporting every
+    // service as gone - a failed query is not evidence of absence.
+    if (!processTable) processTable = { rows: [], at: now };
+  }
+  return processTable.rows;
+}
+
 function findProcessByScript(scriptName) {
   // Find a node process running a specific script — returns ALL matching PIDs
   // (not just the first) so the supervisor can self-prune duplicates.
   try {
-    if (process.platform === 'win32') {
-      const out = execSync(
-        `wmic process where "name='node.exe' and commandline like '%${scriptName}%'" get processid /format:csv 2>nul`,
-        { stdio: ['pipe', 'pipe', 'ignore'], timeout: 5000, encoding: 'utf8', windowsHide: true }
-      );
-      // Skip the header row ("Node,ProcessId") — only data rows have an integer pid
-      const dataRows = out.trim().split('\n')
-        .filter(l => l.includes(','))
-        .filter(l => /,\d+\s*$/.test(l));
-      const pids = dataRows.map(l => parseInt(l.split(',').pop().trim(), 10)).filter(Boolean);
-      return pids.length > 0 ? pids : null;
-    }
-    const out = execSync(`pgrep -f "node.*${scriptName}" 2>/dev/null`, {
-      stdio: ['pipe', 'pipe', 'ignore'], timeout: 5000, encoding: 'utf8',
-    }).trim();
-    return out ? out.split('\n').map(l => parseInt(l, 10)).filter(Boolean) : null;
+    const needle = String(scriptName).toLowerCase();
+    if (!needle) return null;
+    const rows = refreshProcessTable();
+    const pids = rows
+      .filter(r => r.cmd.toLowerCase().includes(needle))
+      .map(r => r.pid);
+    return pids.length > 0 ? pids : null;
   } catch {
     return null;
   }
@@ -1109,13 +1152,26 @@ async function checkServiceHealth(name) {
     return await checkTcpPort('127.0.0.1', def.tcpPort, 2000);
   }
 
-  // 4. Our child process is alive (for spawned services without HTTP/TCP like schedulers)
-  if (s && s.child) {
-    try { process.kill(s.child.pid, 0); return true; } catch {}
+  // 4. Our tracked process is alive (for spawned services without HTTP/TCP
+  //    like schedulers, and for adopted ones).
+  //
+  //    `s.externalPid` is the pid of an ADOPTED service - one that was already
+  //    running when this supervisor started, so it has no child handle. It was
+  //    ignored here, so every portless service (alice, cron-engine-v2,
+  //    campaign-scheduler, security, verifier, dsh, browser-view,
+  //    opencode-agent, tunnel) fell through to a wmic search of the whole
+  //    process table on every tick. Under load those searches timed out and
+  //    a service that was demonstrably running was reported DOWN.
+  //
+  //    A pid check is a syscall. It costs nothing and it cannot be slow.
+  const trackedPid = s?.child?.pid || s?.externalPid;
+  if (trackedPid) {
+    try { process.kill(trackedPid, 0); return true; } catch {}
   }
 
-  // 5. For services with no HTTP/TCP/child: check process by script name in the live table
-  // This catches cases where the child reference is stale but a healthy instance exists.
+  // 5. For services with no HTTP/TCP/tracked pid: check process by script
+  //    name in the live table. This catches cases where the tracked reference
+  //    is stale but a healthy instance exists.
   const scriptName = def.args.find(a => a.endsWith('.mjs') || a.endsWith('.js') || a.endsWith('.exe'));
   if (scriptName) {
     if (findProcessByScript(scriptName.replace(/^.*\//, ''))) return true;
@@ -1323,6 +1379,32 @@ async function performHealthCheck(name, def) {
       }
       // Also kill our tracked child if it's still alive
       if (s.child) killProcess(s.child.pid);
+
+      // And kill any other live instance of THIS service that we found by
+      // name.
+      //
+      // Some services run under a pid the supervisor does not own. alice keeps
+      // its own PID lock: the launcher exits the moment it sees another
+      // instance is already running, so the pid the supervisor tracked was
+      // already dead while the real daemon kept running. Killing only the
+      // tracked child left the old instance alive, and the replacement
+      // launcher exited immediately because the old instance's lock was still
+      // held - so "restart alice" restarted nothing and the supervisor
+      // looped on it.
+      //
+      // The command line is matched before the kill, so a pid that has since
+      // been reused by an unrelated process is never touched.
+      const scriptArg = def.args.find(a => a.endsWith('.mjs') || a.endsWith('.js'));
+      if (scriptArg) {
+        const needle = scriptArg.replace(/^.*\//, '').toLowerCase();
+        for (const row of refreshProcessTable()) {
+          if (row.pid === process.pid) continue;
+          if (s.child && row.pid === s.child.pid) continue;
+          if (!row.cmd.toLowerCase().includes(needle)) continue;
+          log(`${name}: killing live instance pid ${row.pid}`);
+          killProcess(row.pid);
+        }
+      }
       // Wait for port to be released before spawning new instance
       if (port) {
         let waited = 0;
