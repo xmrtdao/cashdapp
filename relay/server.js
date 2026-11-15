@@ -1224,6 +1224,103 @@ function jobbyTools() {
   return jobbyToolBundle;
 }
 
+/**
+ * Start / stop / restart the SUPERVISOR itself.
+ *
+ * The supervisor is not one of its own supervised services - it has no entry
+ * in state.services - so it needs its own path. Both the `service_control`
+ * tool and the POST /api/supervisor/restart route come through here, so
+ * there is exactly one implementation of "make the supervisor run again".
+ *
+ * What this replaces: the old branch cleared the pid lock and fired the
+ * XMRT-LocalSupervisor scheduled task. That task was DISABLED (last run
+ * 2026-08-21) and its action was `supervisor.mjs --once` - a single
+ * health-check tick, not the long-running daemon. So the branch cleared the
+ * lock, ran a task that did not run, and answered "success". Anyone who
+ * asked the relay to restart the supervisor was told it worked and nothing
+ * happened. That is the whole reason the stack could stay broken for five
+ * hours while the product reported success.
+ */
+async function controlSupervisor(action) {
+  const { spawn, execFileSync } = await import('child_process');
+  const supervisorRoot = join(DATA_DIR, '..');
+  const supervisorScript = join(supervisorRoot, 'supervisor.mjs');
+  const pidFile = join(DATA_DIR, 'supervisor.pid');
+  const disabledFile = join(DATA_DIR, 'supervisor.disabled');
+
+  if (!existsSync(supervisorScript)) {
+    return { error: `supervisor script not found at ${supervisorScript}` };
+  }
+
+  // The live supervisor pid: the pid file first, the state file's own `_pid`
+  // as the fallback (the pid file is cleared during a restart).
+  let oldPid = null;
+  try { oldPid = parseInt(readFileSync(pidFile, 'utf8').trim()) || null; } catch {}
+  if (!oldPid) {
+    try {
+      const st = JSON.parse(readFileSync(join(DATA_DIR, 'supervisor-state.json'), 'utf8'));
+      oldPid = parseInt(st._pid) || null;
+    } catch {}
+  }
+  const oldAlive = oldPid && isProcessRunningByPid(oldPid);
+
+  if (action === 'stop') {
+    // A deliberate stop has to survive the watchdog that restarts a dead
+    // supervisor, so it is recorded as well as performed.
+    try { writeFileSync(disabledFile, new Date().toISOString()); } catch {}
+    if (oldAlive) {
+      try {
+        // WITHOUT /T. The supervisor is the PARENT of every service it
+        // manages, so `taskkill /T` on it takes the whole stack down with it -
+        // the relay included, which is how the request that asked for a stop
+        // also killed the connection that was answering it. Stopping the
+        // supervisor means stopping the supervisor; the services it was
+        // watching are adopted again on the next start.
+        execFileSync('taskkill', ['/F', '/PID', String(oldPid)], { windowsHide: true, timeout: 10000 });
+      } catch {}
+    }
+    try { writeFileSync(pidFile, ''); } catch {}
+    return {
+      success: true, service: 'supervisor', status: 'stopped', action,
+      stoppedPid: oldAlive ? oldPid : null,
+      message: 'Supervisor stopped and marked disabled. The watchdog will not bring it back until it is started again.',
+    };
+  }
+
+  // start / restart
+  try { if (existsSync(disabledFile)) unlinkSync(disabledFile); } catch {}
+
+  let stoppedPid = null;
+  if (action === 'restart' && oldAlive) {
+    try {
+      // WITHOUT /T - the services are the supervisor's children, and killing
+      // the tree would restart the entire stack (including the database) when
+      // all that was asked for was a new supervisor. The new instance adopts
+      // whatever is still running.
+      execFileSync('taskkill', ['/F', '/PID', String(oldPid)], { windowsHide: true, timeout: 10000 });
+      stoppedPid = oldPid;
+    } catch {}
+    // Give the old supervisor a moment to release the pid lock before the
+    // new instance takes it.
+    await new Promise(r => setTimeout(r, 1500));
+    try { writeFileSync(pidFile, ''); } catch {}
+  }
+
+  const child = spawn(process.execPath, [supervisorScript, '--daemon'], {
+    cwd: supervisorRoot,
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
+
+  return {
+    success: true, service: 'supervisor', status: 'restarting', action,
+    stoppedPid,
+    message: 'Supervisor daemon launched (--daemon). It takes the pid lock, adopts what is already running and starts everything that is not.',
+  };
+}
+
 const toolHandlers = {
   // ── PFP financial tools ────────────────────────────────────────────────
   // The only tools in this map that can move money. Each asks the standing gate
@@ -2497,26 +2594,13 @@ const toolHandlers = {
       // tick (it would kill itself mid-loop). Handle supervisor restarts here
       // directly: clear the stale PID lock and trigger the scheduled task.
       if (service === 'supervisor') {
-        // `status` is handled in the block above (the supervisor has no entry in
+        // 'status' is handled in the block above (the supervisor has no entry in
         // state.services, so it must be resolved from the pid file / _pid).
         // Only start/restart/stop reach here.
         if (action === 'status') {
           return { error: 'supervisor status must be resolved from the pid file' };
         }
-        if (action === 'restart' || action === 'start') {
-          const pidFile = join(DATA_DIR, 'supervisor.pid');
-          try { writeFileSync(pidFile, ''); } catch {}
-          const { execFileSync } = await import('child_process');
-          try { execFileSync('schtasks', ['/Run', '/TN', 'XMRT-LocalSupervisor'], { windowsHide: true, timeout: 10000 }); } catch (e) {
-            return { error: `failed to trigger supervisor task: ${e.message}` };
-          }
-          return { success: true, service, status: 'restarting', action, message: 'Supervisor PID lock cleared and XMRT-LocalSupervisor task triggered. It will run a fresh --once tick within ~1 minute.' };
-        }
-        if (action === 'stop') {
-          const pidFile = join(DATA_DIR, 'supervisor.pid');
-          try { writeFileSync(pidFile, ''); } catch {}
-          return { success: true, service, status: 'stopped', action, message: 'Supervisor PID lock cleared. It will not restart until the scheduled task fires.' };
-        }
+        return controlSupervisor(action);
       }
       let queue = [];
       if (existsSync(queueFile)) {
@@ -7600,11 +7684,40 @@ app.get('/api/supervisor/status', async (req, res) => {
     // module-level (see below the status endpoint); the call inside this handler
     // resolves to the same function.
 
-    // Supervisor status: the relay's built-in service manager handles all services.
-    // The XMRT-LocalSupervisor scheduled task (--once mode) is an optional health monitor.
-    // If the relay is running, supervisor is effectively alive.
+    // The supervisor's real liveness.
+    //
+    // This used to be `supervisorAlive = true` with the comment "relay
+    // manages services directly". That was true of an older stack and is not
+    // true of this one: supervisor.mjs owns 21 services and restarts them.
+    // It was DEAD from 2026-11-15 09:39 to 15:00, and this endpoint spent
+    // those five hours telling every dashboard and every agent that the
+    // supervisor was alive - because the value was hardcoded.
+    //
+    // The state file made it worse: the supervisor stopped writing it, so it
+    // froze holding the pids it had at 09:39. Every service still read as
+    // healthy against those stale pids. A frozen file and a hardcoded `true`
+    // between them turned a dead supervisor into a stack that looked perfect.
     let supervisorPid = null;
-    let supervisorAlive = true; // relay manages services directly
+    let supervisorAlive = false;
+    let supervisorStateAgeMs = null;
+    try {
+      const pidFile = join(DATA_DIR, 'supervisor.pid');
+      if (existsSync(pidFile)) {
+        const p = parseInt(readFileSync(pidFile, 'utf8').trim()) || null;
+        if (p && isProcessRunningByPid(p)) { supervisorPid = p; supervisorAlive = true; }
+      }
+      if (!supervisorAlive && stateData._pid) {
+        const p = parseInt(stateData._pid) || null;
+        if (p && isProcessRunningByPid(p)) { supervisorPid = p; supervisorAlive = true; }
+      }
+      if (stateData._updatedAt) supervisorStateAgeMs = Date.now() - stateData._updatedAt;
+    } catch { /* state file unavailable */ }
+
+    // The supervisor writes the state file every tick (30s). If it has not
+    // moved for three ticks the supervisor is not ticking - hung, or wedged -
+    // and it is restarting nothing even if its pid is alive. Saying "alive"
+    // here would repeat the exact lie this endpoint used to tell.
+    const supervisorStale = supervisorStateAgeMs !== null && supervisorStateAgeMs > 180000;
 
     // Build service status from the state file with live process checks.
     //
@@ -7762,12 +7875,32 @@ app.get('/api/supervisor/status', async (req, res) => {
     const downCount = services.length - upCount;
     let healthScore = 50 + (upCount * 5) - (downCount * 10);
     healthScore = Math.max(0, Math.min(100, healthScore));
+
+    // A stack with no supervisor is not a healthy stack, however many services
+    // happen to be up at this instant: nothing is being watched, so the next
+    // crash stays crashed. The supervisor's own state belongs in the score -
+    // reporting a perfect 100 while the thing that maintains the stack is
+    // dead is the lie this endpoint used to tell for five hours.
+    if (!supervisorAlive) healthScore = Math.max(0, healthScore - 40);
+    else if (supervisorStale) healthScore = Math.max(0, healthScore - 20);
     const healthStatus = healthScore >= 80 ? 'healthy' : healthScore >= 50 ? 'degraded' : 'critical';
 
     return res.json({
-      ok: true, supervisor: { pid: supervisorPid, alive: supervisorAlive },
+      ok: true,
+      supervisor: {
+        pid: supervisorPid,
+        alive: supervisorAlive && !supervisorStale,
+        processAlive: supervisorAlive,
+        stale: supervisorStale,
+        stateAgeMs: supervisorStateAgeMs,
+        lastStateUpdate: stateData._updatedAt || null,
+      },
       services, tasks, recentLog: [],
-      health: { score: healthScore, status: healthStatus, up: upCount, down: downCount, total: services.length },
+      health: {
+        score: healthScore, status: healthStatus,
+        up: upCount, down: downCount, total: services.length,
+        supervisorAlive: supervisorAlive && !supervisorStale,
+      },
       lastTaskCheck: stateData.lastTaskCheck || 0, checkedAt: Date.now(),
     });
   } catch (e) {
@@ -7893,6 +8026,18 @@ app.post('/api/supervisor/restart', express.json(), async (req, res) => {
 
   const known = await listSupervisedServices();
   const entry = known.find((s) => s.name === service);
+  if (!entry && service === 'supervisor') {
+    // The supervisor is not one of its own supervised services - it has no
+    // entry in state.services - so this route answered 404 for it, and the
+    // dashboard's restart control could never restart the thing that restarts
+    // everything else. It gets its own path, sharing one implementation with
+    // the service_control tool.
+    const action = String(req.body?.action || 'restart').trim().toLowerCase();
+    if (!['restart', 'start', 'stop'].includes(action)) {
+      return res.status(400).json({ error: 'action must be one of: restart, start, stop' });
+    }
+    return res.json(await controlSupervisor(action));
+  }
   if (!entry) {
     return res.status(404).json({
       error: `no supervised service named "${service}"`,

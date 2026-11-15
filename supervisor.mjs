@@ -80,6 +80,11 @@ const PID_FILE = join(DATA_DIR, 'supervisor.pid');
 const STATE_FILE = join(DATA_DIR, 'supervisor-state.json');
 const LOG_FILE = join(LOG_DIR, 'supervisor.log');
 
+// An operator - or the relay's own service_control - can take the supervisor
+// out of service on purpose. The watchdog task fires every couple of minutes,
+// so without this marker it would undo a deliberate stop within one tick.
+const DISABLED_FILE = join(DATA_DIR, 'supervisor.disabled');
+
 // ── Logging ──────────────────────────────────────────────────────────
 const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10 MB
 const MAX_LOG_FILES = 5;
@@ -390,6 +395,44 @@ const SERVICE_DEFS = [
     dependsOn: ['relay'],
   },
   {
+    // The SIEM. It polls the events this stack already collects, runs the
+    // rules in relay/lib/security.mjs over them, keeps the alert lifecycle and
+    // tells the fleet when something is worth telling them.
+    //
+    // It was in START_ORDER with NO entry in SERVICE_DEFS, so tick() hit
+    // `if (!def) continue;` and skipped it every single time. The service was
+    // never started and never restarted - it has been down since 2026-11-12.
+    // An unsupervised service that looks supervised is worse than one that is
+    // visibly absent: the name in the start order said "we look after this".
+    //
+    // No HTTP port: it is a polling loop, so health is process existence.
+    name: 'security',
+    cmd: 'node',
+    args: ['relay/security-service.mjs'],
+    cwd: ROOT,
+    healthUrl: null,
+    healthCheck: null,
+    startupGraceMs: 8000,
+    dependsOn: ['pg', 'relay'],
+  },
+  {
+    // The thing that decides whether a task has earned the right to finish.
+    // It closes tasks that are genuinely done and returns the ones that are
+    // not. Without it the task board has no closure rule, and the evidence
+    // gate in AGENTS.md has nothing enforcing it.
+    //
+    // Same as `security`: it was in START_ORDER with no SERVICE_DEFS entry, so
+    // it was skipped every tick and has been down since 2026-11-12.
+    name: 'verifier',
+    cmd: 'node',
+    args: ['relay/verifier-service.mjs'],
+    cwd: ROOT,
+    healthUrl: null,
+    healthCheck: null,
+    startupGraceMs: 8000,
+    dependsOn: ['pg', 'relay'],
+  },
+  {
     // DeepSeek Harness web UI — Builder's workspace + watchable harness on :3080.
     // The detached .cjs launcher sets DEEPSEEK_BASE_URL/API_KEY in the child env
     // and writes the one-time auth-token URL to dsh/dsh-web-harness.log (that's
@@ -601,7 +644,16 @@ function saveState() {
   const now = Date.now();
   for (const [name, s] of Object.entries(state)) {
     if (!out.services[name]) out.services[name] = {};
-    out.services[name].childPid = s.child?.pid || null;
+    // The live pid of the service, whoever owns it.
+    //
+    // This was `s.child?.pid || null`. An ADOPTED service - one that was
+    // already running when this supervisor started - has no child handle, so
+    // that wrote null and dropped the pid we had just recorded for it. The
+    // state file is the only durable record of what is running; with the pid
+    // gone, the NEXT supervisor start read the file, found nothing tracked
+    // for that service, and the startup sweep killed the live process as a
+    // "stale port owner". The sweep was killing services it had just adopted.
+    out.services[name].childPid = s.child?.pid || s.externalPid || null;
     out.services[name].startedAt = s.startedAt || out.services[name].startedAt || now;
     if (s.healthy !== undefined) out.services[name].healthy = s.healthy;
     if (s.failures !== undefined) out.services[name].failures = s.failures;
@@ -1166,12 +1218,16 @@ async function tick() {
       const isUnknownPid = existingPid === -1;
       if (!state[name]) {
         log(`${name} already running externally${isUnknownPid ? '' : ` (pid ${existingPid})`} — adopting`);
+        const prev = stateFile.services?.[name];
         state[name] = {
           child: null,
           externalPid: isUnknownPid ? null : existingPid,
           failures: 0,
-          startedAt: Date.now(),
-          healthy: false,
+          // Same reasoning as boot(): an adopted service was already running,
+          // so it inherits when it started and its last known verdict rather
+          // than being reset to "not started, not healthy".
+          startedAt: prev?.startedAt || Date.now(),
+          healthy: prev?.healthy === true,
           isExternal: true,
         };
       }
@@ -1294,16 +1350,34 @@ async function boot() {
   log(`pid: ${process.pid}`);
 
   // Check for existing services and adopt them
+  const persisted = loadState();
   for (const name of START_ORDER) {
     const existingPid = await findExistingProcess(name);
     if (existingPid) {
       log(`${name} already running (pid ${existingPid}) — adopting`);
+      const prev = persisted.services?.[name];
       state[name] = {
         child: null,
         externalPid: existingPid,
         failures: 0,
-        startedAt: Date.now(),
-        healthy: false,
+        // When the service ACTUALLY started, not when this supervisor booted.
+        //
+        // The startup grace period exists so that a service the supervisor has
+        // just SPAWNED is not judged before it has finished booting - graytech
+        // loads a face-recognition model and needs ~95s, the relay needs 90s.
+        // An ADOPTED service was already up before this supervisor existed,
+        // so it does not need the grace again.
+        //
+        // Resetting startedAt to now gave every adopted service the full
+        // grace period again, and `healthy` was hard-coded to false until it
+        // expired. For the first minute and a half after every supervisor
+        // restart, the state file said every single service in the stack was
+        // DOWN - including the ones that had never stopped running.
+        startedAt: prev?.startedAt || Date.now(),
+        // Carry the last known verdict forward. "Not checked yet" is not the
+        // same claim as "known to be down", and writing the latter turned a
+        // supervisor restart into a stack-wide false alarm.
+        healthy: prev?.healthy === true,
         isExternal: true,
       };
     }
@@ -1360,6 +1434,29 @@ function daemonize() {
 }
 
 // ── PID lock ─────────────────────────────────────────────────────────
+/**
+ * Pids of node processes running this supervisor in --serve mode.
+ *
+ * The pid file is only a hint: it can be emptied by a restart, truncated by a
+ * crash, or left behind by a killed supervisor. Two live supervisors over one
+ * state file are worse than none - they fight over the service list, and each
+ * one's startup sweep treats the other's children as stale owners.
+ */
+function findRunningServeSupervisors() {
+  try {
+    const out = execSync(
+      `wmic process where "name='node.exe' and commandline like '%supervisor.mjs%' and commandline like '%--serve%'" get processid /format:csv`,
+      { stdio: ['pipe', 'pipe', 'ignore'], timeout: 5000, encoding: 'utf8', windowsHide: true }
+    );
+    return out.trim().split(/\r?\n/)
+      .filter(l => /,\d+\s*$/.test(l))
+      .map(l => parseInt(l.split(',').pop().trim(), 10))
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 function acquireLock() {
   try {
     if (existsSync(PID_FILE)) {
@@ -1367,6 +1464,14 @@ function acquireLock() {
       if (oldPid && isProcessRunning(oldPid)) {
         return false; // another supervisor is running
       }
+    }
+    // The pid file alone is not proof. Look for a live --serve supervisor
+    // before taking the lock, so a stale or cleared pid file cannot let a
+    // second supervisor start on top of a running one.
+    const others = findRunningServeSupervisors().filter(p => p !== process.pid);
+    if (others.length > 0) {
+      log(`acquireLock: a --serve supervisor is already running (pid ${others[0]}) — refusing to start a second`);
+      return false;
     }
     writeFileSync(PID_FILE, String(process.pid));
     return true;
@@ -1385,6 +1490,48 @@ function releaseLock() {
 }
 
 // ── Main ─────────────────────────────────────────────────────────────
+/**
+ * Every descendant of the given pids.
+ *
+ * A supervised service is often a WRAPPER whose child owns the port. `pg` is
+ * `relay/start-pg.mjs`; it spawns postgres.exe as its child, and postgres.exe
+ * is the real listener on :5432. The state file tracks the wrapper's pid, so
+ * the port owner was never in the tracked set and the startup sweep treated
+ * postgres.exe as a stale owner and killed the database — on every single
+ * supervisor restart. Preserving the whole subtree of every tracked pid
+ * fixes it without weakening the sweep for anything else.
+ */
+function collectDescendantPids(rootPids) {
+  const descendants = new Set();
+  if (!rootPids || rootPids.size === 0) return descendants;
+  try {
+    const out = execSync('wmic process get ProcessId,ParentProcessId /format:csv', {
+      encoding: 'utf8', timeout: 8000, windowsHide: true,
+    });
+    const byParent = new Map();
+    for (const line of out.split(/\r?\n/)) {
+      // CSV header is "Node,ParentProcessId,ProcessId"
+      const m = line.trim().match(/^[^,]*,(\d+),(\d+)\s*$/);
+      if (!m) continue;
+      const parent = parseInt(m[1], 10);
+      const pid = parseInt(m[2], 10);
+      if (!Number.isInteger(parent) || !Number.isInteger(pid)) continue;
+      if (!byParent.has(parent)) byParent.set(parent, []);
+      byParent.get(parent).push(pid);
+    }
+    const queue = [...rootPids];
+    while (queue.length) {
+      const pid = queue.pop();
+      for (const child of byParent.get(pid) || []) {
+        if (descendants.has(child)) continue;
+        descendants.add(child);
+        queue.push(child);
+      }
+    }
+  } catch {}
+  return descendants;
+}
+
 /**
  * Kill every stale owner of a supervised port at daemon start.
  *
@@ -1420,6 +1567,15 @@ function sweepStalePortOwners() {
     }
   }
   log(`startup sweep: ${trackedChildPids.size} tracked child pid(s) to preserve`);
+
+  // A tracked service may be a wrapper whose CHILD owns the port (pg ->
+  // start-pg.mjs -> postgres.exe on :5432). Preserve the whole subtree, or the
+  // sweep kills the database every time the supervisor restarts.
+  const descendantPids = collectDescendantPids(trackedChildPids);
+  if (descendantPids.size > 0) {
+    log(`startup sweep: ${descendantPids.size} descendant pid(s) of tracked services preserved`);
+    for (const pid of descendantPids) trackedChildPids.add(pid);
+  }
 
   // With no record of what we own, killing listeners is a guess. Refuse rather
   // than take the whole stack down on a bad state file.
@@ -1474,6 +1630,16 @@ async function main() {
     : process.argv.includes('--daemon') ? 'daemon'
     : process.argv.includes('--status') ? 'status'
     : 'serve';  // default: foreground serve
+
+  // A deliberate stop has to stick. The watchdog task that restarts a dead
+  // supervisor would otherwise undo it within a tick, and "stop" would be a
+  // button that flashes and lies.
+  if (mode === 'daemon' || mode === 'serve') {
+    if (existsSync(DISABLED_FILE)) {
+      log('supervisor is disabled (relay-data/supervisor.disabled exists) — not starting');
+      process.exit(0);
+    }
+  }
 
   if (mode === 'daemon') {
     daemonize();
