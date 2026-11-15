@@ -2020,6 +2020,43 @@ const toolHandlers = {
     });
   },
 
+  // ── MOSS-TTS-Nano: Free text-to-speech (0.1B, CPU, 48kHz) ──────────
+  // Wraps the MOSS-TTS-Nano ONNX inference. Generates WAV audio from text.
+  // No API key required — runs entirely locally on CPU.
+  'tts-generate': async (args) => {
+    const text = args?.text || args?.input || '';
+    if (!text) return { error: 'text (string) is required. Pass the text to synthesize.' };
+    const voice = args?.voice || 'Junhao';
+    const outputPath = args?.output_path || args?.output || `C:\\\\Users\\\\PureTrek\\\\Desktop\\\\xmrtdao\\\\relay-data\\\\tts-${Date.now()}.wav`;
+    const pyPath = 'C:\\\\Users\\\\PureTrek\\\\AppData\\\\Local\\\\hermes\\\\hermes-agent\\\\venv\\\\Scripts\\\\python.exe';
+    const mossDir = 'C:\\\\Users\\\\PureTrek\\\\Desktop\\\\xmrtdao\\\\MOSS-TTS-Nano';
+    const timeout = Math.min(args?.timeout || 120, 300);
+    try {
+      const { execSync } = await import('node:child_process');
+      const cmd = `"${pyPath}" infer_onnx.py --text "${text.replace(/"/g, '\\"')}" --output-audio-path "${outputPath}" --enable-wetext-processing 0 --voice ${voice}`;
+      const stdout = execSync(cmd, {
+        cwd: mossDir,
+        timeout: timeout * 1000,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true,
+        encoding: 'utf8',
+      });
+      const { statSync } = await import('node:fs');
+      let fileSize = 0;
+      try { fileSize = statSync(outputPath).size; } catch {}
+      return {
+        success: true,
+        output_path: outputPath,
+        file_size_bytes: fileSize,
+        text: text.slice(0, 100),
+        voice,
+        stdout: stdout.slice(0, 500),
+      };
+    } catch (err) {
+      return { success: false, error: err.message?.slice(0, 500) || 'TTS generation failed' };
+    }
+  },
+
   // ── OpenFilm: AI video agent ───────────────────────────────────────
   // Wraps the OpenFilm CLI (npx openfilm) to let agents create, edit, and
   // render videos. OpenFilm turns any coding agent into a video agent using
@@ -2028,8 +2065,13 @@ const toolHandlers = {
   'openfilm': async (args) => {
     const action = args?.action || args?.command || 'help';
     const project = args?.project || args?.folder || '';
-    const workdir = args?.workdir || 'C:\\\\Users\\\\PureTrek\\\\Desktop\\\\xmrtdao';
+    const baseDir = 'C:\\Users\\PureTrek\\Desktop\\xmrtdao';
+    const projectDir = args?.project ? baseDir + '\\' + args.project : (args?.workdir || baseDir);
+    const workdir = baseDir;
     const openfilmBin = 'npx -y openfilm@latest';
+    // Ensure ffmpeg is on PATH (installed in tools/ffmpeg)
+    const ffmpegDir = 'C:\\Users\\PureTrek\\Desktop\\xmrtdao\\tools\\ffmpeg\\ffmpeg-master-latest-win64-gpl\\bin';
+    const envPath = ffmpegDir + ';C:\\Windows\\System32;C:\\Windows;' + (process.env.PATH || '');
     let cmd = '';
     switch (action) {
       case 'open':
@@ -2064,15 +2106,22 @@ const toolHandlers = {
     const fs = await import('node:fs');
     const path = await import('node:path');
     const tmpFile = path.join('C:\\\\Users\\\\PureTrek\\\\Desktop\\\\xmrtdao\\\\relay-data', 'openfilm-' + Date.now() + '.sh');
-    fs.writeFileSync(tmpFile, '#!/bin/bash\\n' + cmd + '\\n', 'utf8');
+    const cdCmd = (action !== 'open' && args?.project) ? 'cd "' + baseDir + '/' + args.project + '" 2>/dev/null || cd "' + baseDir + '/test-video/' + args.project + '" 2>/dev/null; ' : '';
+    fs.writeFileSync(tmpFile, '#!/bin/bash\n' + cdCmd + cmd + '\n', 'utf8');
     try {
-      const out = execSync(`"C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe" "${tmpFile}"`, {
+      const { spawnSync } = await import('node:child_process');
+      const result = spawnSync('C:\\Program Files\\Git\\bin\\bash.exe', [tmpFile], {
         cwd: workdir,
         timeout: (args?.timeout || 60) * 1000,
         maxBuffer: 512 * 1024,
         windowsHide: true,
         encoding: 'utf8',
+        env: { ...process.env, PATH: envPath },
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
+      const out = (result.stdout || '') + (result.stderr || '');
+      if (result.error) throw result.error;
+      if (result.status !== 0 && !out) throw new Error(`Exit code ${result.status}`);
       try { fs.unlinkSync(tmpFile); } catch {}
       return { success: true, action, output: out.slice(0, 10000), length: out.length };
     } catch (err) {
@@ -10681,6 +10730,7 @@ function getToolDescription(name) {
     'paragraph-publish': 'Publish an article to Paragraph.com. Args: title (required), markdown (required), status (default "published"), categories[], subtitle, imageUrl, slug. Returns the published URL. Use for the daily-news pipeline.',
     'muapi-generate-image': 'Generate an image with MuAPI. Args: prompt (required), and optional size/style. Returns the resulting image URL.',
     'openfilm': 'Create, edit, and render videos using OpenFilm (AI video agent). Actions: open (project folder), look (check film), render (export MP4), get (fetch media), skills (list skills), skill (read a skill), doctor (check setup). Args: action (required), project/folder (for open), what/time (for look), range (for render), media/query (for get), name (for skill). A film is a web page (film.html) that draws any moment t using HTML/CSS/JS. Supports 3D, canvas, SVG, video, audio. Use for: launch videos, promo clips, animated explainers, social media content.',
+    'tts-generate': 'Generate free text-to-speech audio using MOSS-TTS-Nano (0.1B, CPU, 48kHz). No API key required. Args: text (required), voice (optional, default Junhao), output_path (optional), timeout (optional, max 300s). Returns the WAV file path and size. Use for: voice-overs, narration, audio content.',
     'media-register': 'Ingest a video, image or audio file and get an id for it. Args: source (a URL or local path - the only place either is accepted), label, note, agent. The bytes are copied into the managed media root, so the id cannot be swapped out later. Use this before any other media tool.',
     'media-list': 'List registered media: id, kind, size, label, who registered it, and whether the file is still present. Args: kind (video/image/audio).',
     'media-get': 'Details for one registered media id. Args: media_id (required).',

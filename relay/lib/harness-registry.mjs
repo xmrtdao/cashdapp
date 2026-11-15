@@ -10,7 +10,7 @@
 
 export const HARNESS_TYPES = [
   'openclaw', 'pi', 'hermes', 'dsh', 'opencode', 'claude-code',
-  'qwen-code', 'ollama', 'openfilm', 'custom',
+  'qwen-code', 'ollama', 'openfilm', 'tts', 'custom',
 ];
 
 /**
