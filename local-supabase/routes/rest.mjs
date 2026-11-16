@@ -180,13 +180,22 @@ function parseFilters(params) {
           acc.push({ sql: wrap(`"${k}" IN (${ph})`), args: list, paramsUsed: list.length });
         } else {
           const lit = isLiteral(raw);
+          let wild = raw;
+          if (op === 'like' || op === 'ilike') {
+            // PostgREST uses `*` as the LIKE/ILIKE wildcard. Without this
+            // translation, `ilike.*Reply*` matches the literal string
+            // "*Reply*" and silently returns zero rows — which is why the
+            // email-to-task dedupe check never found an existing task and
+            // filed a duplicate every hour.
+            wild = String(wild).replace(/\*/g, '%');
+          }
           if (lit) {
             acc.push({ sql: wrap(`"${k}" ${OP_MAP[op]} ${lit.sql}`) });
           } else if (['cs', 'cd', 'ov', 'contains'].includes(op)) {
             // jsonb operators: the right-hand operand must be cast to jsonb
-            acc.push({ sql: wrap(`"${k}" ${OP_MAP[op]} $${i++}::jsonb`), args: [raw], paramsUsed: 1 });
+            acc.push({ sql: wrap(`"${k}" ${OP_MAP[op]} $${i++}::jsonb`), args: [wild], paramsUsed: 1 });
           } else {
-            acc.push({ sql: wrap(`"${k}" ${OP_MAP[op]} $${i++}`), args: [raw], paramsUsed: 1 });
+            acc.push({ sql: wrap(`"${k}" ${OP_MAP[op]} $${i++}`), args: [wild], paramsUsed: 1 });
           }
         }
       } else {
