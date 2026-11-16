@@ -103,6 +103,7 @@ async function logTokenUsage(agent, source, provider, model, promptTokens, outpu
 // (primary → xmrt → 3rd) before the chain falls through to the next model.
 const CLOUD_FALLBACK_MODELS = [
   'gemma4:31b',          // primary daily driver
+  'inkling-2-small',     // 594B MoE, 1M ctx — added 2026-11-13 per Ollama announcement
   'gpt-oss:120b',
   'gpt-oss:20b',
   'nemotron-3-nano:30b',
