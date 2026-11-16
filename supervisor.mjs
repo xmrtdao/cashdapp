@@ -315,13 +315,30 @@ const SERVICE_DEFS = [
     dependsOn: ['tunnel'],
   },
   {
+    // The main mobilemonero tunnel: suite / relay / jobby / atreyus / graytech.
+    //
+    // It is a cloudflared.exe, exactly like `designer` below, so process-name
+    // detection cannot tell the two apart. With no metrics listener the old
+    // definition fell back to "any cloudflared.exe exists", which reported a
+    // dead tunnel healthy whenever the OTHER tunnel was running — and after a
+    // reboot it also adopted a stale childPid that now belonged to vite.
+    //
+    // Bind metrics on 20242 (the port the relay's status map already expects
+    // for this service) so identity and liveness are both port-based: a dead
+    // tunnel now reads DOWN instead of inheriting "any cloudflared.exe exists".
+    // The `healthCheck` below records the same connection-count test `designer`
+    // declares, but checkServiceHealth does not consult it yet (see the note on
+    // resume-server) — liveness here is "the :20242 metrics endpoint answers".
     name: 'tunnel',
     cmd: join(ROOT, 'cloudflared.exe'),
-    args: ['tunnel', '--config', join(homedir(), '.cloudflared', 'config.yml'), 'run'],
+    args: ['tunnel', '--config', join(homedir(), '.cloudflared', 'config.yml'),
+           '--metrics', '127.0.0.1:20242', 'run'],
     cwd: ROOT,
-    healthUrl: null,  // check via process existence
-    healthCheck: null,
+    healthUrl: 'http://127.0.0.1:20242/metrics',
+    healthCheck: (body) => /cloudflared_tunnel_ha_connections\s+(\d+)/.test(body)
+                          && Number(body.match(/cloudflared_tunnel_ha_connections\s+(\d+)/)[1]) > 0,
     startupGraceMs: 15000,
+    tcpPort: 20242,
     dependsOn: ['relay'],
   },
   {
@@ -909,13 +926,24 @@ async function checkTcpPort(host, port, timeoutMs = 2000) {
 const TCP_PORTS = { pg: 5432, 'local-sb': 54321, relay: 8080, vite: 5173, 'cuttlefishclaws-mcp': 3120, 'xmrtdao-suite-mcp': 3121, 'cuttlefish-mcp': 3122, dsh: 3080, graytech: 8090, opencode: 4096, 'browser-view': 9334, 'opencode-agent': 9335 };
 
 async function findExistingProcess(name) {
-  // Read the existing state file (populated by server.js / previous runs)
-  const st = loadState();
-  const existing = st.services?.[name]?.childPid;
-  if (existing && isProcessRunning(existing)) return existing;
-
   const def = SERVICE_DEFS.find(d => d.name === name);
   if (!def) return null;
+
+  // A pid persisted in the state file is only trusted for services that have
+  // NO TCP port to identify them by. After a reboot Windows reuses PIDs, so a
+  // childPid written before the reboot can name a completely unrelated process
+  // now — this is exactly how a dead `tunnel` was adopted as healthy because
+  // vite had inherited its old pid, and the box came up with no external
+  // access while the supervisor reported 24/24 healthy. A listening port
+  // cannot be inherited that way, so for port-declared services the port is
+  // the only trustworthy identity and the stale pid is ignored below.
+  const declaredPort = def.tcpPort || TCP_PORTS[name];
+  if (!declaredPort) {
+    // Read the existing state file (populated by server.js / previous runs)
+    const st = loadState();
+    const existing = st.services?.[name]?.childPid;
+    if (existing && isProcessRunning(existing)) return existing;
+  }
 
   // For services with HTTP health, try a quick check
   if (def.healthUrl && !def.healthUrl.includes('127.0.0.1:0')) {
