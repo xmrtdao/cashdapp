@@ -1452,7 +1452,7 @@ export function createJobbyTools({ llmChat }) {
         to: args?.to ?? null,
         scene_threshold: args?.scene_threshold ?? 12,
         transcript: args?.transcript ?? null,
-        model: 'space-bunny-free',
+        model: 'nvidia/nemotron-3.5-super-vl:free',
       });
 
       if (!brief.success) {

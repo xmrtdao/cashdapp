@@ -12,12 +12,17 @@
 Note: these are **not** in the process environment — an agent that only checks `Env:`
 will conclude no key exists. Read `relay/.env` directly.
 
-## OpenCode Zen free tier is in-client only
-Every `*-free` Zen model except `space-bunny-free` returns
-`403 "OpenCode's free tier can only be used from within OpenCode"` when called from
-outside the OpenCode client. Verified and recorded in
-`suite/supabase/functions/_shared/unifiedAIFallback.ts` (~line 926). Do not re-add
-other free Zen models to `OPENCODE_ZEN_MODELS` without a fresh 200 from this runtime.
+## OpenCode Zen free tier status (updated 2026-11-17)
+
+`space-bunny-free` (the one slug previously thought reachable) now returns
+`400 "Model is unavailable"` from `https://opencode.ai/zen/v1/chat/completions`.
+Verified live on 2026-11-17: status 400, body `{"error":{"type":"server_error","message":"Upstream request failed: Model is unavailable."}}`.
+
+Conclusion: **no** `*-free` Zen model is reachable from the relay anymore —
+all of them (space-bunny-free included) are in-client-only / retired. The
+OpenCode Zen tier in `relay/tools/ollama-chat.mjs` is now an empty list so it
+is skipped instead of burning the timeout budget. Do not re-add any free Zen
+slug without a fresh 200 from this runtime.
 
 ## Jev is not free and not usable here
 Investigated 2026-10-05. TypeSafe's Jev decision model:

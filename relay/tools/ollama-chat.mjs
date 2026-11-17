@@ -194,8 +194,12 @@ async function tryOllamaCloud(messages, model, signal) {
  *  explicit rather than auto-discovering, and drop a model in only once it has
  *  been verified to return 200 from outside the OpenCode client.
  */
+// OpenCode Zen tier is effectively dead from the relay: every *-free Zen slug
+// (including space-bunny-free) now returns 400 "Model is unavailable" /
+// 403 "free tier can only be used from within OpenCode" for external callers.
+// Verified 2026-11-17: space-bunny-free -> 400 "Model is unavailable".
+// Keep the list empty so the tier is skipped instead of burning the timeout.
 const OPENCODE_ZEN_MODELS = [
-  'space-bunny-free',
 ];
 
 function isOpenCodeOnly(model) {

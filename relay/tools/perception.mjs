@@ -355,7 +355,7 @@ export async function videoBrief(args) {
   try {
     const { ollamaChat } = await import('./ollama-chat.mjs');
     const r = await ollamaChat(BRIEF_PROMPT.replace('{{FACTS}}', JSON.stringify(facts, null, 1)), {
-      model: args?.model || 'space-bunny-free',
+      model: args?.model || 'nvidia/nemotron-3.5-super-vl:free',
       agent: 'perception',
       source: 'video-brief',
       images: [sheet.base64],
@@ -369,8 +369,9 @@ export async function videoBrief(args) {
       read = {
         text: r.response,
         // Recorded truthfully, because the chain may serve a different model than
-        // the one requested - only space-bunny-free is reachable from the relay.
-        modelRequested: args?.model || 'space-bunny-free',
+        // the one requested - the requested model is tried first, then the
+        // cascade falls through (space-bunny-free retired 2026-11-17).
+        modelRequested: args?.model || 'nvidia/nemotron-3.5-super-vl:free',
         modelServed: r.model || null,
         provider: r.provider || null,
       };

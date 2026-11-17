@@ -1695,11 +1695,12 @@ async function callAI(prompt: string): Promise<string> {
   // (FreeTierError: free tier only works from inside OpenCode) — kept so a
   // future key upgrade lights it up with no code change.
   const opencodeKey = Deno.env.get("OPENCODE_API_KEY");
-  if (!opencodeKey) {
-    return "AI analysis unavailable (Missing OPENROUTER, OLLAMA and OPENCODE keys)";
+  const opencodeModels = (Deno.env.get("OPENCODE_MODELS") || "").split(",").map(s => s.trim()).filter(Boolean);
+  if (!opencodeKey || opencodeModels.length === 0) {
+    return "AI analysis unavailable (no working OpenCode Zen model; space-bunny-free retired 2026-11-17)";
   }
   const base = (Deno.env.get("OPENCODE_BASE_URL") || "https://opencode.ai/zen/v1").replace(/\/$/, "");
-  const model = (Deno.env.get("OPENCODE_MODELS") || "space-bunny-free").split(",")[0].trim();
+  const model = opencodeModels[0];
   try {
     return await chatCompletion(`${base}/chat/completions`, opencodeKey, model, prompt);
   } catch (error) {
