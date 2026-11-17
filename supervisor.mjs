@@ -641,13 +641,80 @@ const SERVICE_DEFS = [
     startupGraceMs: 2000,
     dependsOn: ['atreyus-backend'],
   },
+  {
+    // OpenFilm Studio — the AI video agent. Its UI is on :4747 and the film
+    // renderer on :4748; main.mjs supervises its own worker (5 respawns/min)
+    // and advertises itself in ~/.openfilm/run.json, so `openfilm` CLI
+    // clients and the relay tool reuse THIS instance instead of spawning a
+    // second Studio. One Studio per machine is the design; the supervisor
+    // owns main.mjs, main.mjs owns the worker.
+    //
+    // Run from the GLOBAL install, not npx: the npx cache path is
+    // content-addressed and replaced on update, and the supervisor needs a
+    // stable path to a long-lived child. Global copy is
+    // %APPDATA%\npm\node_modules\openfilm (v0.3.2), installed with
+    // `npm i -g openfilm@0.3.2`.
+    //
+    // Health is /api/health, which answers {product:'openfilm-studio'} when
+    // the studio server is really serving. A bare TCP check would pass on a
+    // wedged process that still holds 4747.
+    name: 'openfilm',
+    cmd: process.execPath,
+    args: [join(process.env.APPDATA || '', 'npm', 'node_modules', 'openfilm', 'studio', 'server', 'main.mjs')],
+    cwd: ROOT,
+    healthUrl: 'http://127.0.0.1:4747/api/health',
+    tcpPort: 4747,
+    // Cold start measured ~3s to /api/health; model/UI assets load after.
+    startupGraceMs: 30000,
+    maxRestartsPerHour: 3,
+    dependsOn: [],
+  },
+  {
+    // Hermes — the stdio gateway. It has no HTTP port and never will: the
+    // dashboard drives it through its MCP servers, and its health is "the
+    // gateway process is alive". It was running (pid recorded in the harness
+    // registry as health_mode 'process') but belonged to nobody, so a crash
+    // meant the fleet's chat/research/mining gateway stayed down.
+    //
+    // Identity is the module path in the command line, not the exe: pythonw.exe
+    // is shared with every other Python service on this box.
+    name: 'hermes',
+    cmd: 'C:\\Users\\PureTrek\\AppData\\Roaming\\uv\\python\\cpython-3.11-windows-x86_64-none\\pythonw.exe',
+    args: ['-m', 'hermes_cli.main', 'gateway', 'run'],
+    cwd: ROOT,
+    processMatch: 'hermes_cli.main',
+    healthUrl: null,  // stdio gateway: health is process existence
+    healthCheck: null,
+    startupGraceMs: 10000,
+    dependsOn: [],
+  },
+  {
+    // MOSS-TTS-Nano — the local voice model (0.1B, CPU, 48kHz) OpenFilm's
+    // voice-over path is built on. It is a FastAPI/uvicorn server
+    // (MOSS-TTS-Nano/app.py, default port 18083) whose model load is slow
+    // enough that a short grace would restart-loop it, so the grace is set
+    // from the measured cold start (~2 min to LISTEN on this box).
+    //
+    // NOTE: the relay tool `tts-generate` still calls infer_onnx.py as a
+    // one-shot process; supervising this server keeps the harness's own HTTP
+    // surface alive but does not route the tool through it.
+    name: 'moss-tts',
+    cmd: 'C:\\Users\\PureTrek\\AppData\\Local\\hermes\\hermes-agent\\venv\\Scripts\\python.exe',
+    args: ['app.py', '--port', '18083', '--host', '127.0.0.1'],
+    cwd: join(ROOT, 'MOSS-TTS-Nano'),
+    healthUrl: 'http://127.0.0.1:18083/',
+    tcpPort: 18083,
+    startupGraceMs: 180000,
+    maxFailures: 2,
+    dependsOn: [],
+  },
 ];
 
 // graytech is independent of every other service - it needs no database and no
 // tunnel to answer on :8090 - so it starts last and blocks nothing.
 // atreyus-frontend depends on atreyus-backend, so both go after 'tunnel' as
 // leaves; the frontend must come after the backend in the order.
-const START_ORDER = ['pg', 'local-sb', 'ollama', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'designer', 'alice', 'cron-engine-v2', 'security', 'verifier', 'campaign-scheduler', 'opencode', 'opencode-agent', 'browser-view', 'dsh', 'resume-server', 'graytech', 'atreyus-backend', 'atreyus-frontend'];
+const START_ORDER = ['pg', 'local-sb', 'ollama', 'vite', 'health-server', 'cuttlefishclaws-mcp', 'xmrtdao-suite-mcp', 'page-agent-mcp', 'relay', 'tunnel', 'designer', 'alice', 'cron-engine-v2', 'security', 'verifier', 'campaign-scheduler', 'opencode', 'opencode-agent', 'browser-view', 'dsh', 'resume-server', 'graytech', 'atreyus-backend', 'atreyus-frontend', 'openfilm', 'hermes', 'moss-tts'];
 
 // ── State ────────────────────────────────────────────────────────────
 const state = {};
@@ -761,26 +828,28 @@ function refreshProcessTable() {
   }
   try {
     const out = execSync(
-      `wmic process where "name='node.exe'" get ProcessId,CommandLine /format:csv`,
+      `wmic process where "name='node.exe'" get ProcessId,ParentProcessId,CommandLine /format:csv`,
       { stdio: ['pipe', 'pipe', 'ignore'], timeout: 15000, encoding: 'utf8', windowsHide: true }
     );
     const rows = [];
     for (const line of out.split(/\r?\n/)) {
-      // wmic's CSV is `Node,CommandLine,ProcessId` - the columns come out in
-      // ALPHABETICAL order, not the order they were asked for, and the quoting
-      // is broken: a command line containing a comma is wrapped in an opening
-      // quote and never closed. So the pid is always the LAST field and the
-      // command line is everything between the first comma and the last one.
-      // Parsing it the documented way (`Node,ProcessId,CommandLine`) silently
-      // produced an empty table, which made every script-name lookup miss.
-      const m = line.trim().match(/^[^,]*,(.*),(\d+)\s*$/);
+      // wmic's CSV is `Node,CommandLine,ParentProcessId,ProcessId` - the columns
+      // come out in ALPHABETICAL order, not the order they were asked for, and
+      // the quoting is broken: a command line containing a comma is wrapped in
+      // an opening quote and never closed. So the pid is always the LAST field,
+      // the parent the one before it, and the command line is everything between
+      // the first comma and the last two.
+      // Parsing it the documented way silently produced an empty table, which
+      // made every script-name lookup miss.
+      const m = line.trim().match(/^[^,]*,(.*),(\d+),(\d+)\s*$/);
       if (!m) continue;
-      const pid = parseInt(m[2], 10);
+      const pid = parseInt(m[3], 10);
       if (!Number.isInteger(pid) || pid <= 0) continue;
+      const ppid = parseInt(m[2], 10) || 0;
       let cmd = m[1].trim();
       if (cmd.startsWith('"')) cmd = cmd.slice(1);
       if (cmd.endsWith('"')) cmd = cmd.slice(0, -1);
-      rows.push({ pid, cmd });
+      rows.push({ pid, ppid, cmd });
     }
     processTable = { rows, at: now };
   } catch {
@@ -833,6 +902,21 @@ function pruneDuplicateProcesses() {
 
     let pids;
     try { pids = findProcessByScript(matchPath); } catch { continue; }
+    // Parent map, so a service's own tree is never pruned as a "duplicate".
+    // The failure mode this prevents: self-supervising services (OpenFilm
+    // main.mjs spawns its worker with the SAME script path) match their own
+    // worker in the script lookup, and the prune killed it every tick - a
+    // crash loop on a 30s timer.
+    const parentOf = new Map(refreshProcessTable().map(r => [r.pid, r.ppid || 0]));
+    const isDescendantOf = (/** @type {number} */ pid, /** @type {number} */ ancestor) => {
+      if (!ancestor) return false;
+      let cur = parentOf.get(pid) ?? 0;
+      for (let depth = 0; depth < 16 && cur > 0; depth++) {
+        if (cur === ancestor) return true;
+        cur = parentOf.get(cur) ?? 0;
+      }
+      return false;
+    };
     if (!pids || pids.length < 2) {
       // single instance (or none) — nothing to prune for this service
       if (pids && pids.length === 1) continue;
@@ -860,6 +944,18 @@ function pruneDuplicateProcesses() {
       if (pid === process.pid) continue;             // never kill ourselves
       if (pid === state[name]?.child?.pid) continue; // never kill our managed child
       if (pid === keeper) continue;                  // keep the one serving
+      // An ADOPTED service (already running when this daemon started) has no
+      // managed child; its tree is state.externalPid's. And a self-supervising
+      // service (OpenFilm main.mjs spawns its worker with the SAME script path)
+      // puts the port owner INSIDE that tree: main is the ancestor of the
+      // keeper, worker is its descendant. Either direction of the same tree is
+      // legitimate - pruning it is how a healthy Studio gets crash-looped.
+      const roots = [state[name]?.child?.pid, state[name]?.externalPid, keeper].filter(Boolean);
+      let inTree = false;
+      for (const root of roots) {
+        if (pid === root || isDescendantOf(pid, root) || isDescendantOf(root, pid)) { inTree = true; break; }
+      }
+      if (inTree) continue;
       // Heuristic safety: never kill a relay/MCP that the relay actively tracks
       // (avoid reaping during a restart race). Only prune if not the keeper.
       try { killProcess(pid); pruned++; log(`[self-prune] ${name}: killed duplicate pid ${pid} (keeper=${keeper})`); }
@@ -937,7 +1033,8 @@ async function findExistingProcess(name) {
   // access while the supervisor reported 24/24 healthy. A listening port
   // cannot be inherited that way, so for port-declared services the port is
   // the only trustworthy identity and the stale pid is ignored below.
-  const declaredPort = def.tcpPort || TCP_PORTS[name];
+  const tcpPorts = TCP_PORTS;
+  const declaredPort = def.tcpPort || tcpPorts[name];
   if (!declaredPort) {
     // Read the existing state file (populated by server.js / previous runs)
     const st = loadState();
@@ -948,21 +1045,37 @@ async function findExistingProcess(name) {
   // For services with HTTP health, try a quick check
   if (def.healthUrl && !def.healthUrl.includes('127.0.0.1:0')) {
     try {
-      const alive = await checkHttp(def.healthUrl, 2000);
+      // 2s was too short for a busy relay: /health occasionally takes 2-3s
+      // when the event loop is doing GC or serving a burst. Every such sample
+      // made this function conclude the service was dead and kill it — the
+      // relay then restarted, and the next slow /health killed it again. A
+      // liveness probe must tolerate a busy process; it exists to catch a
+      // wedged one, not to punish a slow response.
+      const alive = await checkHttp(def.healthUrl, 6000);
       if (alive) return -1; // running externally, unknown PID
-      // If health check fails but port is open, kill the stale process
-      if (def.tcpPort || tcpPorts[name]) {
-        const port = def.tcpPort || tcpPorts[name];
-        const portOpen = await checkTcpPort('127.0.0.1', port, 1000);
+      // If health check fails but port is open, kill the stale process —
+      // unless the child we launched is still alive. A live child holding the
+      // port is a busy service, not a stale one.
+      if (declaredPort) {
+        const portOpen = await checkTcpPort('127.0.0.1', declaredPort, 1000);
         if (portOpen) {
-          log(`${name} port ${port} is open but health check failed — killing stale process`);
+          const trackedPid = state[name]?.child?.pid || state[name]?.externalPid;
+          if (trackedPid) {
+            let trackedAlive = false;
+            try { process.kill(trackedPid, 0); trackedAlive = true; } catch {}
+            if (trackedAlive) {
+              log(`${name} port ${declaredPort} is open and tracked pid ${trackedPid} is alive but /health was slow — treating as running`);
+              return trackedPid;
+            }
+          }
+          log(`${name} port ${declaredPort} is open but health check failed — killing stale process`);
           // Find what's on that port and kill it
           try {
-            const pids = execSync(`netstat -ano | findstr ":${port} " | findstr LISTENING`, { encoding: 'utf8', timeout: 5000 });
+            const pids = execSync(`netstat -ano | findstr ":${declaredPort} " | findstr LISTENING`, { encoding: 'utf8', timeout: 5000 });
             const pidMatch = pids.match(/(\d+)\s*$/m);
             if (pidMatch) {
               killProcess(parseInt(pidMatch[1]));
-              log(`${name} killed stale pid ${pidMatch[1]} on port ${port}`);
+              log(`${name} killed stale pid ${pidMatch[1]} on port ${declaredPort}`);
             }
           } catch {}
         }
@@ -971,7 +1084,6 @@ async function findExistingProcess(name) {
   }
 
   // For services known by TCP port, try a socket connect
-  const tcpPorts = TCP_PORTS;
   const port = def.tcpPort || tcpPorts[name];
   if (port) {
     try {
@@ -989,6 +1101,15 @@ async function findExistingProcess(name) {
   const scriptName = def.args.find(a => a.endsWith('.mjs') || a.endsWith('.js'));
   if (scriptName) {
     const pids = findProcessByScript(scriptName.replace(/^.*[/\\]/, ''));
+    if (pids && pids.length > 0) return pids[0];
+  }
+  // A service whose identity is a module inside a generic interpreter
+  // (pythonw -m hermes_cli.main ...) matches neither a script name nor an
+  // exe name - and the exe-name fallback would adopt ANY pythonw on the
+  // machine. def.processMatch is the command-line substring that identifies
+  // this service's process.
+  if (def.processMatch) {
+    const pids = findProcessByScript(def.processMatch);
     if (pids && pids.length > 0) return pids[0];
   }
   if (def.cmd && def.cmd.endsWith('.exe')) {

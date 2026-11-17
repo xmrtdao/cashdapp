@@ -74,7 +74,7 @@ UPDATE app.harnesses SET
   endpoint = 'http://127.0.0.1:4747',
   health_mode = 'tcp', health_path = NULL,
   ui_endpoint = 'http://127.0.0.1:4747',
-  supervised = false,
+  supervised = true,
   install_hint = 'Studio is running. Opening a project needs the one-time key that `openfilm open` prints.',
   capabilities = ARRAY['video','media','render'],
   updated_at = NOW()
@@ -96,21 +96,22 @@ UPDATE app.harnesses SET
   endpoint = NULL,
   health_mode = 'process', health_process = 'hermes_cli',
   health_path = NULL, ui_endpoint = NULL,
-  supervised = false,
-  install_hint = 'Runs as `pythonw -m hermes_cli.main gateway run`. It serves no HTTP port; the dashboard drives it through its MCP servers.',
+  supervised = true,
+  install_hint = 'Runs as `pythonw -m hermes_cli.main gateway run` (uv cpython 3.11). It serves no HTTP port; the dashboard drives it through its MCP servers. Supervised by the local stack supervisor; it adopts the gateway by command-line match.',
   capabilities = ARRAY['chat','research','mining'],
   updated_at = NOW()
 WHERE id = 'hermes';
 
--- MOSS-TTS-Nano is local ONNX inference inside the relay, not a service with
--- a port. What can be checked is that the model is on disk.
+-- MOSS-TTS-Nano is local ONNX inference. Its FastAPI server
+-- (MOSS-TTS-Nano/app.py) listens on :18083; the relay tool `tts-generate`
+-- still calls infer_onnx.py as a one-shot process, but the server is the
+-- harness's own HTTP surface and is supervised.
 UPDATE app.harnesses SET
-  endpoint = NULL,
-  health_mode = 'files',
-  health_path = 'C:\Users\PureTrek\Desktop\xmrtdao\MOSS-TTS-Nano',
-  ui_endpoint = NULL,
-  supervised = false,
-  install_hint = 'Local ONNX inference (CPU). The relay tool `tts-generate` calls it directly.',
+  endpoint = 'http://127.0.0.1:18083',
+  health_mode = 'http', health_path = '/',
+  ui_endpoint = 'http://127.0.0.1:18083',
+  supervised = true,
+  install_hint = 'Local ONNX inference (CPU), FastAPI server on :18083 (MOSS-TTS-Nano/app.py). The relay tool `tts-generate` calls infer_onnx.py as a one-shot process; the server is the harness''s own HTTP surface.',
   capabilities = ARRAY['tts','voice-generation','audio'],
   updated_at = NOW()
 WHERE id = 'moss-tts';
