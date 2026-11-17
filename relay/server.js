@@ -2142,7 +2142,13 @@ const toolHandlers = {
         form.append('text', text);
         form.append('prompt_audio', createReadStream(refAudio));
         form.append('voice_clone_max_text_tokens', String(args?.voice_clone_max_text_tokens ?? 75));
-        form.append('enable_text_normalization', String(args?.enable_text_normalization ?? '1'));
+        // Wetext requires the `tn` package (tn.chinese / tn.english normalizers),
+        // which isn't installable in this venv without a C++ toolchain. Skip it
+        // for voice cloning so generation still runs via the robust normalizer.
+        form.append(
+          'enable_text_normalization',
+          String(args?.enable_text_normalization ?? (refAudio ? '0' : '1')),
+        );
         form.append('enable_normalize_tts_text', String(args?.enable_normalize_tts_text ?? '1'));
         // Use the streaming endpoint so inference runs in a background thread,
         // keeping the server event loop free and preventing supervisor health checks
