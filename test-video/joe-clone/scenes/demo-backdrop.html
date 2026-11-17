@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1920, height=1080">
+  <style>
+    html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #111; font-family: system-ui, sans-serif; }
+    .backdrop {
+      position: absolute; inset: 0;
+      background: linear-gradient(in oklab, oklch(0.22 0.03 262) 0%, oklch(0.11 0.015 260) 100%);
+      translate: 0px; scale: 1;
+    }
+    /* Soft drifting glow layers — pure CSS gradients, position a function of t. */
+    .glow { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.5; }
+    .g1 { width: 900px; height: 700px; background: oklch(0.45 0.09 250 / 0.55); top: -180px; left: -160px; }
+    .g2 { width: 800px; height: 650px; background: oklch(0.42 0.08 300 / 0.45); bottom: -220px; right: -140px; }
+    .vignette {
+      position: absolute; inset: 0;
+      background: radial-gradient(115% 80% at 50% 44%, transparent 52%, oklch(0 0 0 / 0.5) 100%);
+    }
+  </style>
+</head>
+<body>
+  <div class="backdrop">
+    <div class="glow g1"></div>
+    <div class="glow g2"></div>
+  </div>
+  <div class="vignette"></div>
+  <script>
+    const easeInOut = (p) => p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+    window.film = {
+      duration: 31.4, width: 1920, height: 1080,
+      frame(t) {
+        // Everything a function of t: slow drift on the glow blobs, gentle settle.
+        const k = t / 31.4;
+        document.querySelector('.g1').style.translate = `${140 * easeInOut(k)}px ${60 * Math.sin(k * Math.PI)}px`;
+        document.querySelector('.g2').style.translate = `${-120 * easeInOut(k)}px ${-50 * Math.sin(k * Math.PI)}px`;
+        document.querySelector('.backdrop').style.scale = String(1.06 - 0.06 * k);
+      },
+    };
+    if (!window.filmHost) { const t0 = performance.now(); const loop = () => { window.film.frame(((performance.now() - t0) / 1000) % 31.4); requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
+  </script>
+</body>
+</html>

@@ -3,14 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=1920, height=1080">
-<title>Joe Lee voice clone test</title>
+<title>OpenFilm demo — what the web can draw</title>
 </head>
 <body>
+<!-- Library transitions, over the cuts (at = cut - 0.4) -->
 <section>
-  <iframe id="title" src="scenes/title.html#t=0,7.84" at="0"></iframe>
+  <iframe id="wipe" src="saved/openfilm/transitions-wipe/wipe.html#t=0,0.8" at="10.8"></iframe>
+  <iframe id="shutter" src="saved/openfilm/transitions-shutter/shutter.html#t=0,0.8" at="22.1"></iframe>
+  <iframe id="wipe-2" src="saved/openfilm/transitions-wipe/wipe.html#t=0,0.8" at="42.2"></iframe>
+  <iframe id="shutter-2" src="saved/openfilm/transitions-shutter/shutter.html#t=0,0.8" at="51.4"></iframe>
+</section>
+<!-- Text overlays and lower thirds -->
+<section>
+  <iframe id="lower-card-demo" src="scenes/lower-card-demo.html#t=0,5.65" at="11.2"></iframe>
+  <iframe id="card-elegant" src="scenes/card-elegant.html#t=0,5.65" at="16.85"></iframe>
+  <iframe id="title-glitch-demo" src="scenes/title-glitch-demo.html#t=0,10.05" at="22.5"></iframe>
+  <iframe id="title-serif-demo" src="scenes/title-serif-demo.html#t=0,10.05" at="32.55"></iframe>
+</section>
+<!-- Transition whooshes -->
+<section>
+  <iframe id="demo-intro" src="scenes/demo-intro.html#t=0,11.2"></iframe>
+  <iframe id="demo-backdrop" src="scenes/demo-backdrop.html#t=0,31.4" at="11.2"></iframe>
+  <iframe id="demo-footage" src="scenes/demo-footage.html#t=0,9.2" at="42.6"></iframe>
+  <iframe id="demo-outro" src="scenes/demo-outro.html#t=0,9.9" at="51.8"></iframe>
 </section>
 <section>
-  <audio id="narration" src="assets/ava-narration.wav" volume="1.884" at="0"></audio>
+  <audio id="vo1" src="assets/vo1.wav" volume="1.35" at="1.0"></audio>
+  <audio id="vo2" src="assets/vo2.wav" volume="1.35" at="11.8"></audio>
+  <audio id="vo3" src="assets/vo3.wav" volume="1.35" at="21.9"></audio>
+  <audio id="vo4" src="assets/vo4.wav" volume="1.35" at="32.1"></audio>
+  <audio id="vo5" src="assets/vo5.wav" volume="1.35" at="43.2"></audio>
+  <audio id="vo6" src="assets/vo6.wav" volume="1.35" at="52.4"></audio>
+</section>
+<section>
+  <audio id="cinematic-whip-pan-whoosh-f6acf3" src="assets/cinematic-whip-pan-whoosh-f6acf3.mp3" volume="0.7" at="11"></audio>
+  <audio id="cinematic-whip-pan-whoosh-f6acf3-2" src="assets/cinematic-whip-pan-whoosh-f6acf3.mp3" volume="0.7" at="22.3"></audio>
+  <audio id="cinematic-whip-pan-whoosh-f6acf3-3" src="assets/cinematic-whip-pan-whoosh-f6acf3.mp3" volume="0.7" at="42.4"></audio>
+  <audio id="cinematic-whip-pan-whoosh-f6acf3-4" src="assets/cinematic-whip-pan-whoosh-f6acf3.mp3" volume="0.7" at="51.6"></audio>
 </section>
 </body>
 </html>

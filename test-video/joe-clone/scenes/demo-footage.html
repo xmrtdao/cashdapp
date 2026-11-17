@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1920, height=1080">
+  <style>
+    html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #111; font-family: system-ui, sans-serif; }
+    .stage { position: absolute; inset: 0; }
+    .scene { position: absolute; inset: 0; translate: 0px; }
+    .sky { position: absolute; inset: 0; background: linear-gradient(in oklab, oklch(0.62 0.11 250) 0%, oklch(0.80 0.10 90) 68%, oklch(0.88 0.09 80) 100%); }
+    .sun {
+      position: absolute; width: 190px; height: 190px; border-radius: 50%;
+      background: radial-gradient(circle, oklch(0.97 0.06 90) 0%, oklch(0.90 0.11 75) 55%, oklch(0.86 0.12 65 / 0.0) 78%);
+      left: 0; top: 0;
+    }
+    .far { position: absolute; inset: 0; background: oklch(0.38 0.06 260); clip-path: polygon(0% 62%, 12% 48%, 26% 58%, 40% 42%, 55% 55%, 70% 40%, 84% 52%, 100% 44%, 100% 100%, 0% 100%); }
+    .near { position: absolute; inset: 0; background: oklch(0.24 0.04 262); clip-path: polygon(0% 78%, 15% 66%, 30% 76%, 48% 62%, 64% 74%, 80% 64%, 100% 72%, 100% 100%, 0% 100%); }
+    /* The graded copy: the library's teal-and-orange look, in CSS — saturation up,
+       contrast up, teal pulled into the shadows and orange into the highlights. */
+    .graded { filter: saturate(1.28) contrast(1.14); }
+    .graded .tint {
+      position: absolute; inset: 0;
+      background: linear-gradient(in oklab, oklch(0.44 0.10 235 / 0.42) 0%, oklch(0.60 0.09 210 / 0.12) 55%, oklch(0.78 0.13 60 / 0.30) 100%);
+      mix-blend-mode: overlay;
+    }
+    .reveal { position: absolute; inset: 0; clip-path: inset(0 100% 0 0); }
+    .divider { position: absolute; top: 0; bottom: 0; width: 4px; background: oklch(0.98 0.01 90 / 0.9); box-shadow: 0 0 18px oklch(0 0 0 / 0.5); opacity: 0; }
+    .label {
+      position: absolute; bottom: 42px; left: 50%;
+      translate: -50% 0;
+      padding: 12px 26px; border-radius: 999px;
+      font-size: 28px; white-space: nowrap;
+      text-box: trim-both cap alphabetic;
+      color: oklch(0.97 0.005 260);
+      background: color-mix(in oklab, oklch(0.16 0.02 260) 74%, transparent);
+      backdrop-filter: blur(14px);
+      border: 1px solid oklch(1 0 0 / 0.08);
+      box-shadow: 0 1px 2px oklch(0 0 0 / 0.40), 0 10px 30px oklch(0 0 0 / 0.35);
+      opacity: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="stage" id="flat">
+    <div class="scene">
+      <div class="sky"></div><div class="sun"></div><div class="far"></div><div class="near"></div>
+    </div>
+    <div class="label label-flat">Flat video</div>
+  </div>
+  <div class="reveal" id="graded"></div>
+  <div class="divider"></div>
+  <div class="label label-graded" style="bottom: 110px;">Teal &amp; orange grade</div>
+  <script>
+    const easeOutCubic = (p) => 1 - Math.pow(1 - p, 3);
+    const easeInOut = (p) => p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+    const clamp01 = (x) => Math.min(1, Math.max(0, x));
+
+    // Build the graded copy from the same scene markup (once, at load).
+    const graded = document.getElementById('graded');
+    const scene = document.getElementById('flat').querySelector('.scene').cloneNode(true);
+    scene.classList.add('graded');
+    const tint = document.createElement('div');
+    tint.className = 'tint';
+    scene.appendChild(tint);
+    graded.appendChild(scene);
+
+    window.film = {
+      duration: 9.2, width: 1920, height: 1080,
+      frame(t) {
+        // Sun arcs slowly; mountain layers drift at different rates (parallax).
+        const k = t / 9.2;
+        const sun = document.querySelectorAll('.sun');
+        sun.forEach((el) => {
+          el.style.translate = `${-320 + 520 * easeInOut(k)}px ${430 - 330 * Math.sin(Math.PI * (0.15 + 0.7 * k))}px`;
+        });
+        document.querySelectorAll('.far').forEach((el) => { el.style.translate = `${-46 * k}px 0`; });
+        document.querySelectorAll('.near').forEach((el) => { el.style.translate = `${-110 * k}px 0`; });
+
+        // Grade reveal: wipes in from the left mid-shot.
+        const p = clamp01((t - 4.2) / 1.2);
+        graded.style.clipPath = `inset(0 ${(1 - easeOutCubic(p)) * 100}% 0 0)`;
+        const x = 4 + (1920 - 8) * p;
+        const div = document.querySelector('.divider');
+        div.style.opacity = p > 0 && p < 1 ? '1' : '0';
+        div.style.left = `${x}px`;
+        document.querySelector('.label-flat').style.opacity = String(clamp01((t - 0.5) / 0.6) * (1 - clamp01((t - 4.4) / 0.5)));
+        document.querySelector('.label-graded').style.opacity = String(clamp01((t - 5.2) / 0.6));
+      },
+    };
+    if (!window.filmHost) { const t0 = performance.now(); const loop = () => { window.film.frame(((performance.now() - t0) / 1000) % 9.2); requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
+  </script>
+</body>
+</html>
