@@ -662,6 +662,17 @@ const SERVICE_DEFS = [
     cmd: process.execPath,
     args: [join(process.env.APPDATA || '', 'npm', 'node_modules', 'openfilm', 'studio', 'server', 'main.mjs')],
     cwd: ROOT,
+    // Studio's derived.mjs runs ffmpeg/ffprobe with a bare execFile(name, ...)
+    // PATH lookup to probe media and draw timeline waveforms; when the lookup
+    // misses it returns 501 for /media?what=probe|wave and the UI shows audio
+    // clips as flat silent blocks. The server was first spawned before ffmpeg
+    // existed on this machine, so its inherited PATH could never find it.
+    // C:\tools\ffmpeg is where the essentials build was installed (user PATH
+    // only reaches shells started after that; a long-lived service does not
+    // get it). Declared env wins over the supervisor's own (merged last), so
+    // this survives supervisor restarts with whatever PATH it was launched
+    // under.
+    env: { PATH: `C:\\tools\\ffmpeg;${process.env.PATH || ''}` },
     healthUrl: 'http://127.0.0.1:4747/api/health',
     tcpPort: 4747,
     // Cold start measured ~3s to /api/health; model/UI assets load after.
