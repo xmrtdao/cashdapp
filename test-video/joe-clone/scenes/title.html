@@ -5,80 +5,172 @@
   <meta name="viewport" content="width=1920, height=1080">
   <style>
     html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #111; font-family: system-ui, sans-serif; }
+
+    /* Backdrop — gradient endpoints in oklch, interpolated in oklab (visual-effects:
+       prefer `in oklab` for neutrals; oklch on low-chroma colors hits a Chromium
+       powerless-hue bug that tints toward magenta). Radial vignette layered on top. */
+    .backdrop {
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(130% 90% at 50% -10%, oklch(0.38 0.06 255) 0%, transparent 60%),
+        linear-gradient(in oklab, oklch(0.21 0.02 260) 0%, oklch(0.10 0.01 260) 100%);
+      /* Identity base (individual-transform-properties): elements animated per-frame
+         keep a stable stacking context instead of gaining one mid-flight. */
+      translate: 0px; scale: 1;
+    }
+    .vignette {
+      position: absolute; inset: 0;
+      background: radial-gradient(115% 80% at 50% 44%, transparent 52%, oklch(0 0 0 / 0.5) 100%);
+    }
+
     .title {
       position: absolute;
-      left: 0;
-      right: 0;
+      left: 0; right: 0;
       top: 460px;
       text-align: center;
       color: #fff;
       font: 800 160px/1 system-ui, sans-serif;
       letter-spacing: -0.03em;
+      /* text-wrap: balance is for short heading blocks only — never global
+         (improve-text-layout-and-legibility). */
+      text-wrap: balance;
+      /* text-box (precise-text-alignment): trim the font's ghost leading so the
+         cap top sits exactly at `top` — no magic-number offset. */
+      text-box: trim-both cap alphabetic;
+      /* Layered shadows for real depth, not a single flat shadow (visual-effects). */
+      text-shadow: 0 2px 6px oklch(0 0 0 / 0.55), 0 14px 40px oklch(0 0 0 / 0.35);
       opacity: 0;
+      translate: 0px; scale: 1;
     }
-    .lower-third {
+
+    .chip {
       position: absolute;
-      bottom: 20px;
       left: 50%;
-      transform: translateX(-50%);
-      background: rgba(0,0,0,0.7);
-      color: white;
+      /* Individual transform properties instead of transform: translateX(-50%):
+         translate/scale compose independently (individual-transform-properties). */
+      translate: -50% 0;
+      scale: 1;
       padding: 15px 30px;
-      border-radius: 10px;
+      border-radius: 12px;
       font-size: 24px;
       text-align: center;
-      box-shadow: 0 0 10px rgba(0,0,0,0.5);
+      /* text-box so the padding visually hugs the glyphs (badge use case). */
+      text-box: trim-both cap alphabetic;
+      color: oklch(0.97 0.005 260);
+      text-wrap: balance;
       opacity: 0;
     }
+
+    .lower-third {
+      bottom: 20px;
+      /* Frosted glass: translucent fill mixed in oklab + backdrop blur. */
+      background: color-mix(in oklab, oklch(0.16 0.02 260) 74%, transparent);
+      backdrop-filter: blur(14px);
+      border: 1px solid oklch(1 0 0 / 0.08);
+      /* Layered shadow stack (visual-effects): tight contact shadow + wide ambient. */
+      box-shadow:
+        0 1px 2px oklch(0 0 0 / 0.40),
+        0 10px 30px oklch(0 0 0 / 0.35);
+    }
+    /* Accent bar — two saturated hues, interpolated in oklch so chroma survives
+       the blend (visual-effects: `in oklch` for distinct saturated hues). */
+    .lower-third::before {
+      content: '';
+      position: absolute; left: 0; top: 0; bottom: 0; width: 6px;
+      border-radius: 12px 0 0 12px;
+      background: linear-gradient(in oklch, oklch(0.78 0.16 40), oklch(0.72 0.15 300));
+    }
+
     .intro {
-      position: absolute;
       top: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(255,255,255,0.9);
-      color: black;
-      padding: 15px 30px;
-      border-radius: 10px;
-      font-size: 20px;
-      text-align: center;
-      box-shadow: 0 0 10px rgba(0,0,0,0.2);
-      opacity: 0;
+      background: color-mix(in oklab, oklch(0.97 0.005 260) 90%, transparent);
+      color: oklch(0.18 0.02 260);
+      box-shadow:
+        0 1px 2px oklch(0 0 0 / 0.18),
+        0 8px 24px oklch(0 0 0 / 0.15);
     }
   </style>
 </head>
 <body>
+  <div class="backdrop"></div>
+  <div class="vignette"></div>
   <div class="title">JOE LEE</div>
-  <div class="lower-third">Voice Demonstration</div>
-  <div class="intro">Generated with MOSS-TTS-Nano</div>
+  <div class="chip lower-third">Voice Demonstration</div>
+  <div class="chip intro">Generated with MOSS-TTS-Nano</div>
   <script>
+    // Easing for a frame()-driven renderer. CSS transitions don't apply here, so
+    // the linear() spring curve from modern-web-guidance (physics-based-easing)
+    // is evaluated directly: piecewise-linear through its stops, exactly as the
+    // CSS function would interpolate them. Applied to translate/scale only —
+    // never opacity (overshoot on opacity flickers; guide's explicit warning).
+    const SPRING = [
+      [0, 0], [0.005, 0.016], [0.01, 0.06], [0.02, 0.226], [0.054, 1.116],
+      [0.066, 1.375], [0.077, 1.527], [0.082, 1.565], [0.088, 1.585],
+      [0.093, 1.581], [0.098, 1.559], [0.109, 1.458], [0.143, 0.937],
+      [0.155, 0.784], [0.166, 0.693], [0.171, 0.67], [0.177, 0.657],
+      [0.187, 0.671], [0.198, 0.729], [0.233, 1.042], [0.245, 1.13],
+      [0.256, 1.182], [0.267, 1.201], [0.277, 1.192], [0.288, 1.156],
+      [0.322, 0.977], [0.334, 0.925], [0.345, 0.894], [0.356, 0.882],
+      [0.366, 0.887], [0.377, 0.907], [0.424, 1.045], [0.445, 1.069],
+      [0.463, 1.059], [0.509, 0.979], [0.534, 0.96], [0.553, 0.966],
+      [0.599, 1.013], [0.623, 1.024], [0.712, 0.986], [0.799, 1.008],
+      [0.889, 0.995], [1, 1],
+    ];
+    function spring(p) {
+      if (p <= 0) return SPRING[0][1];
+      if (p >= 1) return SPRING[SPRING.length - 1][1];
+      for (let i = 1; i < SPRING.length; i++) {
+        if (p <= SPRING[i][0]) {
+          const [p0, v0] = SPRING[i - 1], [p1, v1] = SPRING[i];
+          return v0 + (v1 - v0) * ((p - p0) / (p1 - p0));
+        }
+      }
+      return 1;
+    }
+    const easeOutCubic = (p) => 1 - Math.pow(1 - p, 3);
+    const easeInCubic = (p) => p * p * p;
+    const clamp01 = (x) => Math.min(1, Math.max(0, x));
+
+    // Fade in/out windows: [start, fadeInEnd, fadeOutStart, fadeOutEnd]
+    function fade(t, s, fi, fo, ff) {
+      if (t < s || t >= ff) return 0;
+      if (t < fi) return easeOutCubic((t - s) / (fi - s));
+      if (t < fo) return 1;
+      return 1 - easeInCubic((t - fo) / (ff - fo));
+    }
+
+    // Scene duration matches the narration (7.84s) so the film has no black tail.
     window.film = {
-      duration: 5, width: 1920, height: 1080,
+      duration: 7.84, width: 1920, height: 1080,
       frame(t) {
         const title = document.querySelector('.title');
         const lower = document.querySelector('.lower-third');
         const intro = document.querySelector('.intro');
-        // Fade in title
-        if (t < 0.8) title.style.opacity = String(t / 0.8);
-        else title.style.opacity = '1';
-        // Lower third appears at 1s, disappears at 4.2s
-        if (t > 1.0 && t < 4.2) {
-          lower.style.opacity = String(Math.min(1, (t - 1.0) / 0.5));
-        } else if (t >= 4.2 && t < 4.8) {
-          lower.style.opacity = String(Math.max(0, 1 - (t - 4.2) / 0.6));
-        } else {
-          lower.style.opacity = '0';
-        }
-        // Intro appears at 0.5s
-        if (t > 0.5 && t < 1.5) {
-          intro.style.opacity = String(Math.min(1, (t - 0.5) / 0.5));
-        } else if (t >= 1.5 && t < 2.0) {
-          intro.style.opacity = String(Math.max(0, 1 - (t - 1.5) / 0.5));
-        } else {
-          intro.style.opacity = '0';
-        }
+        const backdrop = document.querySelector('.backdrop');
+
+        // Gentle Ken-Burns settle on the backdrop (transform/opacity only).
+        backdrop.style.scale = String(1.08 - 0.08 * easeOutCubic(clamp01(t / 7.84)));
+
+        // Title: eased fade + slight scale settle.
+        const ti = clamp01(t / 0.9);
+        title.style.opacity = String(easeOutCubic(ti));
+        title.style.scale = String(0.97 + 0.03 * easeOutCubic(ti));
+
+        // Lower third: spring on translate/scale (individual properties), eased opacity.
+        const li = fade(t, 1.0, 1.5, 7.0, 7.6);
+        lower.style.opacity = String(li);
+        const lp = clamp01((t - 1.0) / 0.7);
+        lower.style.translate = `-50% ${16 * (1 - spring(lp))}px`;
+        lower.style.scale = String(0.94 + 0.06 * spring(lp));
+
+        // Intro chip: same treatment, earlier window.
+        const ii = fade(t, 0.5, 1.0, 1.5, 2.0);
+        intro.style.opacity = String(ii);
+        const ip = clamp01((t - 0.5) / 0.5);
+        intro.style.translate = `-50% ${-12 * (1 - spring(ip))}px`;
       },
     };
-    if (!window.filmHost) { const t0 = performance.now(); const loop = () => { window.film.frame(((performance.now() - t0) / 1000) % 5); requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
+    if (!window.filmHost) { const t0 = performance.now(); const loop = () => { window.film.frame(((performance.now() - t0) / 1000) % 7.84); requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
   </script>
 </body>
 </html>
