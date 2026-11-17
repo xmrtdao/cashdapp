@@ -2118,7 +2118,12 @@ const toolHandlers = {
   },
 
   // ── MOSS-TTS-Nano: Free text-to-speech (0.1B, CPU, 48kHz) ──────────
-  // Wraps the MOSS-TTS-Nano ONNX inference. Generates WAV audio from text.
+  // Wraps MOSS-TTS-Nano ONNX inference. Generates WAV audio from text.
+  // Voice cloning: pass `prompt_audio_path` (or `ref_audio` / `reference_audio`
+  // / `voice_clone_ref`) with a reference audio file and generation routes
+  // through MOSS's local HTTP server (:18083 /api/generate, mode=voice_clone).
+  // Without a reference audio, falls back to the one-shot ONNX CLI
+  // (infer_onnx.py) with a built-in voice preset.
   // No API key required — runs entirely locally on CPU.
   'tts-generate': async (args) => {
     const text = args?.text || args?.input || '';
@@ -2128,6 +2133,40 @@ const toolHandlers = {
     const pyPath = 'C:\\\\Users\\\\PureTrek\\\\AppData\\\\Local\\\\hermes\\\\hermes-agent\\\\venv\\\\Scripts\\\\python.exe';
     const mossDir = 'C:\\\\Users\\\\PureTrek\\\\Desktop\\\\xmrtdao\\\\MOSS-TTS-Nano';
     const timeout = Math.min(args?.timeout || 120, 300);
+    const refAudio = args?.prompt_audio_path ?? args?.ref_audio ?? args?.reference_audio ?? args?.voice_clone_ref ?? null;
+
+    if (refAudio) {
+      try {
+        const { createReadStream } = await import('node:fs');
+        const form = new FormData();
+        form.append('text', text);
+        form.append('prompt_audio', createReadStream(refAudio));
+        form.append('voice_clone_max_text_tokens', String(args?.voice_clone_max_text_tokens ?? 75));
+        form.append('enable_text_normalization', String(args?.enable_text_normalization ?? '1'));
+        form.append('enable_normalize_tts_text', String(args?.enable_normalize_tts_text ?? '1'));
+        const r = await fetch('http://127.0.0.1:18083/api/generate', { method: 'POST', body: form });
+        if (!r.ok) return { error: `MOSS voice clone failed: ${r.status} ${r.statusText}` };
+        const data = await r.json();
+        const b64 = data.audio_base64 || '';
+        if (!b64) return { error: 'MOSS voice clone returned no audio', details: data };
+        const { writeFileSync } = await import('node:fs');
+        writeFileSync(outputPath, Buffer.from(b64, 'base64'));
+        const { statSync } = await import('node:fs');
+        return {
+          success: true,
+          output_path: outputPath,
+          file_size_bytes: statSync(outputPath).size,
+          text: text.slice(0, 100),
+          voice_clone: true,
+          prompt_audio_path: refAudio,
+          run_status: data.run_status || '',
+          sample_rate: data.sample_rate || 48000,
+        };
+      } catch (err) {
+        return { error: `MOSS voice clone failed: ${err.message?.slice(0, 500) || 'TTS generation failed'}` };
+      }
+    }
+
     try {
       const { execSync } = await import('node:child_process');
       const cmd = `"${pyPath}" infer_onnx.py --text "${text.replace(/"/g, '\\"')}" --output-audio-path "${outputPath}" --enable-wetext-processing 0 --voice ${voice}`;
