@@ -1,0 +1,257 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1920, height=1080">
+  <style>
+    html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: transparent; }
+    #shadow {
+      position: absolute; width: 120px; height: 30px; opacity: 0.25; translate: 0px;
+      background: radial-gradient(closest-side, oklch(0 0 0 / 0.8), transparent 75%);
+    }
+  </style>
+</head>
+<body>
+  <div id="shadow"></div>
+  <script src="../assets/three/three.min.js"></script>
+  <script src="../assets/three/GLTFLoader.js"></script>
+  <script>
+    // The presenter, in 3D: a CC0 Quaternius character (Ultimate Animated
+    // Character Pack, Casual Female) recolored to the film's Vice palette.
+    // Every value below is a function of t alone — the pose is evaluated at
+    // the exact t the host asks for, never advanced by wall-clock deltas.
+    const FILM_T = 61.7;
+
+    // Walk route: [t, x] — linear between points; stops happen naturally.
+    const WP = [
+      [0.0, -90], [0.9, 120],            // walks in from the left
+      [2.5, 360],                        // stops below the title
+      [5.3, 360], [6.5, 180],            // steps aside after pointing
+      [10.95, 180],                      // holds, ready to leap
+      [11.55, 1620], [17.5, 1620],       // leap A landed here; points at the card
+      [19.0, 1700], [22.35, 1700],       // small step; points at the serif card
+      [22.95, 240], [27.2, 240],         // leap B landed here; points at the glitch title
+      [31.9, 640],                       // strolls along the bottom
+      [33.5, 640], [36.0, 1300],         // walks toward the serif title
+      [38.5, 1300], [42.35, 1640],       // points, then walks right
+      [42.95, 260], [48.0, 260],         // leap C landed here; tracks the grade divider
+      [51.55, 300],                      // small step, ready to leap
+      [52.15, 1480], [58.2, 1480],       // leap D landed here; points at chips and title
+      [61.3, 2010],                      // walks off to the right
+    ];
+
+    // Super-leaps: the library transition swallows the character mid-leap.
+    const JUMPS = [
+      { t0: 10.95, t1: 11.55, x0: 180,  x1: 1620 }, // through the colour wipe
+      { t0: 22.35, t1: 22.95, x0: 1700, x1: 240 },  // through the shutter
+      { t0: 42.35, t1: 42.95, x0: 1640, x1: 260 },  // through the colour wipe
+      { t0: 51.55, t1: 52.15, x0: 340,  x1: 1480 }, // through the shutter
+    ];
+
+    // Pointing windows: fixed screen angle (deg, 0 = right, negative = up)
+    // or a moving target function (the sweeping grade divider).
+    const POINTS = [
+      { s: 2.5,  e: 5.3,  a: -40 },   // intro title
+      { s: 12.3, e: 16.3, a: -174 },  // Ava lower-third card
+      { s: 19.0, e: 21.9, a: -155 },  // elegant serif card
+      { s: 23.6, e: 26.6, a: -33 },   // glitch title
+      { s: 36.0, e: 38.5, a: -126 },  // THE WEB serif title
+      { s: 46.8, e: 48.4, target: (t) => [  // the grade divider sweeping by
+        4 + 1912 * (1 - Math.pow(1 - Math.min(1, Math.max(0, (t - 46.8) / 1.2)), 3)), 560],
+      },
+      { s: 53.0, e: 55.0, a: -124 },  // outro recap chips
+      { s: 55.6, e: 57.6, a: -141 },  // end title
+    ];
+
+    function xAt(t) {
+      for (const j of JUMPS) {
+        if (t >= j.t0 && t <= j.t1) {
+          const p = (t - j.t0) / (j.t1 - j.t0);
+          return j.x0 + (j.x1 - j.x0) * (p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2);
+        }
+      }
+      if (t <= WP[0][0]) return WP[0][1];
+      for (let i = 1; i < WP.length; i++) {
+        if (t <= WP[i][0]) {
+          const [t0, x0] = WP[i - 1], [t1, x1] = WP[i];
+          return x0 + (x1 - x0) * ((t - t0) / (t1 - t0));
+        }
+      }
+      return WP[WP.length - 1][1];
+    }
+    function jumpAt(t) {
+      for (const j of JUMPS) if (t >= j.t0 && t <= j.t1) return { p: (t - j.t0) / (j.t1 - j.t0) };
+      return null;
+    }
+    const movingAt = (t) => Math.abs(xAt(Math.min(FILM_T, t + 0.08)) - xAt(Math.max(0, t - 0.08))) > 12 && !jumpAt(t);
+    const clamp01 = (x) => Math.min(1, Math.max(0, x));
+
+    // Precompute, once, from the pure functions above: smoothed moving state
+    // and the walk phase (time while actually walking) at 120 Hz.
+    const DT = 1 / 120, N = Math.ceil(FILM_T / DT) + 1;
+    const smoothMoving = new Float32Array(N);
+    const walkPhase = new Float32Array(N);
+    (function precompute() {
+      const tau = 0.15, k1 = 1 - Math.exp(-DT / tau), cadence = 3.1;
+      let s = 0, ph = 0;
+      for (let i = 0; i < N; i++) {
+        const t = i * DT;
+        s += ( Number(movingAt(t)) - s) * k1;
+        if (movingAt(t)) ph += DT * cadence;
+        smoothMoving[i] = s;
+        walkPhase[i] = ph;
+      }
+    })();
+    const smoothAt = (t) => smoothMoving[Math.min(N - 1, Math.max(0, Math.round(t / DT)))];
+    const phaseAt = (t) => walkPhase[Math.min(N - 1, Math.max(0, Math.round(t / DT)))];
+
+    // Screen px -> world m at the character plane.
+    const CAM_Z = 10.5, FOV = 40;
+    const VIEW_H = 2 * CAM_Z * Math.tan((FOV / 2) * Math.PI / 180);
+    const PX = VIEW_H / 1080;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+    renderer.setPixelRatio(1);
+    renderer.setSize(1920, 1080);
+    renderer.setClearColor(0x000000, 0);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(FOV, 1920 / 1080, 0.1, 100);
+    camera.position.set(0, 3.32, CAM_Z);
+    camera.lookAt(0, 3.27, 0);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+    const key = new THREE.DirectionalLight(0xffffff, 0.9);
+    key.position.set(2, 4, 6);
+    scene.add(key);
+    const rim = new THREE.DirectionalLight(0xff4fa0, 0.35); // Vice pink rim light
+    rim.position.set(-3, 2, -4);
+    scene.add(rim);
+
+    let mixer = null, actions = {}, character = null;
+    let arms = null; // {upper, lower, fist} for the currently visible side
+    // The host awaits film.ready before drawing; it is a promise that
+    // resolves when the GLB (and its animation clips) are in hand.
+    let readyResolve, readyReject;
+    const readyPromise = new Promise((r, j) => { readyResolve = r; readyReject = j; });
+    const loader = new THREE.GLTFLoader();
+    loader.load('../assets/three/character.glb', (gltf) => {
+      character = gltf.scene;
+      character.traverse((o) => {
+        if (o.isMesh) { o.frustumCulled = false; }
+      });
+      // Vice City palette: pink crop top, light shorts, warm skin, dark hair.
+      const tint = { Shirt: 0xff3fa4, Pants: 0x9adbe8, Belt: 0x1a1030, Hair: 0x241b2e, Skin: 0xffcfae, Face: 0x2a1a12 };
+      character.traverse((o) => {
+        if (o.isMesh && o.material && tint[o.material.name]) o.material.color.setHex(tint[o.material.name]);
+      });
+      scene.add(character);
+      mixer = new THREE.AnimationMixer(character);
+      for (const clip of gltf.animations) actions[clip.name] = mixer.clipAction(clip);
+      const bones = {};
+      character.traverse((o) => { if (o.isBone) bones[o.name] = o; });
+      arms = {
+        L: { upper: bones.UpperArmL, lower: bones.LowerArmL, fist: bones.FistL },
+        R: { upper: bones.UpperArmR, lower: bones.LowerArmR, fist: bones.FistR },
+      };
+      for (const name of ['Idle', 'Walk', 'Jump']) if (actions[name]) actions[name].play();
+      readyResolve();
+      window.film.ready = true;
+    }, undefined, (err) => { document.title = 'GLB error: ' + err; readyReject(new Error('character.glb failed to load: ' + err)); });
+
+    // Aim a bone (and the chain child after it) so its segment points at a
+    // world-space target: measure the current direction, build the world-space
+    // correction quaternion, conjugate it into the bone's local space.
+    const _shoulder = new THREE.Vector3(), _end = new THREE.Vector3(),
+          _cur = new THREE.Vector3(), _des = new THREE.Vector3(),
+          _qW = new THREE.Quaternion(), _pQ = new THREE.Quaternion(),
+          _delta = new THREE.Quaternion();
+    function aimSegment(bone, child, target) {
+      bone.getWorldPosition(_shoulder);
+      child.getWorldPosition(_end);
+      _cur.copy(_end).sub(_shoulder);
+      if (_cur.lengthSq() < 1e-8) return;
+      _cur.normalize();
+      _des.copy(target).sub(_shoulder);
+      if (_des.lengthSq() < 1e-8) return;
+      _des.normalize();
+      _qW.setFromUnitVectors(_cur, _des);
+      bone.parent.getWorldQuaternion(_pQ);
+      _delta.copy(_pQ).invert().multiply(_qW).multiply(_pQ);
+      bone.quaternion.premultiply(_delta);
+      character.updateMatrixWorld(true);
+    }
+    // Screen point -> world point on the character plane.
+    const screenToWorld = (tx, ty) =>
+      new THREE.Vector3((tx - 960) * PX, 3.32 - (ty - 540) * PX, 0);
+
+    window.film = {
+      duration: FILM_T, width: 1920, height: 1080, ready: readyPromise,
+      frame(t) {
+        if (!character) return;
+        const x = xAt(t);
+        const j = jumpAt(t);
+        const airborne = j !== null;
+        const dx = xAt(Math.min(FILM_T, t + 0.08)) - xAt(Math.max(0, t - 0.08));
+        const m = smoothAt(t);              // 0..1 idle<->walk blend
+        const lift = airborne ? 1.35 * Math.sin(Math.PI * j.p) : 0; // metres
+
+        // What is being pointed at (if anything) — decides the facing.
+        const pt = POINTS.find((p) => t >= p.s && t <= p.e);
+        let ptx = null, pty = null;
+        if (pt) {
+          if (pt.target) { [ptx, pty] = pt.target(t); }
+          else {
+            ptx = x + 600 * Math.cos((pt.a * Math.PI) / 180);
+            pty = 880 + 600 * Math.sin((pt.a * Math.PI) / 180);
+          }
+        }
+        // Face the walk direction, or the point target while pointing.
+        const flip = pt ? (ptx >= x ? 1 : -1) : (dx < -0.5 ? -1 : 1);
+
+        // Root: screen position + leap height. Face the point target while
+        // pointing; face the viewer otherwise (slight lean toward the walk
+        // direction, stronger mid-stride, and a bank toward the leap).
+        character.position.set((x - 960) * PX, lift, 0);
+        character.rotation.y = pt ? (flip === 1 ? 2.2 : -2.2)
+          : airborne ? (dx < 0 ? -1.9 : 1.9)
+          : flip * (0.15 + 0.45 * m);
+
+        // Clip evaluation at exact times (no delta accumulation).
+        const idle = actions.Idle, walk = actions.Walk, jump = actions.Jump;
+        if (idle) { idle.time = t % idle.getClip().duration; idle.weight = airborne ? 0 : 1 - m; }
+        if (walk) { walk.time = phaseAt(t) % walk.getClip().duration; walk.weight = airborne ? 0 : m; }
+        if (jump) {
+          if (airborne) { jump.time = (j.p) * jump.getClip().duration; jump.weight = 1; }
+          else jump.weight = 0;
+        }
+        mixer.update(0);
+        character.updateMatrixWorld(true);
+
+        // Pointing: aim the visible arm's segments at the target, over the
+        // base clip pose. Reset happens next frame when the clips re-evaluate.
+        if (pt && arms) {
+          const chain = flip === 1 ? arms.R : arms.L;
+          const target = screenToWorld(ptx, pty);
+          aimSegment(chain.upper, chain.lower, target);
+          aimSegment(chain.lower, chain.fist, target);
+        }
+
+        renderer.render(scene, camera);
+
+        // CSS shadow under the feet, shrinking when airborne.
+        const sh = document.getElementById('shadow');
+        sh.style.translate = `${x - 60}px ${1002 - 4}px`;
+        sh.style.opacity = String(0.25 * (1 - lift / 2.2));
+      },
+    };
+    if (!window.filmHost) {
+      const t0 = performance.now();
+      const loop = () => { window.film.frame(((performance.now() - t0) / 1000) % FILM_T); requestAnimationFrame(loop); };
+      requestAnimationFrame(loop);
+    }
+  </script>
+</body>
+</html>
