@@ -2144,13 +2144,36 @@ const toolHandlers = {
         form.append('voice_clone_max_text_tokens', String(args?.voice_clone_max_text_tokens ?? 75));
         form.append('enable_text_normalization', String(args?.enable_text_normalization ?? '1'));
         form.append('enable_normalize_tts_text', String(args?.enable_normalize_tts_text ?? '1'));
-        const r = await fetch('http://127.0.0.1:18083/api/generate', { method: 'POST', body: form });
-        if (!r.ok) return { error: `MOSS voice clone failed: ${r.status} ${r.statusText}` };
-        const data = await r.json();
-        const b64 = data.audio_base64 || '';
-        if (!b64) return { error: 'MOSS voice clone returned no audio', details: data };
+        // Use the streaming endpoint so inference runs in a background thread,
+        // keeping the server event loop free and preventing supervisor health checks
+        // from killing the service mid-generation.
+        const startResp = await fetch('http://127.0.0.1:18083/api/generate-stream/start', { method: 'POST', body: form });
+        if (!startResp.ok) return { error: `MOSS voice clone start failed: ${startResp.status} ${startResp.statusText}` };
+        const startData = await startResp.json();
+        const streamId = startData.stream_id;
+        if (!streamId) return { error: 'MOSS voice clone: no stream_id returned', details: startData };
+        const resultUrl = startData.result_url || `http://127.0.0.1:18083/api/generate-stream/${streamId}/result`;
+        // Poll for completion, keeping the overall request alive until audio is ready.
+        const timeoutMs = Math.min(args?.timeout ?? 300, 300) * 1000;
+        const pollInterval = 2000;
+        const pollTimeout = Date.now() + timeoutMs;
+        let audioBase64 = '';
+        while (Date.now() < pollTimeout) {
+          await new Promise(r => setTimeout(r, pollInterval));
+          try {
+            const pollResp = await fetch(resultUrl);
+            if (!pollResp.ok) continue;
+            const pollData = await pollResp.json();
+            audioBase64 = pollData.audio_base64 || '';
+            if (audioBase64) break;
+            if (pollData.failed) return { error: `MOSS voice clone failed: ${pollData.run_status || 'Unknown error'}` };
+          } catch {}
+        }
+        // Close the stream best-effort so the server can release resources.
+        try { await fetch(`http://127.0.0.1:18083/api/generate-stream/${streamId}/close`, { method: 'POST' }); } catch {}
+        if (!audioBase64) return { error: 'MOSS voice clone: no audio returned after timeout' };
         const { writeFileSync } = await import('node:fs');
-        writeFileSync(outputPath, Buffer.from(b64, 'base64'));
+        writeFileSync(outputPath, Buffer.from(audioBase64, 'base64'));
         const { statSync } = await import('node:fs');
         return {
           success: true,
@@ -2159,11 +2182,11 @@ const toolHandlers = {
           text: text.slice(0, 100),
           voice_clone: true,
           prompt_audio_path: refAudio,
-          run_status: data.run_status || '',
-          sample_rate: data.sample_rate || 48000,
+          run_status: 'completed',
+          sample_rate: 48000,
         };
       } catch (err) {
-        return { error: `MOSS voice clone failed: ${err.message?.slice(0, 500) || 'TTS generation failed'}` };
+        return { error: `MOSS voice clone failed: ${err.message?.slice(0, 500) || 'TTS generation failed'}. If the error mentions 'libtorchcodec' or 'torchcodec', the MOSS server's audio processing environment is broken (missing or incompatible libraries). Install a compatible torchcodec version or check your torchaudio environment.` };
       }
     }
 
