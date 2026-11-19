@@ -191,7 +191,7 @@ server.on('upgrade', (req, socket, head) => {
   if (req.url.startsWith('/realtime/v1')) {
     wss.handleUpgrade(req, socket, head, (ws) => {
       console.log('[realtime] ws connected');
-      ws.send(JSON.stringify({ event: 'phx_reply', payload: { status: 'ok' } }));
+      ws.send(JSON.stringify({ event: 'phx_reply', payload: { status: 'ok', response: { postgres_changes: [] } } }));
       ws.on('message', (data) => {
         try {
           const msg = JSON.parse(data.toString());
@@ -199,7 +199,7 @@ server.on('upgrade', (req, socket, head) => {
           if (msg.event === 'heartbeat') {
             ws.send(JSON.stringify({ event: 'phx_reply', payload: { status: 'ok' }, ref: msg.ref }));
           } else if (msg.event === 'phx_join' || msg.event === 'phx_leave') {
-            ws.send(JSON.stringify({ event: msg.event === 'phx_join' ? 'phx_reply' : 'phx_close', payload: { status: 'ok' }, ref: msg.ref, topic: msg.topic }));
+            ws.send(JSON.stringify({ event: msg.event === 'phx_join' ? 'phx_reply' : 'phx_close', payload: { status: 'ok', response: { postgres_changes: [] } }, ref: msg.ref, topic: msg.topic }));
           }
         } catch { /* ignore */ }
       });
