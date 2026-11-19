@@ -358,7 +358,7 @@ const SCHEMA_DRIFT_REFS = [
   // knowledgeMaps targets
   'knowledge.context_session_snapshots','knowledge.conversation_context','knowledge.conversation_memory',
   'knowledge.conversation_messages','knowledge.conversation_sessions','knowledge.conversation_summaries',
-  'knowledge.knowledge_entities','knowledge.learning_models','knowledge.learning_patterns',
+  'app.knowledge_entities','knowledge.learning_models','knowledge.learning_patterns',
   'knowledge.learning_sessions','knowledge.long_term_memory_packs','knowledge.memories',
   'knowledge.memory_contexts','knowledge.recent_conversation_messages','knowledge.shared_context',
   'knowledge.user_context_profiles','knowledge.user_preferences','knowledge.user_profiles','knowledge.user_tiers',
@@ -366,7 +366,7 @@ const SCHEMA_DRIFT_REFS = [
   'agent.agent_activities','agent.agent_certifications','agent.agent_conversations','agent.agent_memory',
   'agent.agent_messages','agent.agent_performance_metrics','agent.agent_performance_reviews',
   'agent.agent_profiles','agent.agent_registry','agent.agent_relationships','agent.agent_security_flags',
-  'agent.agent_skills','agent.agent_tasks','agent.agents','agent.generated_agents',
+  'agent.agent_skills','agent.agents','agent.generated_agents',
   // other relay references
   'app.agent_activity','app.agent_activity_summary','app.agent_api_keys','app.agents',
   'app.chat_messages','public.work_queue','public.registry_agents','public.cac_credentials',
@@ -7010,8 +7010,8 @@ app.get('/api/suite/tasks', async (req, res) => {
   trackRequest('/api/suite/tasks');
   const run = async (table, full) => {
     const cols = full
-      ? `id, title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, updated_at, stage_started_at, auto_advance_threshold_hours, progress_percentage, completed_checklist_items, organization_id, created_by_user_id, created_at`
-      : `id, title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, updated_at, created_at`;
+      ? `id, title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, updated_at, stage_started_at, auto_advance_threshold_hours, progress_percentage, completed_checklist_items, organization_id, created_by_user_id, created_at, type, parent_task_id, depends_on, estimated_hours, spent_hours`
+      : `id, title, description, stage, status, priority, category, assignee_agent_id, blocking_reason, updated_at, created_at, type, parent_task_id, depends_on`;
     let sql = `SELECT ${cols} FROM ${table} WHERE 1=1`;
     const params = []; let idx = 0;
     if (req.query.organization_id && full) { idx++; sql += ` AND organization_id = $${idx}`; params.push(req.query.organization_id); }
@@ -7368,10 +7368,24 @@ const { listHarnesses, getHarness, upsertHarness, updateHarnessHealth, updateHar
 app.patch('/api/suite/tasks/:id', async (req, res) => {
   trackRequest('PATCH /api/suite/tasks/:id');
   try {
-    const allowed = ['title','description','stage','status','priority','category','assignee_agent_id','blocking_reason','stage_started_at','auto_advance_threshold_hours','progress_percentage','completed_checklist_items'];
+    const allowed = ['title','description','stage','status','priority','category','assignee_agent_id','blocking_reason','stage_started_at','auto_advance_threshold_hours','progress_percentage','completed_checklist_items','type','parent_task_id','depends_on','estimated_hours','spent_hours'];
+    // Status transition guard (OpenProject-style). Terminal states (DONE/COMPLETED/CLOSED/CANCELLED)
+    // cannot be moved back to an active state unless force=true is passed.
+    const TERMINAL = new Set(['DONE','COMPLETED','CLOSED','CANCELLED']);
+    const ACTIVE = new Set(['PENDING','IN_PROGRESS','REVIEW','BLOCKED','PLAN','PLANNING','EXECUTION','EXECUTE','INTEGRATE','DISCUSS','COMPLETION']);
+    const body = req.body || {};
+    if (body.status && body.force !== true) {
+      // look up current status
+      let cur = await queryLocalPg('SELECT status FROM app.tasks WHERE id = $1', [req.params.id]).catch(() => ({ rows: [] }));
+      if (!cur.rows.length) cur = await queryLocalPg('SELECT status FROM public.tasks WHERE id = $1', [req.params.id]).catch(() => ({ rows: [] }));
+      const current = cur.rows[0]?.status;
+      if (current && TERMINAL.has(current) && ACTIVE.has(body.status)) {
+        return res.status(400).json({ error: `Cannot transition from terminal status ${current} to ${body.status} without force=true` });
+      }
+    }
     const sets = []; const params = []; let idx = 0;
-    for (const [k, v] of Object.entries(req.body || {})) {
-      if (allowed.includes(k)) { idx++; params.push(v); sets.push(`${k} = $${idx}`); }
+    for (const [k, v] of Object.entries(body)) {
+      if (allowed.includes(k) && k !== 'force') { idx++; params.push(v); sets.push(`${k} = $${idx}`); }
     }
     if (!sets.length) return res.status(400).json({ error: 'No valid fields' });
     params.push(req.params.id);
@@ -20832,7 +20846,7 @@ app.post('/api/migrate/copy-data', async (req, res) => {
     const results = {};
     // knowledge schema — explicit column lists matching public schema
     const knowledgeMaps = {
-      'knowledge_entities': { src: 'knowledge.knowledge_entities', cols: ['id','name','entity','metadata','created_at','updated_at'] },
+      'knowledge_entities': { src: 'app.knowledge_entities', cols: ['id','name','entity','metadata','created_at','updated_at'] },
       'shared_context': { src: 'knowledge.shared_context', cols: ['id','context_key','context_type','value','description','tags','last_updated_by','created_at','updated_at'] },
       'memories': { src: 'knowledge.memories', cols: ['id','agent_id','kind','content','metadata','importance','embedding','created_at','updated_at'] },
       'memory_contexts': { src: 'knowledge.memory_contexts', cols: ['id','user_id','session_id','content','context_type','importance_score','metadata','embedding','timestamp','created_at','updated_at'] },
@@ -20867,7 +20881,6 @@ app.post('/api/migrate/copy-data', async (req, res) => {
       'agent_profiles': { src: 'agent.agent_profiles', cols: ['id','agent_id','name','role','description','capabilities','status','metadata','created_at','updated_at'] },
       'agent_registry': { src: 'agent.agent_registry', cols: ['id','agent_id','agent_name','agent_type','status','version','endpoint','capabilities','registered_at','last_seen_at','metadata'] },
       'agent_skills': { src: 'agent.agent_skills', cols: ['id','agent_id','skill_name','skill_level','description','metadata','created_at','updated_at'] },
-      'agent_tasks': { src: 'agent.agent_tasks', cols: ['id','agent_id','title','description','status','priority','category','assigned_at','completed_at','result','metadata','created_at','updated_at'] },
       'agent_memory': { src: 'agent.agent_memory', cols: ['id','agent_id','memory_type','content','context','importance','metadata','created_at','expires_at'] },
       'agent_conversations': { src: 'agent.agent_conversations', cols: ['id','agent_id','session_id','message','response','model_used','tokens_used','metadata','created_at'] },
       'agent_messages': { src: 'agent.agent_messages', cols: ['id','agent_id','channel','message_type','content','metadata','created_at'] },
